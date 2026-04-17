@@ -2,6 +2,8 @@
 
  [中文说明](./README.zh-CN.md)
 
+ [![Watch the demo](https://img.youtube.com/vi/2s6aVpGiwaQ/0.jpg)](https://youtu.be/2s6aVpGiwaQ)
+
 `open-computer-use` is an open-source `Computer Use` service exposed over `MCP`, so any AI agent or MCP client can call it directly and use computer interaction capabilities on macOS.
 
 This project was inspired by OpenAI's recently released [Codex Computer Use](https://openai.com/index/codex-for-almost-everything/). It showed that non-intrusive CUA can be built on top of macOS Accessibility, which is why I decided to build an open-source version.
@@ -56,4 +58,4 @@ open-computer-use -h
 
 ## License
 
-[MIT](./LICENSE).
+[MIT](./LICENSE)

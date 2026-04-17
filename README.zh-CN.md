@@ -2,6 +2,8 @@
 
 [English Version](./README.md)
 
+[![查看演示视频](https://img.youtube.com/vi/2s6aVpGiwaQ/0.jpg)](https://youtu.be/2s6aVpGiwaQ)
+
 `open-computer-use` 是一个开源的 `Computer Use` 服务，已经包装成 `MCP` 协议，支持所有的 AI Agent 或 MCP Client 快速调用，实现 macOS 上的 `Computer Use` 能力
 
 项目的背后是 OpenAI 刚发布的 [Codex Computer Use](https://openai.com/index/codex-for-almost-everything/)，让我看到了基于 Accessibility 可以实现非抢占式 CUA 能力，因此决定复刻一个开源版本
