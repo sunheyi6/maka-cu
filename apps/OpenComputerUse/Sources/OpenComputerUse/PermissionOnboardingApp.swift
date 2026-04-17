@@ -807,11 +807,15 @@ final class PermissionAccessoryPanelController {
 
     private func copyAXElement(_ element: AXUIElement, attribute: String) -> AXUIElement? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == AXUIElementGetTypeID()
+        else {
             return nil
         }
 
-        return value as? AXUIElement
+        return (value as! AXUIElement)
     }
 
     private func copyAXArray(_ element: AXUIElement, attribute: String) -> [AXUIElement]? {
