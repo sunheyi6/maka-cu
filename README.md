@@ -1,26 +1,26 @@
 # open-computer-use
 
-`open-computer-use` 是一个开源的 `Computer Use` 服务，已经包装成 `MCP` 协议，支持所有的AI Agent或MCP Client快速调用实现 `Computer Use` 的能力。
+`open-computer-use` is an open-source `Computer Use` service exposed over `MCP`, so any AI agent or MCP client can call it directly and use computer interaction capabilities on macOS.
 
-项目的背后是 OpenAI 刚发布的 [Codex Computer Use](https://openai.com/index/codex-for-almost-everything/) ，让我看到了基于 Accessibility 可以实现非抢占式的CUA能力，因此决定复刻一个开源版本。
+This project was inspired by OpenAI's recently released [Codex Computer Use](https://openai.com/index/codex-for-almost-everything/). It showed that non-intrusive CUA can be built on top of macOS Accessibility, which is why I decided to build an open-source version.
 
-在这期间我利用了之前写[harness的模版](https://github.com/iFurySt/harness-template)开启了这个新的项目，这是一个template可以快速拉起一个面向AI的repo，非常适合100% AI-Generated的项目，也是这一个月来我们最大的实践和收获，现在我们可以基于这套方法论快速实现任何的东西，有兴趣的可以自己尝试一下，我也写了一片[文章](https://www.ifuryst.com/blog/2026/speedrunning-the-ai-era/)专门介绍这套方法论的
+I bootstrapped this repo with my earlier [harness template](https://github.com/iFurySt/harness-template). It is a template for spinning up an AI-oriented repository quickly, especially for projects that are close to 100% AI-generated. This has been one of our most useful workflows over the past month, and it now lets us ship new ideas very quickly. If you are interested, I also wrote [a post](https://www.ifuryst.com/blog/2026/speedrunning-the-ai-era/) about the methodology behind it.
 
 ## Quick Start
 
-先全局安装：
+Install it globally first:
 
 ```bash
 npm i -g open-computer-use
 ```
 
-第一次使用前，给宿主终端或客户端授予 macOS 的 `Accessibility` 和 `Screen Recording` 权限；不确定当前状态时，直接运行：
+Before first use, grant macOS `Accessibility` and `Screen Recording` permission to the `Open Computer Use.app` installed by `npm install -g open-computer-use`. That global npm install location should be treated as the long-term stable permission target. The development copy at `dist/Open Computer Use.app` should only be used as a local debugging fallback, not as the long-term app identity. If you are not sure about the current state, run:
 
 ```bash
 open-computer-use doctor
 ```
 
-接着把它配到你的 MCP client 里：
+Then add it to your MCP client:
 
 ```json
 {
@@ -33,25 +33,25 @@ open-computer-use doctor
 }
 ```
 
-## 更多
+## More
 
-除了直接用上面的 MCP JSON 配置，你也可以用一些内置子命令：
+Besides using the MCP JSON config above, you can also use the built-in subcommands:
 
 ```bash
-# 一键安装到Claude，写到~/.claude.json中
+# Install into Claude Code by writing to ~/.claude.json
 open-computer-use install-claude-mcp
-# 一键安装到Codex，写到~/.codex/config.toml中
+# Install into Codex by writing to ~/.codex/config.toml
 open-computer-use install-codex-mcp
-# 一键安装到Codex插件，主要方便在Codex App中使用，有装这个就不需要重复装codex-mcp了，写到~/.codex/plugins/cache/openai-bundled/computer-use/和~/.codex/config.toml中
+# Install as a Codex plugin, mainly for Codex App usage; if you use this, you usually do not need install-codex-mcp as well
 open-computer-use install-codex-plugin
-# 直接启动MCP server
+# Start the MCP server directly
 open-computer-use mcp
-# 检查权限并在缺失时拉起引导
+# Check permissions; onboarding only opens when something is missing
 open-computer-use doctor
-# 查看帮助
+# Show help
 open-computer-use -h
 ```
 
 ## License
 
-[MIT](./LICENSE)。
+[MIT](./LICENSE).
