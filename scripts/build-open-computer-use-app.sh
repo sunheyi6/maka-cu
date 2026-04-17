@@ -152,7 +152,7 @@ cat > "${contents_dir}/Info.plist" <<PLIST
   <key>CFBundleIconFile</key>
   <string>${bundle_icon_name}</string>
   <key>CFBundleIdentifier</key>
-  <string>dev.opencodex.OpenComputerUse</string>
+  <string>com.ifuryst.opencomputeruse</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

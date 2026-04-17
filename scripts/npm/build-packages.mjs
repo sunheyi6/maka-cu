@@ -298,7 +298,7 @@ This package bundles a ready-to-run \`${appBundleName}\`, the Codex plugin metad
 npm install -g ${packageName}
 \`\`\`
 
-After install, run \`open-computer-use doctor\` first. If macOS \`Accessibility\` or \`Screen Recording\` permission is missing, it will open the permission onboarding window and tell you what still needs to be granted.
+After install, run \`open-computer-use doctor\` first. If macOS \`Accessibility\` or \`Screen Recording\` permission is missing, it will open the permission onboarding window and tell you what still needs to be granted. If everything is already granted, it just prints the status and exits.
 
 ## MCP config
 
@@ -315,7 +315,7 @@ If your MCP client accepts a stdio-style \`mcpServers\` JSON config, this is the
 }
 \`\`\`
 
-In practice, using this package as MCP is: global install, add the JSON config, then grant macOS \`Accessibility\` and \`Screen Recording\` permission to the host terminal or app on first use.
+In practice, using this package as MCP is: global install, add the JSON config, then grant macOS \`Accessibility\` and \`Screen Recording\` permission to the bundled npm-installed \`Open Computer Use.app\` on first use.
 
 Package page: https://www.npmjs.com/package/${packageName}
 
@@ -334,6 +334,7 @@ open-computer-use install-claude-mcp
 open-computer-use install-codex-mcp
 
 # Check permissions first; if Accessibility / Screen Recording is missing, open the permission onboarding window
+# If both are already granted, this just prints the status and exits
 open-computer-use doctor
 
 # Start the stdio MCP server for Claude Desktop, Cursor, Cline, or another MCP client

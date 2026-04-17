@@ -46,7 +46,9 @@ enum OpenComputerUseMain {
         case .version:
             print(resolvedOpenComputerUseVersion())
         case .launchOnboarding:
-            PermissionOnboardingApp.launch()
+            if !PermissionDiagnostics.current().allGranted {
+                PermissionOnboardingApp.launch()
+            }
         }
     }
 

@@ -5,7 +5,7 @@
 ## 当前目录结构
 
 - `apps/OpenComputerUse`
-  主入口，负责 `mcp`、`doctor`、`list-apps`、`snapshot`、`turn-ended` 等 CLI 命令，以及 `-h` / `--help` / `-v` / `--version` 这类全局参数；不带参数启动时默认进入无 Dock 图标的 app 模式权限引导窗口，`doctor` 在检测到缺失权限时也会直接拉起这套 onboarding UI。
+  主入口，负责 `mcp`、`doctor`、`list-apps`、`snapshot`、`turn-ended` 等 CLI 命令，以及 `-h` / `--help` / `-v` / `--version` 这类全局参数；不带参数启动时会先检查权限，只有缺失时才进入无 Dock 图标的 app 模式权限引导窗口，`doctor` 也只会在检测到缺失权限时拉起这套 onboarding UI。
 - `apps/OpenComputerUseFixture`
   本地 GUI fixture app，用来承载低风险、可预测的点击/输入/滚动/拖拽验证路径。
 - `apps/OpenComputerUseSmokeSuite`
@@ -29,9 +29,9 @@
 
 - `OpenComputerUse` 默认 app 模式会拉起 `PermissionOnboardingApp`。
 - app bundle 以 `LSUIElement` agent-style 形态运行，默认不在 Dock 暴露常驻图标，但仍可按需显示权限窗口。
-- 主窗口负责渲染 `Accessibility` / `Screen & System Audio Recording` 两类权限卡片、`Allow` / `Done` 状态和 relaunch 后的状态收敛。
-- 辅助 drag panel 会跳转到对应的 `System Settings` 页面；默认保持在窗口右侧内容区下方居中，并优先跟随当前权限页 `+ / -` 控制行的垂直位置，只有拿不到控件几何时才回退到窗口底边，避免在不同权限页里掉到屏幕最下方。
-- 权限状态优先基于 TCC 持久授权记录判断，避免 CLI 子进程与 GUI app 对授权状态看到不一致的结果。
+- 主窗口负责渲染 `Accessibility` / `Screen & System Audio Recording` 两类权限卡片、`Allow` / `Done` 状态和 relaunch 后的状态收敛；当两项权限都已完成时会自动关闭，不再要求用户手动退出。
+- 辅助 drag panel 会跳转到对应的 `System Settings` 页面；默认保持在窗口右侧内容区下方居中并固定贴近窗口底边，不再依赖实时扫描权限页内部 `+ / -` 控件行；窗口层级上会显式排在当前 `System Settings` 窗口之上，避免被权限列表内容盖住，同时尽量减少对系统设置自身滚动区域的干扰。
+- 权限状态优先基于 TCC 持久授权记录判断，避免 CLI 子进程与 GUI app 对授权状态看到不一致的结果；同时会兼容 bundle-id 和路径型授权记录，并在源码启动场景下优先认 npm 全局安装后的稳定 `.app` 路径，仓库内 `dist/` 产物只作为开发兜底。
 
 ### 2. MCP 层
 

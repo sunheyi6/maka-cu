@@ -99,11 +99,40 @@ public struct PermissionDiagnostics: Sendable {
 
 public enum PermissionSupport {
     public static let bundleDisplayName = "Open Computer Use"
-    public static let bundleIdentifier = "dev.opencodex.OpenComputerUse"
+    public static let bundleIdentifier = "com.ifuryst.opencomputeruse"
+    private static let npmPackageNames = [
+        "open-computer-use",
+        "open-computer-use-mcp",
+        "open-codex-computer-use-mcp",
+    ]
 
     public static func currentAppBundleURL() -> URL? {
-        let bundleURL = Bundle.main.bundleURL
-        return bundleURL.pathExtension == "app" ? bundleURL : nil
+        if let bundleURL = resolvedMainAppBundleURL() {
+            return bundleURL
+        }
+
+        return preferredInstalledAppBundleURL() ?? fallbackDevelopmentAppBundleURL()
+    }
+
+    public static func currentPermissionClients() -> [PermissionClientRecord] {
+        var records: [PermissionClientRecord] = []
+
+        if let bundleURL = currentAppBundleURL()?.standardizedFileURL {
+            records.append(PermissionClientRecord(identifier: bundleURL.path, type: 1))
+
+            if let bundle = Bundle(url: bundleURL),
+               let resolvedBundleIdentifier = bundle.bundleIdentifier {
+                records.append(PermissionClientRecord(identifier: resolvedBundleIdentifier, type: 0))
+            }
+        } else if let mainBundleIdentifier = Bundle.main.bundleIdentifier {
+            records.append(PermissionClientRecord(identifier: mainBundleIdentifier, type: 0))
+        }
+
+        if !records.contains(where: { $0.identifier == bundleIdentifier && $0.type == 0 }) {
+            records.append(PermissionClientRecord(identifier: bundleIdentifier, type: 0))
+        }
+
+        return records
     }
 
     public static func openSystemSettings(for permission: SystemPermissionKind) {
@@ -114,6 +143,108 @@ public enum PermissionSupport {
         let options: NSDictionary = ["AXTrustedCheckOptionPrompt": true]
         _ = AXIsProcessTrustedWithOptions(options)
     }
+
+    private static func preferredInstalledAppBundleURL() -> URL? {
+        for nodeModulesRoot in npmGlobalNodeModulesRoots() {
+            for packageName in npmPackageNames {
+                let candidate = nodeModulesRoot
+                    .appendingPathComponent(packageName, isDirectory: true)
+                    .appendingPathComponent("dist", isDirectory: true)
+                    .appendingPathComponent("\(bundleDisplayName).app", isDirectory: true)
+
+                if isValidAppBundle(candidate) {
+                    return candidate
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func fallbackDevelopmentAppBundleURL() -> URL? {
+        guard let executableURL = Bundle.main.executableURL?.standardizedFileURL else {
+            return nil
+        }
+
+        var directoryURL = executableURL.deletingLastPathComponent()
+
+        while directoryURL.path != "/" {
+            let candidate = directoryURL
+                .appendingPathComponent("dist", isDirectory: true)
+                .appendingPathComponent("\(bundleDisplayName).app", isDirectory: true)
+
+            if isValidAppBundle(candidate) {
+                return candidate
+            }
+
+            let parentURL = directoryURL.deletingLastPathComponent()
+            if parentURL == directoryURL {
+                break
+            }
+            directoryURL = parentURL
+        }
+
+        return nil
+    }
+
+    private static func npmGlobalNodeModulesRoots() -> [URL] {
+        let env = ProcessInfo.processInfo.environment
+        let candidatePrefixes = [
+            env["npm_config_prefix"],
+            env["NPM_CONFIG_PREFIX"],
+            env["PREFIX"],
+            NSHomeDirectory() + "/.npm-global",
+            "/opt/homebrew",
+            "/usr/local",
+        ]
+        .compactMap { $0 }
+        .map { URL(fileURLWithPath: $0, isDirectory: true) }
+
+        var roots: [URL] = []
+        var seenPaths = Set<String>()
+
+        for prefix in candidatePrefixes {
+            let root = prefix.appendingPathComponent("lib", isDirectory: true)
+                .appendingPathComponent("node_modules", isDirectory: true)
+                .standardizedFileURL
+
+            if seenPaths.insert(root.path).inserted {
+                roots.append(root)
+            }
+        }
+
+        return roots
+    }
+
+    private static func resolvedMainAppBundleURL() -> URL? {
+        let bundleURL = Bundle.main.bundleURL.standardizedFileURL
+        guard bundleURL.pathExtension == "app", isValidAppBundle(bundleURL) else {
+            return nil
+        }
+
+        return bundleURL
+    }
+
+    private static func isValidAppBundle(_ bundleURL: URL) -> Bool {
+        let fileManager = FileManager.default
+        let infoPlistURL = bundleURL.appendingPathComponent("Contents/Info.plist")
+        guard fileManager.fileExists(atPath: infoPlistURL.path),
+              let bundle = Bundle(url: bundleURL),
+              let executableName = bundle.object(forInfoDictionaryKey: kCFBundleExecutableKey as String) as? String,
+              !executableName.isEmpty,
+              bundle.bundleIdentifier == bundleIdentifier
+        else {
+            return false
+        }
+
+        let executableURL = bundleURL.appendingPathComponent("Contents/MacOS/\(executableName)")
+        return fileManager.fileExists(atPath: executableURL.path)
+    }
+}
+
+public struct PermissionClientRecord: Sendable, Equatable {
+    public let identifier: String
+    public let type: Int32
 }
 
 private struct TCCAuthorizationStore {
@@ -122,9 +253,10 @@ private struct TCCAuthorizationStore {
 
     static var current: TCCAuthorizationStore {
         let database = TCCDatabase(path: "/Library/Application Support/com.apple.TCC/TCC.db")
+        let clients = PermissionSupport.currentPermissionClients()
         return TCCAuthorizationStore(
-            accessibility: database.authorization(for: .accessibility),
-            screenRecording: database.authorization(for: .screenRecording)
+            accessibility: database.authorization(for: .accessibility, clients: clients),
+            screenRecording: database.authorization(for: .screenRecording, clients: clients)
         )
     }
 }
@@ -142,8 +274,8 @@ private struct TCCDatabase {
         self.path = path
     }
 
-    func authorization(for service: Service) -> Bool? {
-        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+    func authorization(for service: Service, clients: [PermissionClientRecord]) -> Bool? {
+        guard !clients.isEmpty else {
             return nil
         }
 
@@ -159,27 +291,33 @@ private struct TCCDatabase {
         let query = """
         SELECT auth_value
         FROM access
-        WHERE service = ? AND client = ?
+        WHERE service = ? AND client = ? AND client_type = ?
         ORDER BY last_modified DESC
         LIMIT 1;
         """
 
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else {
-            if statement != nil {
-                sqlite3_finalize(statement)
+        for client in clients {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else {
+                if statement != nil {
+                    sqlite3_finalize(statement)
+                }
+                return nil
             }
-            return nil
+
+            sqlite3_bind_text(statement, 1, service.rawValue, -1, sqliteTransient)
+            sqlite3_bind_text(statement, 2, client.identifier, -1, sqliteTransient)
+            sqlite3_bind_int(statement, 3, client.type)
+
+            if sqlite3_step(statement) == SQLITE_ROW {
+                let authorized = sqlite3_column_int(statement, 0) == 2
+                sqlite3_finalize(statement)
+                return authorized
+            }
+
+            sqlite3_finalize(statement)
         }
-        defer { sqlite3_finalize(statement) }
 
-        sqlite3_bind_text(statement, 1, service.rawValue, -1, sqliteTransient)
-        sqlite3_bind_text(statement, 2, bundleIdentifier, -1, sqliteTransient)
-
-        guard sqlite3_step(statement) == SQLITE_ROW else {
-            return false
-        }
-
-        return sqlite3_column_int(statement, 0) == 2
+        return false
     }
 }

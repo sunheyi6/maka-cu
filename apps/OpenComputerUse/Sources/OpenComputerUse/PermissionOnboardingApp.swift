@@ -5,6 +5,10 @@ import OpenComputerUseKit
 @MainActor
 enum PermissionOnboardingApp {
     static func launch() {
+        guard !PermissionDiagnostics.current().allGranted else {
+            return
+        }
+
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
         application.applicationIconImage = Branding.makeAppIconImage(size: 256)
@@ -82,12 +86,19 @@ extension PermissionWindowController: PermissionContentControllerDelegate {
     func permissionContentControllerDidResolveGuidance(_ controller: PermissionContentController) {
         accessoryPanelController.hide()
     }
+
+    func permissionContentControllerDidCompleteAllPermissions(_ controller: PermissionContentController) {
+        accessoryPanelController.hide()
+        close()
+        NSApp.terminate(nil)
+    }
 }
 
 @MainActor
 protocol PermissionContentControllerDelegate: AnyObject {
     func permissionContentController(_ controller: PermissionContentController, didRequestPermission permission: SystemPermissionKind)
     func permissionContentControllerDidResolveGuidance(_ controller: PermissionContentController)
+    func permissionContentControllerDidCompleteAllPermissions(_ controller: PermissionContentController)
 }
 
 private enum PermissionOnboardingLayout {
@@ -123,6 +134,7 @@ final class PermissionContentController: NSViewController {
     private var activeGuidance: SystemPermissionKind?
     private var refreshTimer: Timer?
     private var diagnostics = PermissionDiagnostics.current()
+    private var hasReportedCompletion = false
 
     override func loadView() {
         view = NSView()
@@ -152,6 +164,7 @@ final class PermissionContentController: NSViewController {
     private func refreshState() {
         let updated = PermissionDiagnostics.current()
         let previousGuidance = activeGuidance
+        let wasAllGranted = diagnostics.allGranted
         diagnostics = updated
 
         if let activeGuidance, updated.isGranted(activeGuidance) {
@@ -162,6 +175,11 @@ final class PermissionContentController: NSViewController {
 
         if previousGuidance != nil, activeGuidance == nil {
             delegate?.permissionContentControllerDidResolveGuidance(self)
+        }
+
+        if updated.allGranted, !wasAllGranted, !hasReportedCompletion {
+            hasReportedCompletion = true
+            delegate?.permissionContentControllerDidCompleteAllPermissions(self)
         }
     }
 
@@ -407,19 +425,17 @@ final class GuidancePlaceholderView: NSView {
 
 @MainActor
 final class PermissionAccessoryPanelController {
-    private let trackingInterval: TimeInterval = 0.12
     private var panel: NSPanel?
     private var currentPermission: SystemPermissionKind?
-    private var trackingTimer: Timer?
     private var workspaceObserver: NSObjectProtocol?
     private var globalDragMonitor: Any?
     private var localDragMonitor: Any?
+    private var orderedWindowNumber: Int?
 
     private enum Layout {
         static let screenHorizontalInset: CGFloat = 16
         static let screenBottomInset: CGFloat = 12
         static let windowBottomOverlap: CGFloat = 6
-        static let controlsBottomGap: CGFloat = 12
         static let contentLeadingInset: CGFloat = 26
         static let contentTrailingInset: CGFloat = 28
         static let sidebarWidthRatio: CGFloat = 0.29
@@ -430,7 +446,11 @@ final class PermissionAccessoryPanelController {
     private struct PanelAnchor {
         let windowBounds: CGRect
         let contentTrackRect: CGRect
-        let accessoryAnchorRect: CGRect?
+    }
+
+    private struct SystemSettingsWindowContext {
+        let bounds: CGRect
+        let windowNumber: Int
     }
 
     func show(for permission: SystemPermissionKind) {
@@ -444,17 +464,15 @@ final class PermissionAccessoryPanelController {
         }
 
         installObserversIfNeeded()
-        startTracking()
         position(panel: panel)
         updatePanelVisibility()
     }
 
     func hide() {
-        trackingTimer?.invalidate()
-        trackingTimer = nil
         removeObservers()
         panel?.orderOut(nil)
         currentPermission = nil
+        orderedWindowNumber = nil
     }
 
     private func makePanel() -> NSPanel {
@@ -464,7 +482,7 @@ final class PermissionAccessoryPanelController {
             backing: .buffered,
             defer: false
         )
-        panel.level = .normal
+        panel.level = .floating
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
@@ -522,17 +540,6 @@ final class PermissionAccessoryPanelController {
         }
     }
 
-    private func startTracking() {
-        trackingTimer?.invalidate()
-        trackingTimer = Timer.scheduledTimer(withTimeInterval: trackingInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.updatePanelVisibility()
-                self?.refreshPosition()
-            }
-        }
-        trackingTimer?.tolerance = 0.05
-    }
-
     private func refreshPosition() {
         guard let panel, currentPermission != nil, panel.isVisible else {
             return
@@ -546,18 +553,26 @@ final class PermissionAccessoryPanelController {
             return
         }
 
-        guard isSystemSettingsFrontmost else {
+        guard isSystemSettingsFrontmost, let windowContext = systemSettingsWindowContext() else {
             panel.orderOut(nil)
             return
         }
 
-        if !panel.isVisible {
-            panel.orderFront(nil)
+        if orderedWindowNumber != windowContext.windowNumber || panel.isVisible == false {
+            panel.order(.above, relativeTo: windowContext.windowNumber)
+            orderedWindowNumber = windowContext.windowNumber
         }
     }
 
     private func position(panel: NSPanel) {
-        guard let origin = preferredPanelOrigin(for: panel.frame.size) else {
+        guard let windowContext = systemSettingsWindowContext() else {
+            return
+        }
+
+        guard let origin = preferredPanelOrigin(
+            for: panel.frame.size,
+            windowBounds: windowContext.bounds
+        ) else {
             return
         }
 
@@ -566,8 +581,11 @@ final class PermissionAccessoryPanelController {
         }
     }
 
-    private func preferredPanelOrigin(for panelSize: CGSize) -> CGPoint? {
-        guard let anchor = preferredPanelAnchor() else {
+    private func preferredPanelOrigin(
+        for panelSize: CGSize,
+        windowBounds: CGRect
+    ) -> CGPoint? {
+        guard let anchor = preferredPanelAnchor(windowBounds: windowBounds) else {
             return nil
         }
 
@@ -579,12 +597,7 @@ final class PermissionAccessoryPanelController {
             lower: visibleFrame.minX + Layout.screenHorizontalInset,
             upper: visibleFrame.maxX - panelSize.width - Layout.screenHorizontalInset
         )
-        let anchorMinY = anchor.accessoryAnchorRect?.minY ?? referenceRect.minY
-        let desiredY = if anchor.accessoryAnchorRect != nil {
-            anchorMinY - panelSize.height - Layout.controlsBottomGap
-        } else {
-            anchorMinY - panelSize.height + Layout.windowBottomOverlap
-        }
+        let desiredY = referenceRect.minY - panelSize.height + Layout.windowBottomOverlap
         let y = max(
             visibleFrame.minY + Layout.screenBottomInset,
             desiredY
@@ -592,16 +605,12 @@ final class PermissionAccessoryPanelController {
         return CGPoint(x: x, y: y)
     }
 
-    private func preferredPanelAnchor() -> PanelAnchor? {
-        let referenceRect = systemSettingsWindowBounds() ?? NSScreen.main?.visibleFrame
-        guard let referenceRect else {
-            return nil
-        }
+    private func preferredPanelAnchor(windowBounds: CGRect) -> PanelAnchor? {
+        let referenceRect = windowBounds
 
         return PanelAnchor(
             windowBounds: referenceRect,
-            contentTrackRect: systemSettingsContentTrackRect(in: referenceRect),
-            accessoryAnchorRect: systemSettingsControlsRowRect(in: referenceRect)
+            contentTrackRect: systemSettingsContentTrackRect(in: referenceRect)
         )
     }
 
@@ -630,6 +639,23 @@ final class PermissionAccessoryPanelController {
         NSScreen.screens.first(where: { $0.visibleFrame.intersects(rect) })?.visibleFrame
     }
 
+    private func appKitRect(fromCGWindowBounds bounds: CGRect) -> CGRect {
+        guard let screen = NSScreen.screens.first(where: { screen in
+            let screenBoundsInQuartz = CGRect(
+                x: screen.frame.minX,
+                y: screen.frame.minY,
+                width: screen.frame.width,
+                height: screen.frame.height
+            )
+            return screenBoundsInQuartz.intersects(bounds)
+        }) ?? NSScreen.main else {
+            return bounds
+        }
+
+        let convertedY = screen.frame.maxY - bounds.maxY
+        return CGRect(x: bounds.minX, y: convertedY, width: bounds.width, height: bounds.height)
+    }
+
     private var isSystemSettingsFrontmost: Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.systempreferences"
     }
@@ -642,7 +668,7 @@ final class PermissionAccessoryPanelController {
         return min(max(value, lower), upper)
     }
 
-    private func systemSettingsWindowBounds() -> CGRect? {
+    private func systemSettingsWindowContext() -> SystemSettingsWindowContext? {
         guard let runningApp = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.systempreferences" }) else {
             return nil
         }
@@ -651,190 +677,26 @@ final class PermissionAccessoryPanelController {
             return nil
         }
 
-        let windows = windowInfoList.compactMap { info -> (CGRect, Int)? in
+        let windows = windowInfoList.compactMap { info -> (SystemSettingsWindowContext, Int)? in
             guard
                 let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
                 ownerPID == runningApp.processIdentifier,
                 let layer = info[kCGWindowLayer as String] as? Int,
                 layer == 0,
+                let windowNumber = info[kCGWindowNumber as String] as? Int,
                 let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
                 let bounds = CGRect(dictionaryRepresentation: boundsDictionary)
             else {
                 return nil
             }
 
-            return (bounds, Int(bounds.width * bounds.height))
+            let appKitBounds = appKitRect(fromCGWindowBounds: bounds)
+            return (SystemSettingsWindowContext(bounds: appKitBounds, windowNumber: windowNumber), Int(appKitBounds.width * appKitBounds.height))
         }
 
         return windows.sorted(by: { $0.1 > $1.1 }).first?.0
     }
 
-    private func systemSettingsControlsRowRect(in windowBounds: CGRect) -> CGRect? {
-        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.systempreferences" }) else {
-            return nil
-        }
-
-        let appElement = AXUIElementCreateApplication(runningApp.processIdentifier)
-        guard let windowElement = preferredAXWindow(for: appElement) else {
-            return nil
-        }
-
-        let candidates = collectControlsRowCandidates(in: windowElement, windowBounds: windowBounds)
-        guard !candidates.isEmpty else {
-            return nil
-        }
-
-        switch currentPermission {
-        case .screenRecording:
-            return candidates.max(by: { $0.midY < $1.midY })
-        default:
-            return candidates.min(by: { $0.minY < $1.minY })
-        }
-    }
-
-    private func preferredAXWindow(for appElement: AXUIElement) -> AXUIElement? {
-        copyAXElement(appElement, attribute: kAXFocusedWindowAttribute)
-            ?? copyAXElement(appElement, attribute: kAXMainWindowAttribute)
-            ?? copyAXArray(appElement, attribute: kAXWindowsAttribute)?.first
-    }
-
-    private func collectControlsRowCandidates(in root: AXUIElement, windowBounds: CGRect) -> [CGRect] {
-        let elements = flattenedAXDescendants(of: root, maxDepth: 8, maxNodes: 400)
-        let symbolButtons = elements.compactMap { symbolButtonDescriptor(for: $0) }
-        guard !symbolButtons.isEmpty else {
-            return []
-        }
-
-        let contentTrackRect = systemSettingsContentTrackRect(in: windowBounds)
-        let controlButtons = symbolButtons.filter { descriptor in
-            let frame = descriptor.frame
-            return frame.intersects(windowBounds) &&
-                frame.midX >= contentTrackRect.minX - 24 &&
-                frame.midX <= contentTrackRect.maxX &&
-                frame.width <= 40 &&
-                frame.height <= 40
-        }
-
-        let plusButtons = controlButtons.filter { $0.symbol == "+" }
-        let minusButtons = controlButtons.filter { $0.symbol == "-" }
-
-        return plusButtons.compactMap { plusButton in
-            let matchingMinusButtons = minusButtons.filter { minusButton in
-                abs(minusButton.frame.midY - plusButton.frame.midY) <= 10 &&
-                    minusButton.frame.minX >= plusButton.frame.maxX - 4 &&
-                    minusButton.frame.minX - plusButton.frame.maxX <= 28
-            }
-
-            guard let minusButton = matchingMinusButtons.min(by: {
-                abs($0.frame.midY - plusButton.frame.midY) < abs($1.frame.midY - plusButton.frame.midY)
-            }) else {
-                return nil
-            }
-
-            return plusButton.frame.union(minusButton.frame)
-        }
-    }
-
-    private func flattenedAXDescendants(of root: AXUIElement, maxDepth: Int, maxNodes: Int) -> [AXUIElement] {
-        var results: [AXUIElement] = []
-        var queue: [(AXUIElement, Int)] = [(root, 0)]
-
-        while !queue.isEmpty, results.count < maxNodes {
-            let (element, depth) = queue.removeFirst()
-            results.append(element)
-
-            guard depth < maxDepth else {
-                continue
-            }
-
-            for child in copyAXArray(element, attribute: kAXChildrenAttribute) ?? [] {
-                queue.append((child, depth + 1))
-            }
-        }
-
-        return results
-    }
-
-    private func symbolButtonDescriptor(for element: AXUIElement) -> (symbol: String, frame: CGRect)? {
-        guard stringAXAttribute(element, attribute: kAXRoleAttribute) == kAXButtonRole as String else {
-            return nil
-        }
-
-        guard let frame = frame(of: element) else {
-            return nil
-        }
-
-        let rawLabels = [
-            stringAXAttribute(element, attribute: kAXTitleAttribute),
-            stringAXAttribute(element, attribute: kAXDescriptionAttribute),
-            stringAXAttribute(element, attribute: kAXValueAttribute)
-        ]
-        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
-
-        guard let symbol = rawLabels.first(where: { $0 == "+" || $0 == "-" }) else {
-            return nil
-        }
-
-        return (symbol, frame)
-    }
-
-    private func frame(of element: AXUIElement) -> CGRect? {
-        var positionValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard
-            AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
-            AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success,
-            let positionValue,
-            let sizeValue
-        else {
-            return nil
-        }
-
-        let positionAXValue = positionValue as! AXValue
-        let sizeAXValue = sizeValue as! AXValue
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard
-            AXValueGetValue(positionAXValue, .cgPoint, &position),
-            AXValueGetValue(sizeAXValue, .cgSize, &size)
-        else {
-            return nil
-        }
-
-        return CGRect(origin: position, size: size)
-    }
-
-    private func copyAXElement(_ element: AXUIElement, attribute: String) -> AXUIElement? {
-        var value: CFTypeRef?
-        guard
-            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-            let value,
-            CFGetTypeID(value) == AXUIElementGetTypeID()
-        else {
-            return nil
-        }
-
-        return (value as! AXUIElement)
-    }
-
-    private func copyAXArray(_ element: AXUIElement, attribute: String) -> [AXUIElement]? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
-            return nil
-        }
-
-        return value as? [AXUIElement]
-    }
-
-    private func stringAXAttribute(_ element: AXUIElement, attribute: String) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
-            return nil
-        }
-
-        return value as? String
-    }
 }
 
 @MainActor

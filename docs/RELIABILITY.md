@@ -17,7 +17,7 @@
 
 ## 当前故障排查顺序
 
-1. 先跑 `.build/debug/OpenComputerUse doctor`，确认权限状态；如果缺权限，命令会直接拉起权限 onboarding 窗口。
+1. 先跑 `.build/debug/OpenComputerUse doctor`，确认权限状态；如果缺权限，命令会直接拉起权限 onboarding 窗口，已全部授权则只打印状态并退出。
 2. 用 `.build/debug/OpenComputerUse list-apps` 确认目标 app 是否被发现。
 3. 用 `.build/debug/OpenComputerUse snapshot <app>` 看是 transport 问题还是 snapshot / action 问题。
 4. 如果只想验证仓库基线，直接跑 fixture + smoke，不要先在复杂第三方 app 上排查。
