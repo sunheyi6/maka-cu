@@ -1,6 +1,6 @@
 # open-computer-use
 
-中文说明见 [README.zh-CN.md](./README.zh-CN.md)。
+ [中文说明](./README.zh-CN.md)
 
 `open-computer-use` is an open-source `Computer Use` service exposed over `MCP`, so any AI agent or MCP client can call it directly and use computer interaction capabilities on macOS.
 
