@@ -28,6 +28,7 @@
 - `docs/FRONTEND.md`：如果仓库包含前端界面，这里记录对应规范。
 - `CONTRIBUTING.md`：提 PR 前后的默认检查项和协作要求。
 - `docs/releases/README.md`：如何维护面向用户的发布记录。
+- `docs/releases/RELEASE_GUIDE.md`：只要任务涉及 bump 版本、打 tag、推 release，先读这份发版必读。
 - `docs/references/README.md`：沉淀到仓库里的外部参考资料。
 
 ## 工作规则
