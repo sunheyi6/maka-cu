@@ -83,7 +83,7 @@ final class OpenComputerUseKitTests: XCTestCase {
 
     func testInitializeResponseContainsToolsCapability() throws {
         let server = StdioMCPServer(service: ComputerUseService())
-        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.11"},"capabilities":{}}}"#)
+        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.12"},"capabilities":{}}}"#)
         XCTAssertNotNil(response)
         XCTAssertTrue(response!.contains(#""name":"open-computer-use""#))
         XCTAssertTrue(response!.contains(#""tools":{"listChanged":false}"#))
@@ -92,7 +92,7 @@ final class OpenComputerUseKitTests: XCTestCase {
     func testInitializeResponseContainsComputerUseInstructions() throws {
         let server = StdioMCPServer(service: ComputerUseService())
         let response = try XCTUnwrap(
-            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.11"},"capabilities":{}}}"#)
+            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.12"},"capabilities":{}}}"#)
         )
         let data = try XCTUnwrap(response.data(using: .utf8))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -223,6 +223,71 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(midpoint.y, 70, accuracy: 0.001)
     }
 
+    func testOfficialCursorMotionModelBuildsTwentyCandidates() {
+        let candidates = OfficialCursorMotionModel.makeCandidates(
+            start: CGPoint(x: 100, y: 120),
+            end: CGPoint(x: 720, y: 380),
+            bounds: CGRect(x: 0, y: 0, width: 1280, height: 800)
+        )
+
+        XCTAssertEqual(candidates.count, 20)
+    }
+
+    func testOfficialCursorMotionModelChoosesScaledBaseForReferenceSample() {
+        let candidates = OfficialCursorMotionModel.makeCandidates(
+            start: CGPoint(x: 100, y: 120),
+            end: CGPoint(x: 720, y: 380),
+            bounds: CGRect(x: 0, y: 0, width: 1280, height: 800)
+        )
+
+        let chosen = OfficialCursorMotionModel.chooseBestCandidate(from: candidates)
+
+        XCTAssertEqual(chosen?.identifier, "base-scaled-guide")
+        XCTAssertEqual(chosen?.kind, .base)
+    }
+
+    func testOfficialCursorMotionSpringCloseEnoughTimeMatchesRecoveredReference() {
+        XCTAssertEqual(OfficialCursorMotionModel.closeEnoughTime, 1.429166666666663, accuracy: 0.000_001)
+    }
+
+    func testCursorVisualDynamicsOvershootsAfterTargetStops() {
+        let samples = simulateCursorVisualDynamics(
+            stopTime: 0.18,
+            targetDistance: 320,
+            totalTime: 0.75
+        )
+
+        let maxX = samples.map(\.tipPosition.x).max() ?? 0
+        XCTAssertGreaterThan(maxX, 320.5)
+        XCTAssertLessThan(samples[32].fogOffset.dx, -0.25)
+    }
+
+    func testCursorVisualDynamicsKeepsAngleInertiaAfterTargetStops() {
+        let samples = simulateCursorVisualDynamics(
+            stopTime: 0.16,
+            targetDistance: 280,
+            totalTime: 0.92
+        )
+
+        let rotationJustAfterStop = abs(samples[42].rotation)
+        let finalRotation = abs(samples.last?.rotation ?? 0)
+
+        XCTAssertGreaterThan(rotationJustAfterStop, 0.03)
+        XCTAssertLessThan(finalRotation, 0.02)
+    }
+
+    func testCursorVisualDynamicsTracksMovementHeadingInsteadOfOnlyWiggling() {
+        let samples = simulateCursorVisualDynamics(
+            stopTime: 0.45,
+            targetDistance: 360,
+            totalTime: 0.50
+        )
+
+        let peakRotation = samples.prefix(120).map { abs($0.rotation) }.max() ?? 0
+
+        XCTAssertGreaterThan(peakRotation, 1.5)
+    }
+
     private func makeSnapshot(treeLines: [String], focusedSummary: String?, selectedText: String? = nil) -> AppSnapshot {
         AppSnapshot(
             app: RunningAppDescriptor(
@@ -242,5 +307,36 @@ final class OpenComputerUseKitTests: XCTestCase {
             selectedText: selectedText,
             elements: [:]
         )
+    }
+
+    private func simulateCursorVisualDynamics(
+        stopTime: CGFloat,
+        targetDistance: CGFloat,
+        totalTime: CGFloat,
+        stepCount: Int = 240
+    ) -> [CursorVisualRenderState] {
+        var state = CursorVisualDynamicsAnimator.state(at: CGPoint(x: 0, y: 0))
+        var samples: [CursorVisualRenderState] = []
+
+        for step in 1...stepCount {
+            let time = totalTime * (CGFloat(step) / CGFloat(stepCount))
+            let targetX: CGFloat
+            if time < stopTime {
+                targetX = targetDistance * (time / stopTime)
+            } else {
+                targetX = targetDistance
+            }
+
+            let result = CursorVisualDynamicsAnimator.advance(
+                state: state,
+                targetTipPosition: CGPoint(x: targetX, y: 0),
+                targetTime: time,
+                baseHeading: 3 * .pi / 4
+            )
+            state = result.state
+            samples.append(result.renderState)
+        }
+
+        return samples
     }
 }
