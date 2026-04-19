@@ -28,6 +28,10 @@ let package = Package(
             name: "StandaloneCursorLab",
             targets: ["StandaloneCursorLab"]
         ),
+        .executable(
+            name: "StandaloneCursor",
+            targets: ["StandaloneCursor"]
+        ),
     ],
     targets: [
         .target(
@@ -56,10 +60,24 @@ let package = Package(
                 .process("Resources"),
             ]
         ),
+        .target(
+            name: "StandaloneCursorSupport",
+            path: "experiments/StandaloneCursor/Sources/StandaloneCursorSupport"
+        ),
+        .executableTarget(
+            name: "StandaloneCursor",
+            dependencies: ["StandaloneCursorSupport"],
+            path: "experiments/StandaloneCursor/Sources/StandaloneCursor"
+        ),
         .testTarget(
             name: "OpenComputerUseKitTests",
             dependencies: ["OpenComputerUseKit"],
             path: "packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests"
+        ),
+        .testTarget(
+            name: "StandaloneCursorSupportTests",
+            dependencies: ["StandaloneCursorSupport"],
+            path: "experiments/StandaloneCursor/Tests/StandaloneCursorSupportTests"
         ),
     ]
 )

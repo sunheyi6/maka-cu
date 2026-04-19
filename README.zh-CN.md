@@ -61,15 +61,17 @@ open-computer-use doctor
 open-computer-use -h
 ```
 
-## Cursor Lab
+## Cursor Demos
 
-仓库里现在还带了一个独立的 cursor motion 实验 demo，用来脱离 MCP 主链路单独调软件鼠标的轨迹和手感：
+仓库里现在有两条独立的 cursor motion demo 线路，把“基于重建脚本的直接实现”和“更自由的实验室版本”拆开维护：
 
 ```bash
+swift run StandaloneCursor
 swift run StandaloneCursorLab
 ```
 
-这个实验目录在 [`experiments/StandaloneCursorLab`](./experiments/StandaloneCursorLab)，当前已经提供 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW`、`SPRING` 这组可调参数。
+- [`experiments/StandaloneCursor`](./experiments/StandaloneCursor) 是一条更干净的 binary-guided viewer，直接对应 `scripts/cursor-motion-re/official_cursor_motion.py` 里的候选路径池、score 和 raw spring timeline。
+- [`experiments/StandaloneCursorLab`](./experiments/StandaloneCursorLab) 继续保留为更偏实验的 lab，用来做 UI、candidate overlay 和 visual dynamics 调参。
 
 ## License
 

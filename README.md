@@ -56,15 +56,17 @@ open-computer-use doctor
 open-computer-use -h
 ```
 
-## Cursor Lab
+## Cursor Demos
 
-This repo also includes an experimental standalone cursor-motion demo for iterating on the Codex-style software cursor without coupling every experiment to the MCP server:
+This repo now includes two standalone cursor-motion demos so the reconstructed model and the more speculative lab work can evolve separately:
 
 ```bash
+swift run StandaloneCursor
 swift run StandaloneCursorLab
 ```
 
-The lab lives in [`experiments/StandaloneCursorLab`](./experiments/StandaloneCursorLab) and currently exposes tunable `START HANDLE`, `END HANDLE`, `ARC SIZE`, `ARC FLOW`, and `SPRING` controls.
+- [`experiments/StandaloneCursor`](./experiments/StandaloneCursor) is the cleaner binary-guided viewer built directly from `scripts/cursor-motion-re/official_cursor_motion.py`. It focuses on the recovered 20-candidate pool, score model, and raw spring timeline.
+- [`experiments/StandaloneCursorLab`](./experiments/StandaloneCursorLab) remains the more experimental lab for UI-heavy tuning, candidate overlays, and visual-dynamics exploration.
 
 ## License
 
