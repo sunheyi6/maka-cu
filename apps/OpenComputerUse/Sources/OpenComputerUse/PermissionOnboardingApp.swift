@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import OpenComputerUseKit
+import QuartzCore
 
 @MainActor
 enum PermissionOnboardingApp {
@@ -38,7 +39,9 @@ final class PermissionOnboardingAppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 final class PermissionWindowController: NSWindowController {
     private let contentController = PermissionContentController()
-    private let accessoryPanelController = PermissionAccessoryPanelController()
+    private lazy var accessoryPanelController = PermissionAccessoryPanelController { [weak self] in
+        self?.handleAccessoryPanelBack()
+    }
 
     init() {
         let window = NSWindow(
@@ -73,13 +76,17 @@ final class PermissionWindowController: NSWindowController {
 
 @MainActor
 extension PermissionWindowController: PermissionContentControllerDelegate {
-    func permissionContentController(_ controller: PermissionContentController, didRequestPermission permission: SystemPermissionKind) {
+    func permissionContentController(
+        _ controller: PermissionContentController,
+        didRequestPermission permission: SystemPermissionKind,
+        sourceFrameInScreen: CGRect?
+    ) {
         if permission == .accessibility {
             PermissionSupport.requestAccessibilityPrompt()
         }
 
         PermissionSupport.openSystemSettings(for: permission)
-        accessoryPanelController.show(for: permission)
+        accessoryPanelController.show(for: permission, sourceFrameInScreen: sourceFrameInScreen)
         contentController.setActiveGuidance(permission)
     }
 
@@ -92,11 +99,23 @@ extension PermissionWindowController: PermissionContentControllerDelegate {
         close()
         NSApp.terminate(nil)
     }
+
+    private func handleAccessoryPanelBack() {
+        accessoryPanelController.hide()
+        contentController.setActiveGuidance(nil)
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 }
 
 @MainActor
 protocol PermissionContentControllerDelegate: AnyObject {
-    func permissionContentController(_ controller: PermissionContentController, didRequestPermission permission: SystemPermissionKind)
+    func permissionContentController(
+        _ controller: PermissionContentController,
+        didRequestPermission permission: SystemPermissionKind,
+        sourceFrameInScreen: CGRect?
+    )
     func permissionContentControllerDidResolveGuidance(_ controller: PermissionContentController)
     func permissionContentControllerDidCompleteAllPermissions(_ controller: PermissionContentController)
 }
@@ -256,11 +275,15 @@ final class PermissionContentController: NSViewController {
             }
 
             let card = PermissionCardView(permission: permission, diagnostics: diagnostics)
-            card.onAllow = { [weak self] requestedPermission in
+            card.onAllow = { [weak self] requestedPermission, sourceFrameInScreen in
                 guard let self else {
                     return
                 }
-                self.delegate?.permissionContentController(self, didRequestPermission: requestedPermission)
+                self.delegate?.permissionContentController(
+                    self,
+                    didRequestPermission: requestedPermission,
+                    sourceFrameInScreen: sourceFrameInScreen
+                )
             }
             cardsContainer.addArrangedSubview(card)
             card.widthAnchor.constraint(equalToConstant: PermissionOnboardingLayout.cardWidth).isActive = true
@@ -272,10 +295,11 @@ final class PermissionContentController: NSViewController {
 
 @MainActor
 final class PermissionCardView: NSView {
-    var onAllow: ((SystemPermissionKind) -> Void)?
+    var onAllow: ((SystemPermissionKind, CGRect?) -> Void)?
 
     private let permission: SystemPermissionKind
     private let diagnostics: PermissionDiagnostics
+    private weak var actionButton: PrimaryActionButton?
 
     init(permission: SystemPermissionKind, diagnostics: PermissionDiagnostics) {
         self.permission = permission
@@ -352,6 +376,7 @@ final class PermissionCardView: NSView {
             content.addArrangedSubview(done)
         } else {
             let button = PrimaryActionButton(title: "Allow", target: self, action: #selector(handleAllow))
+            actionButton = button
             content.addArrangedSubview(button)
             button.widthAnchor.constraint(equalToConstant: PermissionOnboardingLayout.actionButtonWidth).isActive = true
             button.heightAnchor.constraint(equalToConstant: PermissionOnboardingLayout.actionButtonHeight).isActive = true
@@ -376,7 +401,16 @@ final class PermissionCardView: NSView {
 
     @objc
     private func handleAllow() {
-        onAllow?(permission)
+        onAllow?(permission, actionButtonScreenFrame())
+    }
+
+    private func actionButtonScreenFrame() -> CGRect? {
+        guard let actionButton, let window = actionButton.window else {
+            return nil
+        }
+
+        let frameInWindow = actionButton.convert(actionButton.bounds, to: nil)
+        return window.convertToScreen(frameInWindow)
     }
 }
 
@@ -425,18 +459,31 @@ final class GuidancePlaceholderView: NSView {
 
 @MainActor
 final class PermissionAccessoryPanelController {
-    private let bootstrapRetryInterval: TimeInterval = 0.15
-    private let bootstrapRetryLimit = 24
+    private let onBack: () -> Void
+    private let trackingInterval: TimeInterval = 0.15
+    private let launchAnimationDuration: TimeInterval = 0.72
+    private let launchAnimationResponse = 0.72
+    private let launchAnimationDampingFraction = 1.0
+    private let launchInitialAlpha: CGFloat = 0.9
     private var panel: NSPanel?
     private var currentPermission: SystemPermissionKind?
     private var workspaceObserver: NSObjectProtocol?
     private var globalDragMonitor: Any?
     private var localDragMonitor: Any?
     private var orderedWindowNumber: Int?
-    private var bootstrapRetryTimer: Timer?
-    private var bootstrapRetriesRemaining = 0
+    private var trackingTimer: Timer?
+    private var pendingSourceFrameInScreen: CGRect?
+    private var didPresentCurrentPanel = false
+    private var launchDisplayLink: CADisplayLink?
+    private var launchStartTime: CFTimeInterval = 0
+    private var launchFromFrame = NSRect.zero
+    private var launchToFrame = NSRect.zero
+    private var isAnimatingLaunch = false
+    private var launchSettleGeneration = 0
 
     private enum Layout {
+        static let panelWidth: CGFloat = 530
+        static let panelHeight: CGFloat = 109
         static let screenHorizontalInset: CGFloat = 16
         static let screenBottomInset: CGFloat = 12
         static let windowBottomOverlap: CGFloat = 6
@@ -457,8 +504,14 @@ final class PermissionAccessoryPanelController {
         let windowNumber: Int
     }
 
-    func show(for permission: SystemPermissionKind) {
+    init(onBack: @escaping () -> Void) {
+        self.onBack = onBack
+    }
+
+    func show(for permission: SystemPermissionKind, sourceFrameInScreen: CGRect?) {
         currentPermission = permission
+        pendingSourceFrameInScreen = sourceFrameInScreen
+        didPresentCurrentPanel = false
 
         let panel = panel ?? makePanel()
         self.panel = panel
@@ -468,22 +521,25 @@ final class PermissionAccessoryPanelController {
         }
 
         installObserversIfNeeded()
-        position(panel: panel)
+        startTrackingTimer()
         updatePanelVisibility()
-        startBootstrapRetries()
     }
 
     func hide() {
-        stopBootstrapRetries()
+        stopLaunchAnimation()
+        stopTrackingTimer()
         removeObservers()
         panel?.orderOut(nil)
+        panel?.alphaValue = 1
         currentPermission = nil
         orderedWindowNumber = nil
+        pendingSourceFrameInScreen = nil
+        didPresentCurrentPanel = false
     }
 
     private func makePanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 452, height: 102),
+            contentRect: NSRect(x: 0, y: 0, width: Layout.panelWidth, height: Layout.panelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -493,7 +549,8 @@ final class PermissionAccessoryPanelController {
         panel.isOpaque = false
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .transient, .fullScreenAuxiliary]
-        panel.contentView = PermissionAccessoryPanelView()
+        panel.animationBehavior = .none
+        panel.contentView = PermissionAccessoryPanelView(onBack: onBack)
         return panel
     }
 
@@ -546,41 +603,34 @@ final class PermissionAccessoryPanelController {
         }
     }
 
-    private func startBootstrapRetries() {
-        stopBootstrapRetries()
-        bootstrapRetriesRemaining = bootstrapRetryLimit
-        bootstrapRetryTimer = Timer.scheduledTimer(withTimeInterval: bootstrapRetryInterval, repeats: true) { [weak self] _ in
+    private func startTrackingTimer() {
+        stopTrackingTimer()
+        let timer = Timer(timeInterval: trackingInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.handleBootstrapRetryTick()
+                self?.handleTrackingTick()
             }
         }
-        bootstrapRetryTimer?.tolerance = 0.03
+        timer.tolerance = 0.03
+        RunLoop.main.add(timer, forMode: .common)
+        trackingTimer = timer
     }
 
-    private func stopBootstrapRetries() {
-        bootstrapRetryTimer?.invalidate()
-        bootstrapRetryTimer = nil
-        bootstrapRetriesRemaining = 0
+    private func stopTrackingTimer() {
+        trackingTimer?.invalidate()
+        trackingTimer = nil
     }
 
-    private func handleBootstrapRetryTick() {
+    private func handleTrackingTick() {
         updatePanelVisibility()
         refreshPosition()
-
-        let shouldStop = bootstrapRetriesRemaining <= 0 || (panel?.isVisible ?? false)
-        bootstrapRetriesRemaining -= 1
-
-        if shouldStop {
-            stopBootstrapRetries()
-        }
     }
 
     private func refreshPosition() {
-        guard let panel, currentPermission != nil, panel.isVisible else {
+        guard let panel, currentPermission != nil, panel.isVisible, let windowContext = systemSettingsWindowContext() else {
             return
         }
 
-        position(panel: panel)
+        position(panel: panel, windowBounds: windowContext.bounds)
     }
 
     private func updatePanelVisibility() {
@@ -589,35 +639,198 @@ final class PermissionAccessoryPanelController {
         }
 
         guard isSystemSettingsFrontmost, let windowContext = systemSettingsWindowContext() else {
+            stopLaunchAnimation()
             panel.orderOut(nil)
             return
         }
 
-        if orderedWindowNumber != windowContext.windowNumber || panel.isVisible == false {
-            panel.order(.above, relativeTo: windowContext.windowNumber)
+        let panelWasVisible = panel.isVisible
+
+        if didPresentCurrentPanel == false {
+            presentPanel(
+                panel: panel,
+                from: pendingSourceFrameInScreen,
+                relativeTo: windowContext
+            )
+            didPresentCurrentPanel = true
+        } else {
+            let previousOrderedWindowNumber = orderedWindowNumber
             orderedWindowNumber = windowContext.windowNumber
+            position(panel: panel, windowBounds: windowContext.bounds)
+            if previousOrderedWindowNumber != windowContext.windowNumber || panelWasVisible == false {
+                panel.order(.above, relativeTo: windowContext.windowNumber)
+            }
         }
 
-        if panel.isVisible {
-            stopBootstrapRetries()
-        }
     }
 
-    private func position(panel: NSPanel) {
-        guard let windowContext = systemSettingsWindowContext() else {
+    private func position(panel: NSPanel, windowBounds: CGRect) {
+        guard let origin = preferredPanelOrigin(
+            for: panel.frame.size,
+            windowBounds: windowBounds
+        ) else {
             return
         }
 
-        guard let origin = preferredPanelOrigin(
-            for: panel.frame.size,
-            windowBounds: windowContext.bounds
-        ) else {
+        if isAnimatingLaunch {
+            launchToFrame.origin = origin
             return
         }
 
         if panel.frame.origin != origin {
             panel.setFrameOrigin(origin)
         }
+    }
+
+    private func presentPanel(
+        panel: NSPanel,
+        from sourceFrameInScreen: CGRect?,
+        relativeTo windowContext: SystemSettingsWindowContext
+    ) {
+        guard let targetOrigin = preferredPanelOrigin(
+            for: panel.frame.size,
+            windowBounds: windowContext.bounds
+        ) else {
+            return
+        }
+
+        let targetFrame = NSRect(origin: targetOrigin, size: panel.frame.size)
+        orderedWindowNumber = windowContext.windowNumber
+
+        guard let sourceFrameInScreen, sourceFrameInScreen.isEmpty == false else {
+            stopLaunchAnimation()
+            panel.alphaValue = 1
+            panel.setFrame(targetFrame, display: false)
+            panel.order(.above, relativeTo: windowContext.windowNumber)
+            return
+        }
+
+        stopLaunchAnimation()
+        isAnimatingLaunch = true
+        launchFromFrame = sourceFrameInScreen
+        launchToFrame = targetFrame
+        launchStartTime = CACurrentMediaTime()
+        launchSettleGeneration += 1
+
+        panel.alphaValue = launchInitialAlpha
+        panel.setFrame(sourceFrameInScreen, display: false)
+        panel.order(.above, relativeTo: windowContext.windowNumber)
+        stepLaunchAnimation()
+
+        let displayLink = panel.displayLink(target: self, selector: #selector(displayLinkDidFire(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        launchDisplayLink = displayLink
+        scheduleLaunchSettlePasses(for: launchSettleGeneration)
+    }
+
+    @objc
+    private func displayLinkDidFire(_ displayLink: CADisplayLink) {
+        stepLaunchAnimation()
+    }
+
+    private func stepLaunchAnimation() {
+        guard let panel else {
+            stopLaunchAnimation()
+            return
+        }
+
+        let elapsed = max(0, CACurrentMediaTime() - launchStartTime)
+        if elapsed >= launchAnimationDuration {
+            isAnimatingLaunch = false
+            stopLaunchAnimation()
+            panel.alphaValue = 1
+            updateLaunchTargetFrameIfNeeded()
+            panel.setFrame(launchToFrame, display: true)
+            if let orderedWindowNumber {
+                panel.order(.above, relativeTo: orderedWindowNumber)
+            }
+            return
+        }
+
+        let progress = springProgress(at: elapsed)
+        panel.alphaValue = launchInitialAlpha + ((1 - launchInitialAlpha) * progress)
+        panel.setFrame(curvedFrame(from: launchFromFrame, to: launchToFrame, progress: progress), display: true)
+        if let orderedWindowNumber {
+            panel.order(.above, relativeTo: orderedWindowNumber)
+        }
+    }
+
+    private func stopLaunchAnimation() {
+        isAnimatingLaunch = false
+        launchDisplayLink?.invalidate()
+        launchDisplayLink = nil
+    }
+
+    private func updateLaunchTargetFrameIfNeeded() {
+        guard
+            let panel,
+            let windowContext = systemSettingsWindowContext(),
+            let origin = preferredPanelOrigin(for: panel.frame.size, windowBounds: windowContext.bounds)
+        else {
+            return
+        }
+
+        orderedWindowNumber = windowContext.windowNumber
+        launchToFrame = NSRect(origin: origin, size: panel.frame.size)
+    }
+
+    private func scheduleLaunchSettlePasses(for generation: Int) {
+        let delays: [TimeInterval] = [0.18, 0.42, 0.84, 1.2]
+
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.currentPermission != nil, self.launchSettleGeneration == generation else {
+                        return
+                    }
+                    self.updatePanelVisibility()
+                    self.refreshPosition()
+                }
+            }
+        }
+    }
+
+    private func springProgress(at elapsed: TimeInterval) -> CGFloat {
+        let omega = (2 * Double.pi) / launchAnimationResponse
+        let t = max(0, elapsed)
+        let progress: Double
+
+        if abs(launchAnimationDampingFraction - 1) < 0.0001 {
+            progress = 1 - exp(-omega * t) * (1 + (omega * t))
+        } else {
+            progress = min(1, t / launchAnimationDuration)
+        }
+
+        return min(max(progress, 0), 1)
+    }
+
+    private func curvedFrame(from: NSRect, to: NSRect, progress: CGFloat) -> NSRect {
+        let size = NSSize(
+            width: from.size.width + ((to.size.width - from.size.width) * progress),
+            height: from.size.height + ((to.size.height - from.size.height) * progress)
+        )
+
+        let startCenter = CGPoint(x: from.midX, y: from.midY)
+        let endCenter = CGPoint(x: to.midX, y: to.midY)
+        let midPoint = CGPoint(
+            x: (startCenter.x + endCenter.x) * 0.5,
+            y: max(startCenter.y, endCenter.y)
+        )
+        let distance = hypot(endCenter.x - startCenter.x, endCenter.y - startCenter.y)
+        let lift = min(140, max(44, distance * 0.18))
+        let controlPoint = CGPoint(x: midPoint.x, y: midPoint.y + lift)
+        let inverse = 1 - progress
+        let center = CGPoint(
+            x: (inverse * inverse * startCenter.x) + (2 * inverse * progress * controlPoint.x) + (progress * progress * endCenter.x),
+            y: (inverse * inverse * startCenter.y) + (2 * inverse * progress * controlPoint.y) + (progress * progress * endCenter.y)
+        )
+
+        return NSRect(
+            x: center.x - (size.width * 0.5),
+            y: center.y - (size.height * 0.5),
+            width: size.width,
+            height: size.height
+        )
     }
 
     private func preferredPanelOrigin(
@@ -740,19 +953,45 @@ final class PermissionAccessoryPanelController {
 
 @MainActor
 final class PermissionAccessoryPanelView: NSView {
+    private let onBack: () -> Void
     private let instructionLabel = NSTextField(labelWithString: "")
     private let dragTileView = DraggableAppTileView()
 
-    init() {
+    init(onBack: @escaping () -> Void) {
+        self.onBack = onBack
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = 20
-        layer?.backgroundColor = NSColor(calibratedWhite: 0.98, alpha: 0.96).cgColor
-        layer?.shadowColor = NSColor.black.withAlphaComponent(0.14).cgColor
-        layer?.shadowOpacity = 1
-        layer?.shadowRadius = 18
-        layer?.shadowOffset = CGSize(width: 0, height: -5)
+        setup()
+    }
+
+    private func setup() {
+        let materialView = NSVisualEffectView()
+        materialView.translatesAutoresizingMaskIntoConstraints = false
+        materialView.material = .popover
+        materialView.blendingMode = .behindWindow
+        materialView.state = .active
+        materialView.wantsLayer = true
+        materialView.layer?.cornerRadius = 20
+        materialView.layer?.masksToBounds = true
+        materialView.layer?.borderWidth = 0.5
+        materialView.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.18).cgColor
+        addSubview(materialView)
+
+        let tintView = NSView()
+        tintView.translatesAutoresizingMaskIntoConstraints = false
+        tintView.wantsLayer = true
+        tintView.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.8).cgColor
+        materialView.addSubview(tintView)
+
+        let backChrome = NSView()
+        backChrome.translatesAutoresizingMaskIntoConstraints = false
+        backChrome.wantsLayer = true
+        backChrome.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.95).cgColor
+        backChrome.layer?.cornerRadius = 16
+        materialView.addSubview(backChrome)
+
+        let backButton = AccessoryBackButton(target: self, action: #selector(handleBack))
+        backChrome.addSubview(backButton)
 
         let arrow = NSImageView()
         arrow.translatesAutoresizingMaskIntoConstraints = false
@@ -769,24 +1008,44 @@ final class PermissionAccessoryPanelView: NSView {
 
         dragTileView.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(arrow)
-        addSubview(instructionLabel)
-        addSubview(dragTileView)
+        materialView.addSubview(arrow)
+        materialView.addSubview(instructionLabel)
+        materialView.addSubview(dragTileView)
 
         NSLayoutConstraint.activate([
-            arrow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
-            arrow.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            arrow.widthAnchor.constraint(equalToConstant: 32),
-            arrow.heightAnchor.constraint(equalToConstant: 32),
+            materialView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            materialView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            materialView.topAnchor.constraint(equalTo: topAnchor),
+            materialView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            instructionLabel.leadingAnchor.constraint(equalTo: arrow.trailingAnchor, constant: 12),
+            tintView.leadingAnchor.constraint(equalTo: materialView.leadingAnchor),
+            tintView.trailingAnchor.constraint(equalTo: materialView.trailingAnchor),
+            tintView.topAnchor.constraint(equalTo: materialView.topAnchor),
+            tintView.bottomAnchor.constraint(equalTo: materialView.bottomAnchor),
+
+            backChrome.leadingAnchor.constraint(equalTo: materialView.leadingAnchor, constant: 18),
+            backChrome.topAnchor.constraint(equalTo: materialView.topAnchor, constant: 52),
+            backChrome.widthAnchor.constraint(equalToConstant: 32),
+            backChrome.heightAnchor.constraint(equalToConstant: 32),
+
+            backButton.centerXAnchor.constraint(equalTo: backChrome.centerXAnchor),
+            backButton.centerYAnchor.constraint(equalTo: backChrome.centerYAnchor),
+            backButton.widthAnchor.constraint(equalToConstant: 14),
+            backButton.heightAnchor.constraint(equalToConstant: 14),
+
+            arrow.leadingAnchor.constraint(equalTo: materialView.leadingAnchor, constant: 35),
+            arrow.topAnchor.constraint(equalTo: materialView.topAnchor, constant: 10),
+            arrow.widthAnchor.constraint(equalToConstant: 28),
+            arrow.heightAnchor.constraint(equalToConstant: 28),
+
+            instructionLabel.leadingAnchor.constraint(equalTo: arrow.trailingAnchor, constant: 10),
             instructionLabel.centerYAnchor.constraint(equalTo: arrow.centerYAnchor),
-            instructionLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -18),
+            instructionLabel.trailingAnchor.constraint(equalTo: materialView.trailingAnchor, constant: -22),
 
-            dragTileView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 54),
-            dragTileView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            dragTileView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            dragTileView.heightAnchor.constraint(equalToConstant: 42),
+            dragTileView.leadingAnchor.constraint(equalTo: materialView.leadingAnchor, constant: 64),
+            dragTileView.trailingAnchor.constraint(equalTo: materialView.trailingAnchor, constant: -21),
+            dragTileView.topAnchor.constraint(equalTo: materialView.topAnchor, constant: 47),
+            dragTileView.heightAnchor.constraint(equalToConstant: 43)
         ])
     }
 
@@ -797,6 +1056,11 @@ final class PermissionAccessoryPanelView: NSView {
 
     func configure(permission: SystemPermissionKind) {
         instructionLabel.stringValue = permission.dragInstruction
+    }
+
+    @objc
+    private func handleBack() {
+        onBack()
     }
 }
 
@@ -839,7 +1103,8 @@ final class DraggableAppTileView: NSView, NSDraggingSource {
 
         let draggingItem = NSDraggingItem(pasteboardWriter: bundleURL as NSURL)
         draggingItem.setDraggingFrame(bounds, contents: snapshotImage())
-        beginDraggingSession(with: [draggingItem], event: event, source: self)
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = true
     }
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
@@ -1067,5 +1332,37 @@ final class PrimaryActionButton: NSButton {
             : NSColor(calibratedRed: 0.06, green: 0.49, blue: 0.99, alpha: 1)
         ).cgColor
         alphaValue = isEnabled ? 1 : 0.45
+    }
+}
+
+@MainActor
+final class AccessoryBackButton: NSButton {
+    override var isHighlighted: Bool {
+        didSet {
+            alphaValue = isHighlighted ? 0.66 : 1
+        }
+    }
+
+    init(target: AnyObject?, action: Selector) {
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        translatesAutoresizingMaskIntoConstraints = false
+        isBordered = false
+        focusRingType = .none
+        image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back")
+        contentTintColor = NSColor.labelColor.withAlphaComponent(0.72)
+        if let cell = cell as? NSButtonCell {
+            cell.imagePosition = .imageOnly
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
     }
 }

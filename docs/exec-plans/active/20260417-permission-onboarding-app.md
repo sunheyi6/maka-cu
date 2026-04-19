@@ -75,9 +75,11 @@
 - 2026-04-17：权限状态判定加入对 TCC 持久授权记录的读取，避免 dev 环境里 CLI 子进程与 GUI app 对同一 bundle 权限状态看到不一致的结果。
 - 2026-04-17：drag panel 仍然只在 `System Settings` 前台时显示；水平位置维持窗口右侧内容区居中，垂直位置优先跟随当前权限页的 `+ / -` 控制行，只有拿不到控件几何时才回退到窗口底边，避免在 `Screen & System Audio Recording` 这类长页面里被吸到屏幕最下方。
 - 2026-04-17：app 模式改成 `LSUIElement` + `.accessory` agent-style 运行，保证权限窗口可见，但执行过程中不再额外在 Dock 暴露前台 app 图标。
+- 2026-04-19：accessory panel 的第一次出现改成从主窗口 `Allow` 按钮 source frame 飞入 `System Settings` 内容区下沿，使用 spring + curved frame 过渡；同时 panel 内补显式返回按钮，把中断 guidance 的动作收回到 app 内。
 
 ## 当前结论
 
 - app 模式、System Settings 深链、drag tile、`.app` 打包和主窗口 `Done` 状态已经可用。
+- accessory panel 现在具备一次性的 source-to-target 入场动画和显式返回按钮，权限切换时不再只能依赖硬切和手动切回主窗口。
 - `swift test`、`./scripts/run-tool-smoke-tests.sh`、`doctor` 和真实 `System Settings snapshot` 都已通过。
 - 官方那种“像嵌入在 `System Settings` 里的 accessory UI” 仍然是后续 UI 收敛项，不作为这轮功能验证阻塞。
