@@ -24,6 +24,10 @@ let package = Package(
             name: "OpenComputerUseSmokeSuite",
             targets: ["OpenComputerUseSmokeSuite"]
         ),
+        .executable(
+            name: "StandaloneCursorLab",
+            targets: ["StandaloneCursorLab"]
+        ),
     ],
     targets: [
         .target(
@@ -44,6 +48,13 @@ let package = Package(
             name: "OpenComputerUseSmokeSuite",
             dependencies: ["OpenComputerUseKit"],
             path: "apps/OpenComputerUseSmokeSuite/Sources/OpenComputerUseSmokeSuite"
+        ),
+        .executableTarget(
+            name: "StandaloneCursorLab",
+            path: "experiments/StandaloneCursorLab/Sources/StandaloneCursorLab",
+            resources: [
+                .process("Resources"),
+            ]
         ),
         .testTarget(
             name: "OpenComputerUseKitTests",

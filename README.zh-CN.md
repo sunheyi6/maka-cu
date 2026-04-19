@@ -61,6 +61,16 @@ open-computer-use doctor
 open-computer-use -h
 ```
 
+## Cursor Lab
+
+仓库里现在还带了一个独立的 cursor motion 实验 demo，用来脱离 MCP 主链路单独调软件鼠标的轨迹和手感：
+
+```bash
+swift run StandaloneCursorLab
+```
+
+这个实验目录在 [`experiments/StandaloneCursorLab`](./experiments/StandaloneCursorLab)，当前已经提供 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW`、`SPRING` 这组可调参数。
+
 ## License
 
 [MIT](./LICENSE)

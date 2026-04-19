@@ -18,6 +18,8 @@
   - 键鼠输入模拟
   - software cursor overlay
   - fixture test bridge
+- `experiments/StandaloneCursorLab`
+  独立的 Swift cursor motion lab，用于试验 `Bezier + arc + spring` 参数模型、调参 UI 和独立渲染，不直接耦合主 MCP runtime。
 - `scripts/`
   仓库级自动化命令，包括 smoke test、`.app` 打包入口、npm 分发脚本，以及 `scripts/computer-use-cli/` 这个用于探测官方 bundled `computer-use` 的 Go helper。
 - `docs/`
@@ -71,6 +73,12 @@
 - 对 fixture 的 `get_app_state` 和少量测试专用动作，会通过 `FixtureBridge` 走显式 command 通道。
 - 这个 bridge 只服务于仓库内 deterministic smoke path，不是面向真实第三方 app 的能力边界。
 
+### 5. Cursor Lab
+
+- `StandaloneCursorLab` 是一个单独的 SwiftUI demo target，可通过 `swift run StandaloneCursorLab` 本地启动。
+- 这条线优先验证 motion model 本身：参数层、路径层、spring/timing 模拟和 debug UI。
+- 当前它不接真实 tool call，也不回写主 `SoftwareCursorOverlay`，目的是把实验噪音与产品行为边界隔离开。
+
 ## 关键边界
 
 - 开源版当前不复刻官方闭源实现里的 caller signing、私有 IPC、完整 overlay choreography 和 plugin 自安装逻辑。
@@ -82,6 +90,7 @@
 ## 主要验证路径
 
 - 单元测试：`swift test`
+- cursor lab 构建：`swift build --product StandaloneCursorLab`
 - 端到端 smoke：`./scripts/run-tool-smoke-tests.sh`
 - app 打包：`./scripts/build-open-computer-use-app.sh debug`
 - npm staging：`node ./scripts/npm/build-packages.mjs`

@@ -56,6 +56,16 @@ open-computer-use doctor
 open-computer-use -h
 ```
 
+## Cursor Lab
+
+This repo also includes an experimental standalone cursor-motion demo for iterating on the Codex-style software cursor without coupling every experiment to the MCP server:
+
+```bash
+swift run StandaloneCursorLab
+```
+
+The lab lives in [`experiments/StandaloneCursorLab`](./experiments/StandaloneCursorLab) and currently exposes tunable `START HANDLE`, `END HANDLE`, `ARC SIZE`, `ARC FLOW`, and `SPRING` controls.
+
 ## License
 
 [MIT](./LICENSE)
