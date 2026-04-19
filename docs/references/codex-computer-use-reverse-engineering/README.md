@@ -19,7 +19,7 @@
 - `software-cursor-motion-model.md`
   - 结合视频样本、官方字符串和当前开源实现，对 cursor motion 参数模型的推断。
 - `software-cursor-motion-reconstruction.md`
-  - 继续下钻到函数级后，对 `CursorMotionPath.sample(progress)`、`CursorMotionPathMeasurement` 和候选路径枚举线索的重建说明。
+  - 继续下钻到函数级后，对 `CursorMotionPath.sample(progress)`、`CursorMotionPathMeasurement`、`CursorMotionPath/Segment` 布局、20 条候选几何、score 公式、in-bounds 优先选择策略，以及 `SpringAnimation -> VelocityVerletSimulation` timing 链、finished predicate 和 endpoint-lock 观测的重建说明。
 - `permission-onboarding.md`
   - 对 Accessibility / Screen Recording 权限引导和 System Settings accessory window 的分析。
 - `assets/README.md`
