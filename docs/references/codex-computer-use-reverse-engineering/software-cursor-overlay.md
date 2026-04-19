@@ -220,10 +220,25 @@ swift scripts/render-synthesized-software-cursor.swift --seconds 12
 
 这条脚本现在分成两档：
 
-- 默认档：直接读取仓库里已经落下来的 `official-software-cursor-window-252.png`，把这张 `252x252` runtime overlay 基线图独立渲染到一个 `126x126` 透明 window 上，用来先把“独立测试”和尺寸/边界对齐这件事做准。
+- 默认档：直接读取仓库里已经落下来的 `official-software-cursor-window-252.png`，把这张 `252x252` runtime overlay 基线图独立渲染到一个 `126x126` 透明 window 上，并只额外叠一层“中心固定、像钟摆一样左右摆角”的 angle wobble。当前独立脚本把这段 wobble 收到接近“时钟 `55` 分到 `00` 分”的总摆幅，用来先把“独立测试”和官方视觉姿态做准。
 - `--procedural` 档：继续保留一版纯代码 fallback，用 radial fog + pointer contour 去近似官方视觉，方便后面单独迭代 pointer path、fog falloff 和按压状态。
 
 也就是说，这条脚本当前优先服务“可独立验证的官方基线”，而不是宣称 procedural 版本已经 1:1 复刻完成。
+
+这条 idle wobble 后来又按二进制证据收紧过一轮：
+
+- `CursorView` 一侧目前能直接确认的是 `cursorRadius`、`_animatedAngleOffsetDegrees`、`_loadingAnimationToken`、`fogRadius` 和两套 scale anchor；
+- `FogCursorViewModel` 一侧当前能确认的是 `_velocityX`、`_velocityY`、`_isPressed`、`_activityState`、`_isAttached`、`_angle`；
+- 所以独立脚本默认档现在不再对整张 runtime baseline 图做“呼吸式整体缩放”或额外平移，而是只保留一个以图案中心为轴的小幅 angle offset。
+
+如果需要抓不同 wobble 相位的静态样本，可以直接加：
+
+```bash
+swift scripts/render-synthesized-software-cursor.swift \
+  --seconds 1.4 \
+  --snapshot-delay 0.9 \
+  --save-png /tmp/software-cursor-wobble.png
+```
 
 ## 为什么这套体验不会抢用户鼠标
 

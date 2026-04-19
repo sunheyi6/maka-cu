@@ -18,6 +18,9 @@
 - **[落运行时样本]**: 直接对 `Software Cursor` window 做 `screencapture -l <windowid>`，把完整窗口和原始箭头 crop 落到 `docs/references/codex-computer-use-reverse-engineering/assets/extracted-2026-04-19/`。
 - **[补抓完整 2x overlay 边界]**: 继续直接调用 `CGWindowListCreateImage(..., .boundsIgnoreFraming | .bestResolution)`，确认 `Software Cursor` 的完整运行时像素边界是 `252x252`，而不是默认抓图链里看到的 `170x170` 裁剪结果；这和用户截图软件框到的大边框一致。
 - **[补独立测试脚本]**: 新增 `scripts/render-synthesized-software-cursor.swift`，用单文件 AppKit 脚本把 `126x126` overlay 独立渲染到屏幕。默认模式直接读取仓库里保存的 `official-software-cursor-window-252.png` 作为官方基线图，确保尺寸和轮廓先对上；`--procedural` 继续保留纯代码 fallback，单独迭代 fog 和 pointer 近似实现。
+- **[补默认档晃动效果]**: 继续在独立脚本里给默认 reference-baseline 模式接入轻微的 center-fixed angle wobble，并补 `--snapshot-delay`，方便直接导出不同时间相位的独立样本。
+- **[按二进制证据收紧 wobble]**: 随后又重新对齐仓库里的逆向文档和 `SkyComputerUseService` 的 runtime 证据，确认 `CursorView` 侧能直接看到的是 `_animatedAngleOffsetDegrees` / `_loadingAnimationToken`，`FogCursorViewModel` 侧是 velocity / pressed / activity / angle；因此把默认档从“整图平移 + 呼吸缩放 + pulse”收紧回“中心固定、顺时针/逆时针轻微摆角”的小幅 angle wobble。
+- **[调整中心摆角振幅]**: 根据后续对官方视觉的回看，又把默认档的中心摆角调到接近“时钟 `55` 分到 `00` 分”的总摆幅，让独立脚本更接近用户观察到的钟摆式旋转范围。
 - **[更新逆向文档]**: 修改 `software-cursor-overlay.md`，把结论收敛成“最终灰白箭头不能从 bundle 静态 asset 直接导出，但能从运行时 `Software Cursor` window 直接截出”。
 
 ### 🧠 Design Intent (Why)

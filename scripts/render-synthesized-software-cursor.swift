@@ -25,6 +25,7 @@ struct ScriptOptions {
     var centerX: CGFloat?
     var centerY: CGFloat?
     var seconds: TimeInterval = 12
+    var snapshotDelay: TimeInterval = 0.45
     var idleDrift = true
     var pulseLoop = true
     var useReferenceCapture = true
@@ -108,7 +109,7 @@ final class CursorView: NSView {
         let elapsed = CACurrentMediaTime() - startedAt
 
         if options.useReferenceCapture, let referenceImage {
-            referenceImage.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+            drawReferenceImage(referenceImage, in: context, elapsed: elapsed)
             return
         }
 
@@ -125,6 +126,21 @@ final class CursorView: NSView {
 
         drawFog(in: context, center: fogCenter, pulse: pulse)
         drawPointer(in: context, center: pointerCenter, elapsed: elapsed, pulse: pulse)
+    }
+
+    private func drawReferenceImage(_ image: NSImage, in context: CGContext, elapsed: TimeInterval) {
+        let idlePhase = CGFloat(elapsed * 3.0)
+        let idleRotationAmplitude: CGFloat = .pi / 12
+        let rotation = options.idleDrift
+            ? sin(idlePhase * 0.8) * idleRotationAmplitude
+            : 0
+
+        context.saveGState()
+        context.translateBy(x: bounds.midX, y: bounds.midY)
+        context.rotate(by: rotation)
+        context.translateBy(x: -bounds.midX, y: -bounds.midY)
+        image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        context.restoreGState()
     }
 
     private func pulseProgress(at elapsed: TimeInterval) -> CGFloat {
@@ -346,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         if let savePNGURL = options.savePNGURL {
-            Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
+            Timer.scheduledTimer(withTimeInterval: options.snapshotDelay, repeats: false) { [weak self] _ in
                 guard let self, let cursorView = self.cursorView else {
                     return
                 }
@@ -432,6 +448,13 @@ func parseOptions(arguments: [String]) throws -> ScriptOptions {
                 throw CursorScriptError.invalidArguments("Invalid value for --seconds: \(rawValue)")
             }
             options.seconds = seconds
+        case "--snapshot-delay":
+            index += 1
+            let rawValue = try parseString(arguments, index: index, flag: argument)
+            guard let snapshotDelay = TimeInterval(rawValue), snapshotDelay >= 0 else {
+                throw CursorScriptError.invalidArguments("Invalid value for --snapshot-delay: \(rawValue)")
+            }
+            options.snapshotDelay = snapshotDelay
         case "--save-png":
             index += 1
             let path = try parseString(arguments, index: index, flag: argument)
@@ -521,6 +544,8 @@ func printUsage() {
       --x <value>          Overlay center x position in screen coordinates
       --y <value>          Overlay center y position in screen coordinates
       --seconds <value>    Auto-exit after N seconds; use 0 to keep it open
+      --snapshot-delay <value>
+                           Delay before writing --save-png, useful for sampling wobble phases
       --save-png <path>    Save a 2x transparent PNG snapshot of the synthesized overlay
       --procedural         Render the current code-generated fallback instead of the captured official baseline
       --no-idle            Disable idle drift
