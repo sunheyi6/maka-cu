@@ -283,6 +283,45 @@
 - `experiments/StandaloneCursorLab/README.md`
 - `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
 
+### 🔁 Follow-up (2026-04-20, simplify top-right debug controls)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[移除多余 toggle]**: 右上角只保留 `DEBUG` switch，`MAIL` / `CLICK` 的本地测试开关已移除，避免和左上角参数面板一起制造额外噪音。
+- **[click pulse 改为默认常开]**: 点击 pulse 继续跟随当前 move 状态显示，不再额外受 UI toggle 控制，避免为了删控件还保留一条无意义状态分支。
+- **[拉开开关视觉差]**: `DEBUG` switch 的开启态改成左侧 slider 同款 accent 渐变，关闭态收成浅灰底和深色 knob，避免两档底色太接近看不出切换状态。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, reduce background gradient bleed through panel cards)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[收紧 card 底色]**: `CursorPanelBackground` 不再使用偏透明的浅灰渐变，而是收成更实的灰白卡片底，减少底层 BG 渐变直接把 panel 染成不同色相。
+- **[加强边界识别]**: 卡片描边和阴影同步加强，让左上 slider 面板即使落在偏灰白的背景区里，也能和页面底色拉开层次。
+- **[同步文档口径]**: README 和 active plan 现在都明确写成“更实的灰白卡片”，避免继续把 panel 理解成半透明浮层。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, align top-left and top-right panel shells)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[统一 panel 外壳]**: 左上 slider 面板和右上 `DEBUG` 面板现在都改成复用同一个 `CursorPanelShell`，统一内边距、圆角、描边和阴影，避免继续靠两套近似但不完全一致的容器样式拼出来。
+- **[收掉重复包装代码]**: 原来左右两边各自写的 `padding + background` 容器已合并，后续如果继续调 panel 外观，只需要改一处。
+- **[同步文档口径]**: README 和 active plan 补充这次 panel shell 对齐，明确左右控件区现在属于同一套视觉组件。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
 ### 🔁 Follow-up (2026-04-20, apply start/end handle semantics from slider investigation)
 **Scope:** `experiments/StandaloneCursorLab/`、`docs/`
 

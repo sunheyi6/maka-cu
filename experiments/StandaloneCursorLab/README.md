@@ -39,6 +39,8 @@ swift run StandaloneCursorLab
 
 - 点击画布任意位置，先预览当前 heading-driven candidate 族，再自动选一路径并驱动 cursor 过去。
 - 左上角保留 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW`、`SPRING` 5 个 slider，面板本身不再附带 `REPLAY` / `RESET` 按钮或额外指标文案，便于直接对照当前轨迹和画面观感。
+- 右上角现在只保留 `DEBUG` 一个 switch；`MAIL` / `CLICK` 已移除，click pulse 默认始终跟随当前 move 状态显示，不再单独暴露测试开关。
+- 左右两个角上的 panel 现在已经收成同一套更实的灰白卡片容器：相同的内边距、圆角、描边和阴影，并且降低了底层背景渐变透出来的程度，避免浅色区域里卡片边界发虚。
 - slider 调参时会重算当前 session 的整条 reference path，同时保持 cursor 本体停在当前位置；因此 `DEBUG` 开着时，settled 后继续拖 slider 也还能看到完整曲线反馈，不会退化成零长度路径。
 - `START HANDLE` 现在优先改变起步段的 guide / reach / normal 偏置，`END HANDLE` 则优先改变收尾段的 guide / reach / normal 偏置；两者不再只是一起放大整条曲线。
 - `ARC SIZE` 现在明确表示轨迹弧度本身，不是 cursor glyph 的尺寸；它会同时改变弧高/控制点侧向偏移，以及 chooser 对更直路径和更宽弧线路径的偏好。
@@ -46,6 +48,7 @@ swift run StandaloneCursorLab
 - `SPRING` 现在明确表示 progress spring 本身的快慢与阻尼，不再叠加额外 distance-based duration fudge；`0.5` 档会精确回到官方 `response=1.4`、`damping=0.9`、`343/240` endpoint-lock 时间，往左更快，往右更慢。
 - debug overlay 会显示控制点、arc handle 和当前选中的 candidate id / score。
 - 关闭 `DEBUG` 后不会展示任何轨迹线或目标点，只保留 cursor 本体，便于单独观察最终运动观感。
+- `DEBUG` switch 的开启态现在直接复用左侧 slider 的 accent 渐变，关闭态则收成浅灰底，避免开关两档的底色过近、肉眼不容易分辨。
 - lab 主线不再直接复用 raw binary lift 的 `20` 条 candidate + score；当前改为 reverse-engineering 约束下的 heading-driven chooser，把起始朝向和最终 resting pose 一起喂给路径选择器，让默认曲线更稳定收敛到单侧 C 形或近直线。
 - 主路径进度不再用 speculative `easeInOut` 或 terminal settle；现在直接复用官方风格 spring progress。
 - 默认档的 wall-clock move 时长现在直接对齐 reverse-engineered 官方 endpoint-lock 时间 `343 / 240 = 1.4291667s`；不再额外按路径距离压缩时长。

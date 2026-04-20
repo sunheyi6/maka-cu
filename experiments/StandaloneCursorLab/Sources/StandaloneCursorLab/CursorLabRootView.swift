@@ -17,8 +17,6 @@ struct CursorLabRootView: View {
     @State private var end = CGPoint(x: 860, y: 260)
     @State private var motionParameters = CursorMotionParameters.default
     @State private var debugEnabled = true
-    @State private var mailEnabled = false
-    @State private var clickEnabled = true
     @StateObject private var model = CursorLabViewModel()
 
     var body: some View {
@@ -30,7 +28,6 @@ struct CursorLabRootView: View {
                     start: $start,
                     end: $end,
                     debugEnabled: debugEnabled,
-                    showClickPulse: clickEnabled,
                     model: model
                 )
                 .onAppear {
@@ -67,7 +64,7 @@ struct CursorLabRootView: View {
     }
 
     private var controlPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        CursorPanelShell(alignment: .leading) {
             CursorParameterSliderRow(
                 title: "START HANDLE",
                 value: $motionParameters.startHandle
@@ -89,16 +86,11 @@ struct CursorLabRootView: View {
                 value: $motionParameters.spring
             )
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(CursorPanelBackground())
     }
 
     private var togglePanel: some View {
-        VStack(alignment: .trailing, spacing: 12) {
+        CursorPanelShell(alignment: .trailing) {
             CursorToggleRow(title: "DEBUG", isOn: $debugEnabled)
-            CursorToggleRow(title: "MAIL", isOn: $mailEnabled)
-            CursorToggleRow(title: "CLICK", isOn: $clickEnabled)
         }
     }
 
@@ -372,7 +364,6 @@ private struct CursorLabCanvas: View {
     @Binding var start: CGPoint
     @Binding var end: CGPoint
     let debugEnabled: Bool
-    let showClickPulse: Bool
     @ObservedObject var model: CursorLabViewModel
 
     var body: some View {
@@ -394,7 +385,7 @@ private struct CursorLabCanvas: View {
                 fogOffset: model.currentState.fogOffset,
                 fogOpacity: model.currentState.fogOpacity,
                 fogScale: model.currentState.fogScale,
-                clickPulse: showClickPulse ? model.clickPulse : 0
+                clickPulse: model.clickPulse
             )
             .position(model.currentState.point)
             .allowsHitTesting(false)
@@ -696,8 +687,8 @@ private struct CursorPanelBackground: View {
             .fill(
                 LinearGradient(
                     colors: [
-                        CursorLabPalette.mainSoft.opacity(0.82),
-                        CursorLabPalette.main.opacity(0.72),
+                        Color(red: 0.975, green: 0.976, blue: 0.982).opacity(0.97),
+                        Color(red: 0.915, green: 0.918, blue: 0.932).opacity(0.94),
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
@@ -705,9 +696,42 @@ private struct CursorPanelBackground: View {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .stroke(Color.white.opacity(0.30), lineWidth: 1)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.30),
+                                Color.white.opacity(0.06),
+                                CursorLabPalette.ink.opacity(0.03),
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
             }
-            .shadow(color: CursorLabPalette.ink.opacity(0.10), radius: 20, y: 8)
+            .overlay {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(Color.white.opacity(0.56), lineWidth: 1)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(CursorLabPalette.ink.opacity(0.06), lineWidth: 0.8)
+            }
+            .shadow(color: CursorLabPalette.ink.opacity(0.12), radius: 22, y: 10)
+            .shadow(color: Color.white.opacity(0.16), radius: 8, y: -1)
+    }
+}
+
+private struct CursorPanelShell<Content: View>: View {
+    let alignment: HorizontalAlignment
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: alignment, spacing: 12) {
+            content
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(CursorPanelBackground())
     }
 }
 
@@ -735,14 +759,53 @@ private struct CursorToggleStyle: ToggleStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         RoundedRectangle(cornerRadius: 10)
-            .fill(configuration.isOn ? accent : CursorLabPalette.ink.opacity(0.18))
+            .fill(
+                configuration.isOn
+                    ? AnyShapeStyle(
+                        LinearGradient(
+                            colors: [CursorLabPalette.accent, CursorLabPalette.accentSoft],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    : AnyShapeStyle(
+                        LinearGradient(
+                            colors: [
+                                CursorLabPalette.mainSoft.opacity(0.96),
+                                CursorLabPalette.mainMuted.opacity(0.88),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+            )
             .frame(width: 38, height: 20)
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(
+                        configuration.isOn
+                            ? CursorLabPalette.accentSoft.opacity(0.38)
+                            : CursorLabPalette.ink.opacity(0.10),
+                        lineWidth: 1
+                    )
+            }
             .overlay(alignment: configuration.isOn ? .trailing : .leading) {
                 Circle()
-                    .fill(Color.white)
+                    .fill(configuration.isOn ? Color.white : CursorLabPalette.ink.opacity(0.72))
                     .frame(width: 15, height: 15)
+                    .overlay {
+                        Circle()
+                            .stroke(Color.white.opacity(configuration.isOn ? 0.40 : 0.12), lineWidth: 1)
+                    }
                     .padding(2)
             }
+            .shadow(
+                color: configuration.isOn
+                    ? CursorLabPalette.accent.opacity(0.18)
+                    : CursorLabPalette.ink.opacity(0.04),
+                radius: configuration.isOn ? 10 : 5,
+                y: 3
+            )
             .contentShape(Rectangle())
             .onTapGesture {
                 configuration.isOn.toggle()

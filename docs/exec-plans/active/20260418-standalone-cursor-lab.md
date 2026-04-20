@@ -80,6 +80,9 @@
 - 2026-04-20：继续收紧 `SPRING`；当前它明确表示 progress spring 的 `response / damping` 与 endpoint-lock 时间，默认 `spring=0.5` 会精确回到官方 `.official` 配置。采样下，`spring=0.25 / 0.5 / 0.75` 分别对应约 `1.0958s / 1.4292s / 1.8750s` 的 endpoint-lock，语义已经收成稳定的“左快右慢”。
 - 2026-04-20：修正 `ARC FLOW` 首轮实现引入的中段“节点感”；问题不在 `SPRING`，而在那版显式中间锚点的双段曲线把路径本身做出了 join，叠加 debug overlay 又把这个中点强调出来。当前已经收回到单段 cubic，相位控制继续保留，但几何上不再存在中间 join。
 - 2026-04-20：继续修正 slider 调参状态流；当前已把“当前 cursor 位置”和“当前会话的 reference path”拆开，slider 重算时用最近一次真实 move 的 origin / startRotation + `queuedTarget` 更新整条调试曲线，同时只把 cursor snap 在当前位置，因此 settled 后调参也不会把 DEBUG 线重建成 `target -> target` 的零长度路径。
+- 2026-04-20：继续收口右上角控件；当前只保留 `DEBUG` 一个 switch，`MAIL` / `CLICK` 已移除，click pulse 默认常开，同时把 switch 的 on/off 底色拉开到和左侧 slider 一致的高对比语义。
+- 2026-04-20：继续收口左右 panel 的容器样式；当前左上 slider 面板和右上 `DEBUG` 面板已经统一复用同一套 card shell，不再分别维护不同的 padding / frame 包装。
+- 2026-04-20：继续修正 panel 在浅背景上的识别度；当前 card fill 已收成更实的灰白底，并加强描边和阴影，减少背景渐变直接透到 panel 上导致的“看起来像不同底色”问题。
 
 ## 决策记录
 
