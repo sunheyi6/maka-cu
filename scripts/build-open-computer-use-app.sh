@@ -217,6 +217,10 @@ codesign_app_bundle() {
     args+=(--keychain "${codesign_keychain}")
   fi
 
+  if [[ "${identity}" != "-" ]]; then
+    args+=(--options runtime)
+  fi
+
   run_with_codesign_keychain "${codesign_keychain}" \
     codesign "${args[@]}" "${app_path}" >/dev/null
 
