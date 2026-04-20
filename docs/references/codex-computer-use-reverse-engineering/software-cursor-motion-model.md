@@ -386,7 +386,7 @@ CursorView
 
 为了后续独立开源更干净，这块建议先作为单独目录推进，而不是直接和 MCP runtime 耦合：
 
-- 目录建议：`experiments/StandaloneCursorLab/`
+- 目录建议：`experiments/CursorMotion/`
 - 第一阶段先做一个纯本地 demo app，不接真实 tool call。
 - 等参数模型稳定后，再决定是否把其中的 `Motion Parameters` / `Path Builder` 下沉回 `packages/` 复用。
 

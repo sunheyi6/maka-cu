@@ -5,7 +5,8 @@
 ## 当前 release 入口
 
 - `scripts/release-package.sh`：构建 universal `Open Computer Use.app`，stage 三个 npm 包目录，并产出 `dist/release/npm/*.tgz` 与 `dist/release/release-manifest.json`。
-- `.github/workflows/release.yml`：支持 push semver tag 自动发布，也支持手动触发；它会调用仓库内的 npm release 打包逻辑，并优先兼容 GitHub Actions OIDC / npm Trusted Publishing，同时支持仓库 `NPM_TOKEN` secret 作为发布兜底。
+- `scripts/build-cursor-motion-dmg.sh`：本地构建 `Cursor Motion.app` 并封装 `dist/release/cursor-motion/CursorMotion-<version>.dmg`，支持 `native` / `arm64` / `x86_64` / `universal`。
+- `.github/workflows/release.yml`：支持 push semver tag 自动发布，也支持手动触发；tag push 时会同时跑 npm release 打包逻辑与 `Cursor Motion` 的 DMG 打包，并把 `.dmg` 上传到对应的 GitHub Releases 页面。当前 `Cursor Motion` 这条链路只做 ad-hoc codesign，不包含 notarization。
 
 ## 设计原则
 
@@ -31,6 +32,8 @@
 - `dist/release/npm/open-computer-use-<version>.tgz`
 - `dist/release/npm/open-computer-use-mcp-<version>.tgz`
 - `dist/release/npm/open-codex-computer-use-mcp-<version>.tgz`
+- `dist/release/cursor-motion/CursorMotion-<version>.dmg`
 - GitHub Actions 中上传的 npm release artifact
+- GitHub Releases 中和 tag 对齐的 `CursorMotion-<version>.dmg`
 
-也就是说，即使项目还没进入更复杂的部署阶段，仓库现在也已经具备了一条真实可复用的 npm 制品封装链路。
+也就是说，即使项目还没进入更复杂的部署阶段，仓库现在也已经同时具备了一条真实可复用的 npm 制品封装链路，以及一条由 git tag 驱动的 macOS app DMG 交付链路。

@@ -1,6 +1,6 @@
 # Cursor Motion RE Scripts
 
-这个目录承载和官方 `Codex Computer Use.app` cursor motion 逆向相关的独立脚本，不依赖 `StandaloneCursorLab`，也不接入主运行时。
+这个目录承载和官方 `Codex Computer Use.app` cursor motion 逆向相关的独立脚本，不依赖 `CursorMotion`，也不接入主运行时。
 
 当前脚本优先做两件事：
 

@@ -2,19 +2,19 @@ import AppKit
 import SwiftUI
 
 @main
-enum StandaloneCursorLabMain {
+enum CursorMotionMain {
     static func main() {
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)
 
-        let delegate = StandaloneCursorLabAppDelegate()
+        let delegate = CursorMotionAppDelegate()
         application.delegate = delegate
         application.run()
     }
 }
 
 @MainActor
-final class StandaloneCursorLabAppDelegate: NSObject, NSApplicationDelegate {
+final class CursorMotionAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -26,7 +26,7 @@ final class StandaloneCursorLabAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Standalone Cursor Lab"
+        window.title = "Cursor Motion"
         window.center()
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 1120, height: 760)
@@ -50,7 +50,7 @@ final class StandaloneCursorLabAppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appMenuItem)
 
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit Standalone Cursor Lab", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit Cursor Motion", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
         NSApp.mainMenu = mainMenu

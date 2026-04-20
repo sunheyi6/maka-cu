@@ -2,7 +2,7 @@
 
 ## 目标
 
-继续逆向官方 `Codex Computer Use.app` 的 cursor motion 实现，在不触碰现有 `StandaloneCursorLab` 的前提下，于 `scripts/` 下落一套独立的二进制分析与 demo 脚本，能够基于指定起终点输出候选路径、采样点和几何测量结果。
+继续逆向官方 `Codex Computer Use.app` 的 cursor motion 实现，在不触碰现有 `CursorMotion` 的前提下，于 `scripts/` 下落一套独立的二进制分析与 demo 脚本，能够基于指定起终点输出候选路径、采样点和几何测量结果。
 
 ## 范围
 
@@ -12,7 +12,7 @@
   - 实现一版 binary-guided 的 path sampling / measurement / candidate generation demo，输出 JSON 坐标样本与测量数据。
   - 把新的函数级分析和脚本使用方式沉淀到 `docs/` 与 history。
 - 不包含：
-  - 不修改 `experiments/StandaloneCursorLab/`。
+  - 不修改 `experiments/CursorMotion/`。
   - 不把这次脚本直接下沉到主 MCP runtime。
   - 不宣称已经 100% 还原闭源算法中所有 scoring / timing 细节。
 
@@ -26,7 +26,7 @@
   - `scripts/`
   - `~/.codex/plugins/cache/openai-bundled/computer-use/1.0.750/Codex Computer Use.app`
 - 已知约束：
-  - 当前仓库已有另一条 session 在持续修改 `experiments/StandaloneCursorLab`，本任务应避免与之冲突。
+  - 当前仓库已有另一条 session 在持续修改 `experiments/CursorMotion`，本任务应避免与之冲突。
   - 官方 bundle 为闭源二进制，当前主要依赖 `otool`、`llvm-objdump`、Swift metadata 和常量表恢复。
   - 这次 demo 优先做成纯脚本 / JSON 输出，不依赖 GUI。
 
@@ -67,7 +67,7 @@
 
 ## 决策记录
 
-- 2026-04-19：这条线不继续改 `StandaloneCursorLab`，而是单独在 `scripts/` 下做纯脚本 demo，避免与另一条 session 冲突。
+- 2026-04-19：这条线不继续改 `CursorMotion`，而是单独在 `scripts/` 下做纯脚本 demo，避免与另一条 session 冲突。
 - 2026-04-19：优先实现已从二进制函数级确认的 path sampling 和 measurement，再在此基础上做 candidate generation reconstruction，而不是反过来直接猜整套参数模型。
 - 2026-04-19：`0x100060da0` 已确认 score 公式为 `320 * excessLengthRatio + 140 * angleEnergy + 180 * maxAngle + 18 * totalTurn + 45 * outOfBounds`，并确认“优先选 in-bounds 再取最小 score”的策略；duration 仍保留为未完全恢复。
 - 2026-04-19：`0x10005fd98` 已进一步 lift 到字段级，当前脚本能按 bundled binary 生成完整 `20` 条候选，包含两条 base candidate、两段 cubic 的 arched candidate、真实 `CursorMotionPath/Segment` 布局，以及 guide vector `(-0.6946583704589973, 0.7193398003386512)`；runtime bounds 发现与 timing 仍单独保留为未完全恢复。

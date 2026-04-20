@@ -6,13 +6,13 @@
 * **Runtime**: `Codex CLI`
 
 ### 📥 User Query
-> 继续深挖官方 cursor motion，并在独立目录里做一个不和 `StandaloneCursorLab` 冲突的 demo，最好能指定起终点输出路线和速度相关采样。
+> 继续深挖官方 cursor motion，并在独立目录里做一个不和 `CursorMotion` 冲突的 demo，最好能指定起终点输出路线和速度相关采样。
 
 ### 🛠 Changes Overview
 **Scope:** `scripts/cursor-motion-re/`、`docs/exec-plans/active/`、`docs/references/`、`docs/histories/`
 
 **Key Actions:**
-- **[新增独立执行计划]**: 在 `docs/exec-plans/active/` 下为这条逆向 + 脚本化 demo 线路单独建 plan，并显式声明不触碰 `StandaloneCursorLab`。
+- **[新增独立执行计划]**: 在 `docs/exec-plans/active/` 下为这条逆向 + 脚本化 demo 线路单独建 plan，并显式声明不触碰 `CursorMotion`。
 - **[实现脚本化逆向工具]**: 新增 `scripts/cursor-motion-re/`，用纯 Python 实现最小 Mach-O section 解析、Swift field metadata 恢复和官方 binary 中的常量 / 候选系数表提取。
 - **[实现 binary-guided demo]**: 新增 CLI，支持 `inspect` 和 `demo` 两个子命令；`demo` 可对指定起终点生成候选路径、measurement 和采样点 JSON，并默认输出精简版 `candidate_summaries + chosen_candidate`。
 - **[确认候选打分与选择]**: 把 `0x100060da0` 中的 score 公式和 “prefer in-bounds, then choose minimum score” 策略回填进脚本输出，不再沿用之前的猜测权重。
@@ -24,7 +24,7 @@
 - **[同步目录导航]**: 更新 reverse-engineering README，把新的 reconstruction 文档纳入索引。
 
 ### 🧠 Design Intent (Why)
-当前已有另一条 session 在持续推进 `StandaloneCursorLab`，直接继续改实验 target 风险太高。这次改成 `scripts/` 下的独立脚本，一方面能继续深挖闭源实现，另一方面也能把“已确认”和“仍在 reconstruction”的部分明确分层，便于后续逐步替换。
+当前已有另一条 session 在持续推进 `CursorMotion`，直接继续改实验 target 风险太高。这次改成 `scripts/` 下的独立脚本，一方面能继续深挖闭源实现，另一方面也能把“已确认”和“仍在 reconstruction”的部分明确分层，便于后续逐步替换。
 
 ### 📁 Files Modified
 - `docs/exec-plans/active/20260419-official-cursor-motion-reconstruction.md`

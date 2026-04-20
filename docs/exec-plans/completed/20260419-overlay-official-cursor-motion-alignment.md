@@ -16,7 +16,7 @@
   - 保留当前仓库已有的 target-window 命中优先策略，但把它降为官方候选集合上的 tie-break，而不是继续使用旧的 7 条固定候选。
   - 补单元测试、history 和架构文档。
 - 不包含：
-  - 不修改 `experiments/StandaloneCursorLab/`。
+  - 不修改 `experiments/CursorMotion/`。
   - 不把这次变更扩展到 pulse / fog / idle sway 的完整官方 choreography。
   - 不宣称已经恢复官方 `finished` gate 的全部字段语义命名。
 

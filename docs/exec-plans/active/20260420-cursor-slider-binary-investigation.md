@@ -23,7 +23,7 @@
   - `docs/exec-plans/active/20260419-official-cursor-motion-reconstruction.md`
 - 相关代码路径：
   - `scripts/cursor-motion-re/`
-  - `experiments/StandaloneCursorLab/`
+  - `experiments/CursorMotion/`
 - 已知约束：
   - 当前本机可用的官方 binary 为 `~/.codex/plugins/cache/openai-bundled/computer-use/1.0.750/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService`。
   - 用户看到的 slider 来自视频 / 调试构建，不代表 shipping bundle 一定保留相同 UI 文案。

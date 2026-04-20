@@ -25,8 +25,8 @@ let package = Package(
             targets: ["OpenComputerUseSmokeSuite"]
         ),
         .executable(
-            name: "StandaloneCursorLab",
-            targets: ["StandaloneCursorLab"]
+            name: "CursorMotion",
+            targets: ["CursorMotion"]
         ),
         .executable(
             name: "StandaloneCursor",
@@ -54,8 +54,8 @@ let package = Package(
             path: "apps/OpenComputerUseSmokeSuite/Sources/OpenComputerUseSmokeSuite"
         ),
         .executableTarget(
-            name: "StandaloneCursorLab",
-            path: "experiments/StandaloneCursorLab/Sources/StandaloneCursorLab"
+            name: "CursorMotion",
+            path: "experiments/CursorMotion/Sources/CursorMotion"
         ),
         .target(
             name: "StandaloneCursorSupport",

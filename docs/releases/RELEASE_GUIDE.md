@@ -14,6 +14,7 @@
 ## 当前 release 入口
 
 - 本地 staging / 打 tgz：`./scripts/release-package.sh`
+- 本地构建 Cursor Motion DMG：`./scripts/build-cursor-motion-dmg.sh --configuration release --arch universal --version <version>`
 - 本地 stage npm 包目录：`node ./scripts/npm/build-packages.mjs`
 - 本地 publish：`node ./scripts/npm/publish-packages.mjs`
 - CI workflow：`.github/workflows/release.yml`
@@ -21,13 +22,17 @@
 
 ## 当前版本源
 
-这个仓库的 npm staging 包版本，当前以 `plugins/open-computer-use/.codex-plugin/plugin.json` 里的 `version` 为准。
+这个仓库当前有两类 release 版本源：
+
+- npm staging 包版本：以 `plugins/open-computer-use/.codex-plugin/plugin.json` 里的 `version` 为准。
+- `CursorMotion-<version>.dmg` 文件名与 GitHub Release asset 版本：以 release tag 为准；workflow 会把 `vX.Y.Z` 规范化成 `X.Y.Z` 写进 DMG 文件名，也可以在本地显式传 `--version`。
 
 也就是说：
 
 - 只改 git tag，不改这个 manifest，不会得到新 npm 版本。
 - `scripts/npm/build-packages.mjs` 会从这个 manifest 读取版本，再生成三个 staging 包。
 - 所以 release 前必须先把这份 manifest bump 到目标版本。
+- 如果要让 `CursorMotion` 的 DMG 文件名和 release 页面资产名正确落到目标版本，也必须使用目标 tag 推送，或本地显式传入同样的 `--version`。
 
 ## Release Checklist
 
@@ -48,20 +53,22 @@
 
 ### 2. 本地验证版本源已经生效
 
-至少跑这两步：
+至少跑这三步：
 
 ```bash
 swift test
 node ./scripts/npm/build-packages.mjs --skip-build --out-dir dist/release/npm-staging-check
+./scripts/build-cursor-motion-dmg.sh --configuration release --arch universal --version 0.1.12
 ```
 
-然后直接检查 staging 包版本：
+然后直接检查 staging 包版本和 DMG 文件名：
 
 ```bash
 node -p "require('./dist/release/npm-staging-check/open-codex-computer-use-mcp/package.json').version"
+ls dist/release/cursor-motion/CursorMotion-0.1.12.dmg
 ```
 
-如果这里打印的不是目标版本，不要打 tag。
+如果这里打印的不是目标版本，或者 DMG 没按目标版本名产出，不要打 tag。
 
 ### 3. 提交版本 bump
 
@@ -78,6 +85,11 @@ git push origin main
 git push origin v0.1.12
 ```
 
+tag push 后，`.github/workflows/release.yml` 会自动做两件事：
+
+- 发布 npm 包。
+- 构建 `CursorMotion-0.1.12.dmg`，并创建或更新同名 tag 的 GitHub Release asset。
+
 ## Release 失败时怎么查
 
 ### 1. 先看最新 run
@@ -93,9 +105,16 @@ gh run view -R iFurySt/open-codex-computer-use <run-id> --log-failed
   - 通常不是 token 权限问题，而是 staging 包版本仍然是旧版本。
   - 先回头检查 `plugin.json` 的 `version`，再检查 staging 包实际产出的 `package.json`。
 - 构建阶段失败
-  - 优先看 `Build npm release artifacts` 或 Swift 编译错误。
+  - 优先看 `Build npm release artifacts`、`Build Cursor Motion DMG` 或 Swift 编译错误。
+- GitHub Release 资产上传失败
+  - 优先看 `Publish Cursor Motion DMG to GitHub Releases`，确认 tag 是否存在、`GH_TOKEN` 权限是否正常，以及生成的 `CursorMotion-<version>.dmg` 路径是否匹配。
 - publish 认证失败
   - 再去看 `.github/workflows/release.yml`、`scripts/npm/publish-packages.mjs` 和 npm trusted publishing / token fallback 配置。
+
+## 当前已知边界
+
+- `Cursor Motion` 当前 release 资产只做 ad-hoc codesign，不包含 Apple Developer ID 签名和 notarization。
+- 如果后续要把下载体验收口成更标准的 macOS 分发流程，还需要继续补 Developer ID signing、notarization 和对应 secret / keychain 流程。
 
 ## 如果 tag 已经打错了
 

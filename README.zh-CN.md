@@ -61,17 +61,13 @@ open-computer-use doctor
 open-computer-use -h
 ```
 
-## Cursor Demos
+## Cursor Motion
 
-仓库里现在有两条独立的 cursor motion demo 线路，把“基于重建脚本的直接实现”和“更自由的实验室版本”拆开维护：
+Cursor Motion 是一个面向 macOS 的开源光标运动系统，基于 Software.Inc 几位大佬的公开信息实现的开源版本，可以代码里运行，也可以到 [Releases 页面](https://github.com/iFurySt/open-codex-computer-use/releases) 下载 app 运行。
 
 ```bash
-swift run StandaloneCursor
-swift run StandaloneCursorLab
+swift run CursorMotion
 ```
-
-- [`experiments/StandaloneCursor`](./experiments/StandaloneCursor) 是一条更干净的 binary-guided viewer，直接对应 `scripts/cursor-motion-re/official_cursor_motion.py` 里的候选路径池、score 和 raw spring timeline。
-- [`experiments/StandaloneCursorLab`](./experiments/StandaloneCursorLab) 继续保留为更偏实验的 lab，用来做 UI、candidate overlay 和 visual dynamics 调参。
 
 ## License
 

@@ -18,7 +18,7 @@
   - 键鼠输入模拟
   - software cursor overlay
   - fixture test bridge
-- `experiments/StandaloneCursorLab`
+- `experiments/CursorMotion`
   独立的 Swift cursor motion lab，用于试验 `Bezier + arc + spring` 参数模型、调参 UI 和独立渲染，不直接耦合主 MCP runtime。
 - `experiments/StandaloneCursor`
   新的独立 Swift cursor viewer，直接复用 `scripts/cursor-motion-re/official_cursor_motion.py` 里收敛出来的候选路径、score 与 raw spring timeline，用来观察更贴近 binary lift 的表现。
@@ -82,8 +82,8 @@
 
 - `StandaloneCursor` 是一个新的独立 SwiftUI/AppKit demo target，可通过 `swift run StandaloneCursor` 本地启动。
 - 这条线优先验证 Python 重建脚本已经收敛出来的核心：`20` 条候选路径、`measure + score`、`prefer in-bounds then lowest-score` 选路，以及 `response=1.4` / `dampingFraction=0.9` / `dt=1/240` 的 raw spring timeline。
-- 当前它刻意不引入 speculative 的 wall-clock duration 映射，也不复用 `StandaloneCursorLab` 里更偏视觉手感试验的 pose dynamics。
-- `StandaloneCursorLab` 是一个单独的 SwiftUI demo target，可通过 `swift run StandaloneCursorLab` 本地启动。
+- 当前它刻意不引入 speculative 的 wall-clock duration 映射，也不复用 `CursorMotion` 里更偏视觉手感试验的 pose dynamics。
+- `CursorMotion` 是一个单独的 SwiftUI demo target，可通过 `swift run CursorMotion` 本地启动。
 - 这条线优先验证 motion model 本身：当前主线是 heading-driven 的 turn / brake / orbit / direct candidate 族、spring progress、独立 visual dynamics 和 debug UI；moving 阶段真正画出来的箭头角度会持续跟随 visual dynamics 的主 heading，接近停住后再平滑回到默认 resting pose，并在 idle 阶段保留原地小摆角。
 - lab 的 cursor 视觉当前单独参考 `scripts/render-synthesized-software-cursor.swift`：优先使用仓库里保存的官方 `252x252` runtime baseline 图，缺失时再退回脚本里的 procedural pointer/fog 近似；settle 态也改成中心固定的小幅摆角，而不是继续沿 XY 轻微漂移。
 - 当前它不接真实 tool call，也不回写主 `SoftwareCursorOverlay`，目的是把实验噪音与产品行为边界隔离开。
@@ -100,7 +100,7 @@
 
 - 单元测试：`swift test`
 - standalone cursor 构建：`swift build --product StandaloneCursor`
-- cursor lab 构建：`swift build --product StandaloneCursorLab`
+- cursor lab 构建：`swift build --product CursorMotion`
 - 端到端 smoke：`./scripts/run-tool-smoke-tests.sh`
 - app 打包：`./scripts/build-open-computer-use-app.sh debug`
 - npm staging：`node ./scripts/npm/build-packages.mjs`

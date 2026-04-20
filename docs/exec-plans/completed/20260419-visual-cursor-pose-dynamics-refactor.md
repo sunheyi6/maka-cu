@@ -12,7 +12,7 @@
   - 调整 `SoftwareCursorView` 的渲染输入，增加 velocity-driven 的姿态与 fog/offset 表现。
   - 补单元测试、架构文档和 history。
 - 不包含：
-  - 不修改 `experiments/StandaloneCursorLab/`。
+  - 不修改 `experiments/CursorMotion/`。
   - 不宣称已经精确恢复官方 `FogCursorViewModel` 的全部字段公式。
   - 不把这次改动扩展到完整 host choreography 或加载态 token。
 
@@ -26,7 +26,7 @@
   - `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/CursorMotionModel.swift`
   - `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift`
 - 已知约束：
-  - 另一条 session 仍在推进 `StandaloneCursorLab`，这次不能去碰实验 target。
+  - 另一条 session 仍在推进 `CursorMotion`，这次不能去碰实验 target。
   - `CursorMotionPath.sample(progress)` 的 endpoint clamp 已经 binary-confirmed。
   - `Style.velocityX / velocityY / angle`、`currentInterpolatedOrigin`、`FogCursorViewModel._velocityX / _velocityY / _angle`、`CursorView._animatedAngleOffsetDegrees` 这些状态存在，但还没有完整公式级 lift。
 

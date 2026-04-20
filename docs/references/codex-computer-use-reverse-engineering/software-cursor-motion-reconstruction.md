@@ -496,7 +496,7 @@ else:
 
 ## 脚本化落点
 
-这次为了避开 `StandaloneCursorLab`，在 `scripts/cursor-motion-re/` 下落了一套独立脚本：
+这次为了避开 `CursorMotion`，在 `scripts/cursor-motion-re/` 下落了一套独立脚本：
 
 - `reconstruct_cursor_motion.py inspect`
   - 读取官方 binary，输出已恢复的 motion 类型、字段、常量和候选系数表。

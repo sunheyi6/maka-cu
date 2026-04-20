@@ -19,7 +19,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -69,3 +69,47 @@ jobs:
             --skip-build \
             --out-dir dist/release/npm-staging \
             --tag "${NPM_DIST_TAG}"
+
+  release-cursor-motion-dmg:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: macos-26
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Make DMG build script executable
+        run: chmod +x ./scripts/build-cursor-motion-dmg.sh
+
+      - name: Build Cursor Motion DMG
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          ./scripts/build-cursor-motion-dmg.sh \
+            --configuration release \
+            --arch universal \
+            --version "${version}"
+
+      - name: Upload Cursor Motion release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cursor-motion-release-artifact
+          path: dist/release/cursor-motion/*.dmg
+          if-no-files-found: error
+
+      - name: Publish Cursor Motion DMG to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          dmg_path="dist/release/cursor-motion/CursorMotion-${version}.dmg"
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${dmg_path}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${dmg_path}" \
+              --title "${RELEASE_TAG}" \
+              --generate-notes
+          fi

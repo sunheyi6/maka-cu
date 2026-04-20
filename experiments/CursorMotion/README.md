@@ -1,4 +1,4 @@
-# Standalone Cursor Lab
+# Cursor Motion
 
 这个目录用于实现一个可独立演进、后续可单独开源的软件 cursor motion demo。
 
@@ -32,7 +32,7 @@
 当前已经有一个可运行的 SwiftUI demo target：
 
 ```bash
-swift run StandaloneCursorLab
+swift run CursorMotion
 ```
 
 现阶段支持：
@@ -67,5 +67,5 @@ swift run StandaloneCursorLab
 - 当前 `ARC FLOW` 的实现边界是“单段 cubic 的前后相位偏置”；它更接近 reverse-engineering 里 `arcAnchorBias` 这类几何前后偏置，不宣称已经和 release binary 内部某个独立 `flow` 字段一一对应。
 - 当前 `SPRING` 的实现边界是“围绕官方 `1.4 / 0.9` 的 centered spring remap”；它直接改变 progress spring 的 `response / damping` 与 endpoint-lock 时间，但不宣称已经恢复出 release app 内部 debug slider 的精确 remap helper。
 - 路径层、progress 层和 visible pose 层继续保持分离。
-- 没有真实 target window 的场景里，要明确区分 `StandaloneCursor` 的 raw reverse-engineered pool 和 `StandaloneCursorLab` 的 heading-driven 主线实现。
+- 没有真实 target window 的场景里，要明确区分 `StandaloneCursor` 的 raw reverse-engineered pool 和 `CursorMotion` 的 heading-driven 主线实现。
 - demo host 可以替换，但 motion model 和 visual dynamics 应保持可单独复用。

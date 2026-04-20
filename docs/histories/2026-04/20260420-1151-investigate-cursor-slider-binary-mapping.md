@@ -16,7 +16,7 @@
 - **[补 shipping bundle 证据边界]**: 明确记录当前 release bundle 未命中 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW` 这些完整 phrase；`SPRING` / `DEBUG` / `MAIL` / `CLICK` 仅作为歧义 token 命中，不再被误写成“debug UI 仍然随 release shipping”。
 - **[沉淀 slider 映射文档]**: 新增 `software-cursor-slider-parameter-investigation.md`，把 `start/end handle`、`arc size/flow`、`spring` 各自对应的 binary-confirmed 几何 / timing 量，以及默认样例 / 居中样例下的实际曲线影响单独沉淀。
 - **[同步旧文档口径]**: `software-cursor-motion-model.md` 不再只写“视频里有 slider UI”，而是补充说明当前 shipping bundle phrase scan 没有直接命中这组 label。
-- **[新增独立执行计划]**: 为这轮参数映射调查新增 active execution plan，避免继续挤在之前的 cursor reconstruction 或 StandaloneCursorLab UI 任务里。
+- **[新增独立执行计划]**: 为这轮参数映射调查新增 active execution plan，避免继续挤在之前的 cursor reconstruction 或 CursorMotion UI 任务里。
 
 ### 🧠 Design Intent (Why)
 这轮的关键不是继续猜 5 个 slider 在 UI 上长什么样，而是把“release binary 里还能直接确认什么”和“我们如何基于这些量推断 slider 对曲线的影响”明确分层。这样后续继续挖 `ARC FLOW` 或 spring remap 时，就不会把 shipping 证据、视频证据和本地 lab 调参混成一团。
