@@ -2,7 +2,7 @@
 
 [English Version](./README.md)
 
-[![查看演示视频](https://img.youtube.com/vi/2s6aVpGiwaQ/0.jpg)](https://youtu.be/2s6aVpGiwaQ)
+[![open-computer-use 自定义演示封面](./docs/generated/readme-assets/open-computer-use-demo-cover.png)](https://youtu.be/2s6aVpGiwaQ)
 
 `open-computer-use` 是一个开源的 `Computer Use` 服务，已经包装成 `MCP` 协议，支持所有的 AI Agent 或 MCP Client 快速调用，实现 macOS 上的 `Computer Use` 能力
 
@@ -69,7 +69,7 @@ Cursor Motion 是一个面向 macOS 的开源光标运动系统，基于 Softwar
 swift run CursorMotion
 ```
 
-[![查看演示视频](https://img.youtube.com/vi/KRUq5GUHv1Q/0.jpg)](https://youtu.be/KRUq5GUHv1Q)
+[![Cursor Motion 自定义演示封面](./docs/generated/readme-assets/cursor-motion-demo-cover.png)](https://youtu.be/KRUq5GUHv1Q)
 
 
 ## License

@@ -1,8 +1,8 @@
 # open-computer-use
 
- [中文说明](./README.zh-CN.md)
+[中文说明](./README.zh-CN.md)
 
- [![Watch the demo](https://img.youtube.com/vi/2s6aVpGiwaQ/0.jpg)](https://youtu.be/2s6aVpGiwaQ)
+[![Open Computer Use custom demo cover](./docs/generated/readme-assets/open-computer-use-demo-cover.png)](https://youtu.be/2s6aVpGiwaQ)
 
 `open-computer-use` is an open-source `Computer Use` service exposed over `MCP`, so any AI agent or MCP client can call it directly and use computer interaction capabilities on macOS.
 
@@ -64,7 +64,7 @@ Cursor Motion is an open-source cursor motion system for macOS, based on public 
 swift run CursorMotion
 ```
 
-[![Watch the demo](https://img.youtube.com/vi/KRUq5GUHv1Q/0.jpg)](https://youtu.be/KRUq5GUHv1Q)
+[![Cursor Motion custom demo cover](./docs/generated/readme-assets/cursor-motion-demo-cover.png)](https://youtu.be/KRUq5GUHv1Q)
 
 ## License
 
