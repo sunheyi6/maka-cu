@@ -35,11 +35,12 @@ public enum SystemPermissionKind: String, CaseIterable, Sendable {
     }
 
     public var dragInstruction: String {
+        let appName = PermissionSupport.currentBundleDisplayName()
         switch self {
         case .accessibility:
-            return "Drag Open Computer Use above to allow Accessibility"
+            return "Drag \(appName) above to allow Accessibility"
         case .screenRecording:
-            return "Drag Open Computer Use above to allow Screenshots"
+            return "Drag \(appName) above to allow Screenshots"
         }
     }
 
@@ -100,26 +101,46 @@ public struct PermissionDiagnostics: Sendable {
 public enum PermissionSupport {
     public static let bundleDisplayName = "Open Computer Use"
     public static let bundleIdentifier = "com.ifuryst.opencomputeruse"
-    private static let appBundleName = "\(bundleDisplayName).app"
+    public static let developmentBundleDisplayName = "Open Computer Use (Dev)"
+    public static let developmentBundleIdentifier = "com.ifuryst.opencomputeruse.dev"
+    private static let releaseAppBundleName = "\(bundleDisplayName).app"
+    private static let developmentAppBundleName = "\(developmentBundleDisplayName).app"
+    private static let appVariantInfoKey = "OpenComputerUseAppVariant"
     private static let npmPackageNames = [
         "open-computer-use",
         "open-computer-use-mcp",
         "open-codex-computer-use-mcp",
     ]
 
+    public static func currentBundleDisplayName(bundle: Bundle = .main) -> String {
+        let displayName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+        let bundleName = bundle.object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String
+
+        return displayName ?? bundleName ?? (isDevelopmentBundleIdentifier(bundle.bundleIdentifier) ? developmentBundleDisplayName : bundleDisplayName)
+    }
+
+    public static func isOpenComputerUseBundleIdentifier(_ bundleIdentifier: String?) -> Bool {
+        bundleIdentifier == Self.bundleIdentifier || bundleIdentifier == developmentBundleIdentifier
+    }
+
     public static func currentAppBundleURL() -> URL? {
-        preferredPermissionAppBundleURL(
+        let runningBundleURL = resolvedMainAppBundleURL()
+        return preferredPermissionAppBundleURL(
             preferredInstalledBundleURL: preferredInstalledAppBundleURL(),
-            runningBundleURL: resolvedMainAppBundleURL(),
-            fallbackDevelopmentBundleURL: fallbackDevelopmentAppBundleURL()
+            runningBundleURL: runningBundleURL,
+            fallbackDevelopmentBundleURL: fallbackDevelopmentAppBundleURL(),
+            preferRunningBundle: isDevelopmentAppBundle(runningBundleURL)
         )
     }
 
     public static func currentPermissionClients() -> [PermissionClientRecord] {
-        permissionClients(
+        let runningBundleURL = resolvedMainAppBundleURL()
+        let mainBundleIdentifier = resolvedBundleIdentifier(for: runningBundleURL) ?? Bundle.main.bundleIdentifier
+        return permissionClients(
             primaryBundleURL: currentAppBundleURL(),
-            runningBundleURL: resolvedMainAppBundleURL(),
-            mainBundleIdentifier: Bundle.main.bundleIdentifier
+            runningBundleURL: runningBundleURL,
+            mainBundleIdentifier: mainBundleIdentifier,
+            includeCanonicalBundleIdentifier: !isDevelopmentBundleIdentifier(mainBundleIdentifier)
         )
     }
 
@@ -135,15 +156,21 @@ public enum PermissionSupport {
     static func preferredPermissionAppBundleURL(
         preferredInstalledBundleURL: URL?,
         runningBundleURL: URL?,
-        fallbackDevelopmentBundleURL: URL?
+        fallbackDevelopmentBundleURL: URL?,
+        preferRunningBundle: Bool = false
     ) -> URL? {
-        preferredInstalledBundleURL ?? runningBundleURL ?? fallbackDevelopmentBundleURL
+        if preferRunningBundle {
+            return runningBundleURL ?? preferredInstalledBundleURL ?? fallbackDevelopmentBundleURL
+        }
+
+        return preferredInstalledBundleURL ?? runningBundleURL ?? fallbackDevelopmentBundleURL
     }
 
     static func permissionClients(
         primaryBundleURL: URL?,
         runningBundleURL: URL?,
         mainBundleIdentifier: String?,
+        includeCanonicalBundleIdentifier: Bool = true,
         canonicalBundleIdentifier: String = bundleIdentifier
     ) -> [PermissionClientRecord] {
         var records: [PermissionClientRecord] = []
@@ -156,9 +183,13 @@ public enum PermissionSupport {
             records.append(record)
         }
 
-        append(PermissionClientRecord(identifier: canonicalBundleIdentifier, type: 0))
+        if includeCanonicalBundleIdentifier {
+            append(PermissionClientRecord(identifier: canonicalBundleIdentifier, type: 0))
+        }
 
-        if let mainBundleIdentifier, mainBundleIdentifier != canonicalBundleIdentifier {
+        if let mainBundleIdentifier,
+           (!includeCanonicalBundleIdentifier || mainBundleIdentifier != canonicalBundleIdentifier)
+        {
             append(PermissionClientRecord(identifier: mainBundleIdentifier, type: 0))
         }
 
@@ -211,7 +242,7 @@ public enum PermissionSupport {
         appendCandidate(NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier))
 
         for directory in standardApplicationDirectories() {
-            appendCandidate(directory.appendingPathComponent(appBundleName, isDirectory: true))
+            appendCandidate(directory.appendingPathComponent(releaseAppBundleName, isDirectory: true))
         }
 
         for nodeModulesRoot in npmGlobalNodeModulesRoots() {
@@ -220,7 +251,7 @@ public enum PermissionSupport {
                     nodeModulesRoot
                     .appendingPathComponent(packageName, isDirectory: true)
                     .appendingPathComponent("dist", isDirectory: true)
-                    .appendingPathComponent(appBundleName, isDirectory: true)
+                    .appendingPathComponent(releaseAppBundleName, isDirectory: true)
                 )
             }
         }
@@ -229,7 +260,7 @@ public enum PermissionSupport {
             appendCandidate(prefix
                 .appendingPathComponent("Caskroom", isDirectory: true)
                 .appendingPathComponent("open-computer-use", isDirectory: true)
-                .appendingPathComponent(appBundleName, isDirectory: true)
+                .appendingPathComponent(releaseAppBundleName, isDirectory: true)
             )
 
             let caskroomRoot = prefix
@@ -237,7 +268,7 @@ public enum PermissionSupport {
                 .appendingPathComponent("open-computer-use", isDirectory: true)
             if let versionDirectories = try? fileManager.contentsOfDirectory(at: caskroomRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                 for versionDirectory in versionDirectories {
-                    appendCandidate(versionDirectory.appendingPathComponent(appBundleName, isDirectory: true))
+                    appendCandidate(versionDirectory.appendingPathComponent(releaseAppBundleName, isDirectory: true))
                 }
             }
 
@@ -248,7 +279,7 @@ public enum PermissionSupport {
                 for versionDirectory in versionDirectories {
                     appendCandidate(versionDirectory
                         .appendingPathComponent("dist", isDirectory: true)
-                        .appendingPathComponent(appBundleName, isDirectory: true)
+                        .appendingPathComponent(releaseAppBundleName, isDirectory: true)
                     )
                 }
             }
@@ -265,12 +296,17 @@ public enum PermissionSupport {
         var directoryURL = executableURL.deletingLastPathComponent()
 
         while directoryURL.path != "/" {
-            let candidate = directoryURL
-                .appendingPathComponent("dist", isDirectory: true)
-                .appendingPathComponent(appBundleName, isDirectory: true)
+            for (bundleName, acceptedBundleIdentifiers) in [
+                (developmentAppBundleName, Set([developmentBundleIdentifier])),
+                (releaseAppBundleName, Set([bundleIdentifier])),
+            ] {
+                let candidate = directoryURL
+                    .appendingPathComponent("dist", isDirectory: true)
+                    .appendingPathComponent(bundleName, isDirectory: true)
 
-            if isValidAppBundle(candidate) {
-                return candidate
+                if isValidAppBundle(candidate, acceptedBundleIdentifiers: acceptedBundleIdentifiers) {
+                    return candidate
+                }
             }
 
             let parentURL = directoryURL.deletingLastPathComponent()
@@ -352,21 +388,56 @@ public enum PermissionSupport {
 
     private static func resolvedMainAppBundleURL() -> URL? {
         let bundleURL = Bundle.main.bundleURL.standardizedFileURL
-        guard bundleURL.pathExtension == "app", isValidAppBundle(bundleURL) else {
+        guard bundleURL.pathExtension == "app",
+              isValidAppBundle(bundleURL, acceptedBundleIdentifiers: [bundleIdentifier, developmentBundleIdentifier])
+        else {
             return nil
         }
 
         return bundleURL
     }
 
-    private static func isValidAppBundle(_ bundleURL: URL) -> Bool {
+    private static func resolvedBundleIdentifier(for bundleURL: URL?) -> String? {
+        guard let bundleURL, let bundle = Bundle(url: bundleURL) else {
+            return nil
+        }
+
+        return bundle.bundleIdentifier
+    }
+
+    private static func isDevelopmentBundleIdentifier(_ bundleIdentifier: String?) -> Bool {
+        bundleIdentifier == developmentBundleIdentifier
+    }
+
+    private static func isDevelopmentAppBundle(_ bundleURL: URL?) -> Bool {
+        guard let bundleURL, let bundle = Bundle(url: bundleURL) else {
+            return false
+        }
+
+        if let variant = bundle.object(forInfoDictionaryKey: appVariantInfoKey) as? String,
+           variant.caseInsensitiveCompare("dev") == .orderedSame
+        {
+            return true
+        }
+
+        if isDevelopmentBundleIdentifier(bundle.bundleIdentifier) {
+            return true
+        }
+
+        return bundleURL.lastPathComponent == developmentAppBundleName
+    }
+
+    private static func isValidAppBundle(
+        _ bundleURL: URL,
+        acceptedBundleIdentifiers: Set<String> = [bundleIdentifier]
+    ) -> Bool {
         let fileManager = FileManager.default
         let infoPlistURL = bundleURL.appendingPathComponent("Contents/Info.plist")
         guard fileManager.fileExists(atPath: infoPlistURL.path),
               let bundle = Bundle(url: bundleURL),
               let executableName = bundle.object(forInfoDictionaryKey: kCFBundleExecutableKey as String) as? String,
               !executableName.isEmpty,
-              bundle.bundleIdentifier == bundleIdentifier
+              acceptedBundleIdentifiers.contains(bundle.bundleIdentifier ?? "")
         else {
             return false
         }

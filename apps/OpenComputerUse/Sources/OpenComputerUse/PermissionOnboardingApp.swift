@@ -56,7 +56,7 @@ final class PermissionWindowController: NSWindowController {
             defer: false
         )
 
-        window.title = PermissionSupport.bundleDisplayName
+        window.title = PermissionSupport.currentBundleDisplayName()
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
@@ -1113,7 +1113,9 @@ final class DraggableAppTileView: NSView, NSDraggingSource {
 
     private func currentIcon() -> NSImage {
         if let bundleURL = PermissionSupport.currentAppBundleURL() {
-            if let bundle = Bundle(url: bundleURL), bundle.bundleIdentifier == PermissionSupport.bundleIdentifier {
+            if let bundle = Bundle(url: bundleURL),
+               PermissionSupport.isOpenComputerUseBundleIdentifier(bundle.bundleIdentifier)
+            {
                 return Branding.makeAppIconImage(size: 128)
             }
 

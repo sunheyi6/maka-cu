@@ -89,6 +89,21 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(resolved, installed)
     }
 
+    func testPreferredPermissionAppBundleURLPrefersRunningDevelopmentCopy() {
+        let installed = URL(fileURLWithPath: "/Applications/Open Computer Use.app")
+        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use (Dev).app")
+        let fallback = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use-debug/dist/Open Computer Use (Dev).app")
+
+        let resolved = PermissionSupport.preferredPermissionAppBundleURL(
+            preferredInstalledBundleURL: installed,
+            runningBundleURL: running,
+            fallbackDevelopmentBundleURL: fallback,
+            preferRunningBundle: true
+        )
+
+        XCTAssertEqual(resolved, running)
+    }
+
     func testPreferredInstalledAppBundleURLUsesFirstDiscoveredInstalledCopy() {
         let applications = URL(fileURLWithPath: "/Applications/Open Computer Use.app")
         let npm = URL(fileURLWithPath: "/opt/homebrew/lib/node_modules/open-computer-use/dist/Open Computer Use.app")
@@ -116,6 +131,25 @@ final class OpenComputerUseKitTests: XCTestCase {
             [
                 PermissionClientRecord(identifier: PermissionSupport.bundleIdentifier, type: 0),
                 PermissionClientRecord(identifier: installed.path, type: 1),
+                PermissionClientRecord(identifier: running.path, type: 1),
+            ]
+        )
+    }
+
+    func testPermissionClientsKeepDevelopmentBundleIdentitySeparateFromRelease() {
+        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use (Dev).app")
+
+        let clients = PermissionSupport.permissionClients(
+            primaryBundleURL: running,
+            runningBundleURL: running,
+            mainBundleIdentifier: PermissionSupport.developmentBundleIdentifier,
+            includeCanonicalBundleIdentifier: false
+        )
+
+        XCTAssertEqual(
+            clients,
+            [
+                PermissionClientRecord(identifier: PermissionSupport.developmentBundleIdentifier, type: 0),
                 PermissionClientRecord(identifier: running.path, type: 1),
             ]
         )

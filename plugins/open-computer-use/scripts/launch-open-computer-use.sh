@@ -6,7 +6,9 @@ plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo_root="$(cd "${plugin_root}/../.." && pwd)"
 candidate_binaries=(
   "${plugin_root}/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
+  "${plugin_root}/Open Computer Use (Dev).app/Contents/MacOS/OpenComputerUse"
   "${plugin_root}/OpenComputerUse.app/Contents/MacOS/OpenComputerUse"
+  "${repo_root}/dist/Open Computer Use (Dev).app/Contents/MacOS/OpenComputerUse"
   "${repo_root}/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
   "${repo_root}/dist/OpenComputerUse.app/Contents/MacOS/OpenComputerUse"
 )

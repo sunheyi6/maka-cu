@@ -187,18 +187,38 @@ cd "${repo_root}"
 
 package_version="$(read_package_version)"
 bundle_version="${OPEN_COMPUTER_USE_BUNDLE_VERSION:-$(git -C "${repo_root}" rev-list --count HEAD 2>/dev/null || echo 1)}"
-app_bundle_name="Open Computer Use.app"
+release_app_bundle_name="Open Computer Use.app"
+development_app_bundle_name="Open Computer Use (Dev).app"
 legacy_app_bundle_name="OpenComputerUse.app"
 bundle_icon_name="OpenComputerUse.icns"
 icon_render_script="${repo_root}/scripts/render-open-computer-use-icon.swift"
 
+bundle_display_name="Open Computer Use"
+bundle_identifier="com.ifuryst.opencomputeruse"
+app_variant="release"
+app_bundle_name="${release_app_bundle_name}"
+
+if [[ "${configuration}" != "release" ]]; then
+  bundle_display_name="Open Computer Use (Dev)"
+  bundle_identifier="com.ifuryst.opencomputeruse.dev"
+  app_variant="dev"
+  app_bundle_name="${development_app_bundle_name}"
+fi
+
 app_root="${repo_root}/dist/${app_bundle_name}"
+release_app_root="${repo_root}/dist/${release_app_bundle_name}"
+development_app_root="${repo_root}/dist/${development_app_bundle_name}"
 legacy_app_root="${repo_root}/dist/${legacy_app_bundle_name}"
 contents_dir="${app_root}/Contents"
 macos_dir="${contents_dir}/MacOS"
 resources_dir="${contents_dir}/Resources"
 
 rm -rf "${app_root}" "${legacy_app_root}"
+if [[ "${app_variant}" == "release" ]]; then
+  rm -rf "${development_app_root}"
+else
+  rm -rf "${release_app_root}"
+fi
 mkdir -p "${macos_dir}" "${resources_dir}"
 
 case "${arch_mode}" in
@@ -244,13 +264,15 @@ cat > "${contents_dir}/Info.plist" <<PLIST
   <key>CFBundleIconFile</key>
   <string>${bundle_icon_name}</string>
   <key>CFBundleIdentifier</key>
-  <string>com.ifuryst.opencomputeruse</string>
+  <string>${bundle_identifier}</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Open Computer Use</string>
+  <string>${bundle_display_name}</string>
   <key>CFBundleDisplayName</key>
-  <string>Open Computer Use</string>
+  <string>${bundle_display_name}</string>
+  <key>OpenComputerUseAppVariant</key>
+  <string>${app_variant}</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

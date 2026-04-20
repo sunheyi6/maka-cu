@@ -13,6 +13,26 @@ build_script="${repo_root}/scripts/build-open-computer-use-app.sh"
 configuration="debug"
 rebuild="false"
 
+resolve_app_bundle() {
+  local -a candidates
+
+  if [[ "${configuration}" == "release" ]]; then
+    candidates=("Open Computer Use.app")
+  else
+    candidates=("Open Computer Use (Dev).app" "Open Computer Use.app")
+  fi
+
+  for bundle_name in "${candidates[@]}"; do
+    local candidate="${repo_root}/dist/${bundle_name}"
+    if [[ -d "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild)
@@ -35,12 +55,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-app_bundle="${repo_root}/dist/Open Computer Use.app"
-app_binary="${app_bundle}/Contents/MacOS/OpenComputerUse"
+app_bundle="$(resolve_app_bundle || true)"
+app_binary="${app_bundle:+${app_bundle}/Contents/MacOS/OpenComputerUse}"
 
-if [[ "${rebuild}" == "true" || ! -x "${app_binary}" ]]; then
+if [[ "${rebuild}" == "true" || -z "${app_binary}" || ! -x "${app_binary}" ]]; then
   if [[ -x "${build_script}" ]]; then
     "${build_script}" "${configuration}"
+    app_bundle="$(resolve_app_bundle || true)"
+    app_binary="${app_bundle:+${app_bundle}/Contents/MacOS/OpenComputerUse}"
   else
     echo "Missing runnable app bundle at ${app_binary} and no local build script is available." >&2
     exit 1
@@ -57,7 +79,7 @@ if [[ ! -f "${plugin_manifest}" ]]; then
   exit 1
 fi
 
-if [[ ! -x "${app_binary}" ]]; then
+if [[ -z "${app_bundle}" || ! -x "${app_binary}" ]]; then
   echo "Missing runnable app binary at ${app_binary}" >&2
   exit 1
 fi
