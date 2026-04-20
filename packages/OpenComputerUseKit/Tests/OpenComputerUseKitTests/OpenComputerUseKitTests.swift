@@ -267,6 +267,42 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertFalse(visualCursorEnabled(environment: ["OPEN_COMPUTER_USE_VISUAL_CURSOR": "false"]))
     }
 
+    func testInputFallbackDebugFlagDefaultsToDisabled() {
+        XCTAssertFalse(inputFallbackDebugEnabled(environment: [:]))
+        XCTAssertTrue(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "1"]))
+        XCTAssertTrue(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "true"]))
+        XCTAssertFalse(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "0"]))
+        XCTAssertFalse(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "off"]))
+    }
+
+    func testMakeVisualCursorTargetUsesWindowRelativeElementCenter() {
+        let target = makeVisualCursorTarget(
+            localFrame: CGRect(x: 24, y: 32, width: 120, height: 48),
+            windowBounds: CGRect(x: 400, y: 220, width: 900, height: 640),
+            targetWindowID: 321,
+            targetWindowLayer: 8
+        )
+
+        XCTAssertEqual(
+            target,
+            VisualCursorTarget(
+                point: CGPoint(x: 484, y: 276),
+                window: CursorTargetWindow(windowID: 321, layer: 8)
+            )
+        )
+    }
+
+    func testMakeVisualCursorTargetReturnsNilWithoutWindowBounds() {
+        XCTAssertNil(
+            makeVisualCursorTarget(
+                localFrame: CGRect(x: 24, y: 32, width: 120, height: 48),
+                windowBounds: nil,
+                targetWindowID: 321,
+                targetWindowLayer: 8
+            )
+        )
+    }
+
     func testCursorWindowGeometryAnchorsTipPosition() {
         let geometry = CursorWindowGeometry(
             windowSize: CGSize(width: 128, height: 128),
@@ -276,6 +312,12 @@ final class OpenComputerUseKitTests: XCTestCase {
 
         XCTAssertEqual(geometry.origin(forTipPosition: tipPosition), CGPoint(x: 1156, y: 712))
         XCTAssertEqual(geometry.tipPosition(forOrigin: CGPoint(x: 1156, y: 712)), tipPosition)
+    }
+
+    func testSoftwareCursorGlyphMetricsMatchSharedProceduralCalibration() {
+        XCTAssertEqual(SoftwareCursorGlyphMetrics.windowSize, CGSize(width: 126, height: 126))
+        XCTAssertEqual(SoftwareCursorGlyphMetrics.tipAnchor.x, 60.35, accuracy: 0.01)
+        XCTAssertEqual(SoftwareCursorGlyphMetrics.tipAnchor.y, 70.3, accuracy: 0.01)
     }
 
     func testCursorMotionPathStartsAndEndsAtExpectedPoints() {

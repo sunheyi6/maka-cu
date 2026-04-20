@@ -1,0 +1,59 @@
+## [2026-04-20 20:33] | Task: 集成 `set_value` visual cursor 移动链路
+
+### 🤖 Execution Context
+* **Agent ID**: `primary`
+* **Base Model**: `gpt-5.4`
+* **Runtime**: `Codex CLI on macOS + SwiftPM + Go`
+
+### 📥 User Query
+> 现在我们 Cursor Motion 已经具备了计算曲线的能力，要集成到 `open-computer-use` 里；范围先收窄到 `click` 和 `set_value`，并希望补一条可直接通过 MCP 触发的 `TextEdit` 对比序列，方便和官方 bundled `computer-use` 平行观察效果。
+
+### 🛠 Changes Overview
+**Scope:** `packages/OpenComputerUseKit/`、`packages/OpenComputerUseKit/Tests/`、`scripts/computer-use-cli/`、`docs/`
+
+**Key Actions:**
+- **[`set_value` 接入 visual cursor]**: 在 `ComputerUseService` 里新增 `VisualCursorTarget` 与目标点解析 helper，让真实 app 模式下的 `set_value` 在执行 `AXUIElementSetAttributeValue` 前先跑 `SoftwareCursorOverlay.moveCursor(...)`，成功和失败都统一走 `settle` 收尾。
+- **[统一 click/set_value 内部目标解析]**: `click` 复用同一套 visual cursor target 表达，避免继续把 overlay point / window 组装逻辑散落在分支里，同时保持 `type_text`、`press_key`、`scroll`、`drag` 的现有行为不变。
+- **[补测试与可复现样例]**: 新增 `makeVisualCursorTarget(...)` 单测；补 `scripts/computer-use-cli/examples/textedit-set-value-click-raise-seq.json`，并在 README 里写明如何把同一份 calls file 同时指向官方 app-server 和本地 `OpenComputerUse` direct MCP。
+- **[同步架构文档]**: `docs/ARCHITECTURE.md` 更新为“`click` / `set_value` 都会驱动 visual cursor move”，并明确两者的收尾差异是 `click pulse` vs `settle only`。
+
+### 🧠 Design Intent (Why)
+这次不追求把所有动作型 tools 都挂上 overlay，而是先收敛到用户已经确认最需要对比的两条路径：`click` 和 `set_value`。`click` 已有官方风格的 motion / pulse 链路，`set_value` 缺的是“先把视觉 cursor 移到目标区域，再做值写入”的最小补齐。把目标点与 target window 封成可复用 helper 后，既能让 `set_value` 复用当前主线已经验证过的 cursor motion 参数，也能避免未来继续复制同类 glue code。
+
+### 📁 Files Modified
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift`
+- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
+- `scripts/computer-use-cli/examples/textedit-set-value-click-raise-seq.json`
+- `scripts/computer-use-cli/README.md`
+- `docs/ARCHITECTURE.md`
+- `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
+
+### 🔁 Follow-up (2026-04-20, fix non-intrusive `click 0` for window/root elements)
+
+- **[官方行为复查]**: 重新对官方 bundled `computer-use` 跑 `TextEdit` 的 `click element_index=0` 样本，并配合 `SkyComputerUseService` unified log 过滤，确认官方日志链路是 `Prepare to interact with element 0` -> `Finished preparing interaction with element 0` -> `Dispatch click to element 0`；没有出现本仓库先前那种必须退回全局 pointer 才能完成的迹象。
+- **[修正本地 click 决策]**: `ComputerUseService.performPreferredClick` 不再只会试 `AXPress` / `kAXFocusedAttribute` / `AXConfirm`；现在会把窗口/根元素常见的 `AXRaise`、`kAXMainAttribute`、`kAXFocusedAttribute` 都纳入 element-targeted 左键路径，只有这些都失败才允许 `clickGlobally(...)`。
+- **[移除过严 settable 门槛]**: 针对 `TextEdit` window 这类 `AXUIElementIsAttributeSettable(kAXFocusedAttribute) == false`、但直接 `AXUIElementSetAttributeValue(..., true)` 仍成功的场景，`click` 相关的布尔属性写入不再把 `isSettable` 当作硬前置条件。
+- **[补 fallback tracing]**: 新增默认关闭的 `OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS` 环境变量；打开后，只有真的命中全局 pointer fallback 才会往 stderr 打一行调试信息，便于继续做官方/本地 A/B。
+- **[验证结果]**: 打开 `OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS=1` 后，当前 `scripts/computer-use-cli/examples/textedit-overlay-seq.json` 这条本地 direct MCP 序列已不再打印 `global pointer fallback`，同时 `swift test` 全绿。
+
+**Follow-up Files:**
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift`
+- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
+- `docs/ARCHITECTURE.md`
+- `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
+
+### 🔁 Follow-up (2026-04-20, align runtime cursor glyph with `CursorMotion`)
+
+- **[移除 bundle 小图裁剪链]**: `SoftwareCursorOverlay` 不再扫描官方 `Codex Computer Use.app` bundle 里的 `SoftwareCursor` 资源再本地裁剪；这条路径和当前仓库对官方 overlay 的逆向结论不一致，也会让主 runtime 和 `CursorMotion` 各自维持不同的 glyph 形状。
+- **[抽共享程序化 glyph renderer]**: 在 `OpenComputerUseKit` 里新增共享 `SoftwareCursorGlyphRenderer`，把 `CursorMotion` 当前那套灰色 pointer + 白边 + fog 的程序化绘制逻辑、`126x126` 画布尺寸和 tip-anchor 标定收敛成同一份实现。
+- **[主 runtime 切到同款 cursor]**: `SoftwareCursorView` 现在直接调用共享 renderer，`click` / `set_value` 的 visual cursor 都会使用和 `CursorMotion` 同款的程序化 glyph，而不是旧的渐变三角指针或 bundle 裁出来的小图。
+- **[补共享校准测试]**: 新增一条单测，固定 `126x126` 画布和 `60.35 x 70.3` 的 tip-anchor 标定，避免后续再次把主 runtime 的命中点校准漂走。
+
+**Follow-up Files:**
+- `Package.swift`
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorGlyphRenderer.swift`
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift`
+- `experiments/CursorMotion/Sources/CursorMotion/SynthesizedCursorGlyphView.swift`
+- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
+- `docs/ARCHITECTURE.md`
+- `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`

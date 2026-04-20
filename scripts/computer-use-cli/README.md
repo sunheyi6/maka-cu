@@ -65,6 +65,12 @@ That sample covers all 9 official tools against `TextEdit`, and it intentionally
 repeats `get_app_state` between state-changing actions because the official
 bundled `computer-use` invalidates the cached app state after each mutation.
 
+For a smaller cursor-comparison path, use
+`examples/textedit-set-value-click-raise-seq.json`.
+That sample stays on the `set_value -> click -> Raise` flow so the same calls file
+can be pointed at both the official bundled `computer-use` and the local
+`open-computer-use` binary.
+
 ## Default target
 
 By default, the CLI auto-discovers the official bundled `computer-use` plugin under:
@@ -107,6 +113,18 @@ Example working invocation against `open-computer-use`:
 go run . list-tools \
   --transport direct \
   --server-bin ~/.codex/plugins/cache/open-computer-use-local/open-computer-use/0.1.20/scripts/launch-open-computer-use.sh
+```
+
+Example working comparison flow against a local repo build:
+
+```bash
+swift build --product OpenComputerUse
+cd scripts/computer-use-cli
+go run . call-seq \
+  --transport direct \
+  --plugin-root ../.. \
+  --server-bin ../../.build/debug/OpenComputerUse \
+  --calls-file examples/textedit-set-value-click-raise-seq.json
 ```
 
 Example working invocation against the official bundled `computer-use`:

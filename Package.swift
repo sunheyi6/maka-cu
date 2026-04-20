@@ -55,6 +55,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "CursorMotion",
+            dependencies: ["OpenComputerUseKit"],
             path: "experiments/CursorMotion/Sources/CursorMotion"
         ),
         .target(

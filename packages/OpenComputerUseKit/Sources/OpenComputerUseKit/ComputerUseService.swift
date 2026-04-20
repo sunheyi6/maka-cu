@@ -2,6 +2,54 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+struct VisualCursorTarget: Equatable {
+    let point: CGPoint
+    let window: CursorTargetWindow?
+}
+
+func makeVisualCursorTarget(
+    at point: CGPoint,
+    targetWindowID: CGWindowID?,
+    targetWindowLayer: Int?
+) -> VisualCursorTarget {
+    VisualCursorTarget(
+        point: point,
+        window: targetWindowID.map { CursorTargetWindow(windowID: $0, layer: targetWindowLayer ?? 0) }
+    )
+}
+
+func makeVisualCursorTarget(
+    localFrame: CGRect?,
+    windowBounds: CGRect?,
+    targetWindowID: CGWindowID?,
+    targetWindowLayer: Int?
+) -> VisualCursorTarget? {
+    guard let localFrame, let windowBounds else {
+        return nil
+    }
+
+    let point = CGPoint(
+        x: windowBounds.minX + localFrame.midX,
+        y: windowBounds.minY + localFrame.midY
+    )
+    return makeVisualCursorTarget(
+        at: point,
+        targetWindowID: targetWindowID,
+        targetWindowLayer: targetWindowLayer
+    )
+}
+
+func inputFallbackDebugEnabled(environment: [String: String]) -> Bool {
+    guard let rawValue = environment["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+
+    return ["1", "true", "yes", "on"].contains(rawValue)
+}
+
 public final class ComputerUseService {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
 
@@ -45,56 +93,62 @@ public final class ComputerUseService {
             guard let targetPoint = try globalPoint(for: record, snapshot: snapshot) else {
                 throw ComputerUseError.stateUnavailable("element \(elementIndex) has no clickable frame")
             }
-            let targetWindow = cursorTargetWindow(for: snapshot)
+            let cursorTarget = makeVisualCursorTarget(
+                at: targetPoint,
+                targetWindowID: snapshot.targetWindowID,
+                targetWindowLayer: snapshot.targetWindowLayer
+            )
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.moveCursor(to: targetPoint, in: targetWindow)
-            }
+            moveVisualCursor(to: cursorTarget)
 
             do {
                 if try performPreferredClick(on: record, button: button, clickCount: clickCount) {
                     Thread.sleep(forTimeInterval: 0.15)
                 } else {
+                    debugInputFallback(
+                        tool: "click",
+                        targetDescription: "element_index=\(elementIndex)",
+                        snapshot: snapshot
+                    )
                     InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
                     try InputSimulation.clickGlobally(at: targetPoint, button: button, clickCount: clickCount)
                 }
             } catch {
-                VisualCursorSupport.performOnMain {
-                    SoftwareCursorOverlay.settle(at: targetPoint, in: targetWindow)
-                }
+                settleVisualCursor(at: cursorTarget)
                 throw error
             }
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.pulseClick(at: targetPoint, clickCount: clickCount, mouseButton: button, in: targetWindow)
-            }
+            pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
         } else if let x, let y {
             let point = CGPoint(x: x, y: y)
             let targetPoint = try screenshotToGlobalPoint(snapshot: snapshot, x: x, y: y)
-            let targetWindow = cursorTargetWindow(for: snapshot)
+            let cursorTarget = makeVisualCursorTarget(
+                at: targetPoint,
+                targetWindowID: snapshot.targetWindowID,
+                targetWindowLayer: snapshot.targetWindowLayer
+            )
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.moveCursor(to: targetPoint, in: targetWindow)
-            }
+            moveVisualCursor(to: cursorTarget)
 
             do {
                 if let record = try hitTestElement(at: point, in: snapshot) ?? bestElement(containing: point, in: snapshot),
                    try performPreferredClick(on: record, button: button, clickCount: clickCount) {
                     Thread.sleep(forTimeInterval: 0.15)
                 } else {
+                    debugInputFallback(
+                        tool: "click",
+                        targetDescription: "x=\(Int(point.x)) y=\(Int(point.y))",
+                        snapshot: snapshot
+                    )
                     InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
                     try InputSimulation.clickGlobally(at: targetPoint, button: button, clickCount: clickCount)
                 }
             } catch {
-                VisualCursorSupport.performOnMain {
-                    SoftwareCursorOverlay.settle(at: targetPoint, in: targetWindow)
-                }
+                settleVisualCursor(at: cursorTarget)
                 throw error
             }
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.pulseClick(at: targetPoint, clickCount: clickCount, mouseButton: button, in: targetWindow)
-            }
+            pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
         } else {
             throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
         }
@@ -223,12 +277,22 @@ public final class ComputerUseService {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no backing accessibility object")
         }
 
-        let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
-        guard result == .success else {
-            throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")
+        let cursorTarget = visualCursorTarget(for: record, snapshot: snapshot)
+        moveVisualCursor(to: cursorTarget)
+
+        do {
+            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
+            guard result == .success else {
+                throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")
+            }
+
+            Thread.sleep(forTimeInterval: 0.1)
+        } catch {
+            settleVisualCursor(at: cursorTarget)
+            throw error
         }
 
-        Thread.sleep(forTimeInterval: 0.1)
+        settleVisualCursor(at: cursorTarget)
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
@@ -289,7 +353,7 @@ public final class ComputerUseService {
                 return true
             }
 
-            if try focus(element: element) {
+            if try activateClickTarget(element: element, availableActions: record.rawActions) {
                 return true
             }
 
@@ -323,19 +387,33 @@ public final class ComputerUseService {
         }
     }
 
-    private func focus(element: AXUIElement) throws -> Bool {
-        guard isSettable(element: element, attribute: kAXFocusedAttribute) else {
-            return false
+    private func activateClickTarget(element: AXUIElement, availableActions: [String]) throws -> Bool {
+        var activated = false
+
+        if try performAction(named: kAXRaiseAction as String, on: element, availableActions: availableActions) {
+            activated = true
         }
 
-        let result = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        if try setBoolAttribute(named: kAXMainAttribute, on: element) {
+            activated = true
+        }
+
+        if try setBoolAttribute(named: kAXFocusedAttribute, on: element) {
+            activated = true
+        }
+
+        return activated
+    }
+
+    private func setBoolAttribute(named attribute: String, on element: AXUIElement) throws -> Bool {
+        let result = AXUIElementSetAttributeValue(element, attribute as CFString, kCFBooleanTrue)
         switch result {
         case .success:
             return true
-        case .attributeUnsupported, .cannotComplete, .noValue:
+        case .attributeUnsupported, .actionUnsupported, .cannotComplete, .noValue:
             return false
         default:
-            throw ComputerUseError.message("AXUIElementSetAttributeValue(\(kAXFocusedAttribute)) failed with \(result.rawValue)")
+            throw ComputerUseError.message("AXUIElementSetAttributeValue(\(attribute)) failed with \(result.rawValue)")
         }
     }
 
@@ -384,12 +462,15 @@ public final class ComputerUseService {
         if record.rawActions.contains(where: {
             $0.caseInsensitiveCompare(kAXPressAction as String) == .orderedSame ||
             $0.caseInsensitiveCompare(kAXConfirmAction as String) == .orderedSame ||
-            $0.caseInsensitiveCompare(kAXShowMenuAction as String) == .orderedSame
+            $0.caseInsensitiveCompare(kAXShowMenuAction as String) == .orderedSame ||
+            $0.caseInsensitiveCompare(kAXRaiseAction as String) == .orderedSame
         }) {
             return 0
         }
 
-        if let element = record.element, isSettable(element: element, attribute: kAXFocusedAttribute) {
+        if let element = record.element,
+           isSettable(element: element, attribute: kAXMainAttribute) ||
+           isSettable(element: element, attribute: kAXFocusedAttribute) {
             return 1
         }
 
@@ -478,14 +559,59 @@ public final class ComputerUseService {
         return identifier
     }
 
-    private func cursorTargetWindow(for snapshot: AppSnapshot) -> CursorTargetWindow? {
-        guard let windowID = snapshot.targetWindowID else {
-            return nil
+    private func visualCursorTarget(for record: ElementRecord, snapshot: AppSnapshot) -> VisualCursorTarget? {
+        makeVisualCursorTarget(
+            localFrame: record.localFrame,
+            windowBounds: snapshot.windowBounds,
+            targetWindowID: snapshot.targetWindowID,
+            targetWindowLayer: snapshot.targetWindowLayer
+        )
+    }
+
+    private func moveVisualCursor(to target: VisualCursorTarget?) {
+        guard let target else {
+            return
         }
 
-        return CursorTargetWindow(
-            windowID: windowID,
-            layer: snapshot.targetWindowLayer ?? 0
+        VisualCursorSupport.performOnMain {
+            SoftwareCursorOverlay.moveCursor(to: target.point, in: target.window)
+        }
+    }
+
+    private func settleVisualCursor(at target: VisualCursorTarget?) {
+        guard let target else {
+            return
+        }
+
+        VisualCursorSupport.performOnMain {
+            SoftwareCursorOverlay.settle(at: target.point, in: target.window)
+        }
+    }
+
+    private func pulseVisualCursor(at target: VisualCursorTarget?, clickCount: Int, mouseButton: MouseButtonKind) {
+        guard let target else {
+            return
+        }
+
+        VisualCursorSupport.performOnMain {
+            SoftwareCursorOverlay.pulseClick(
+                at: target.point,
+                clickCount: clickCount,
+                mouseButton: mouseButton,
+                in: target.window
+            )
+        }
+    }
+
+    private func debugInputFallback(tool: String, targetDescription: String, snapshot: AppSnapshot) {
+        guard inputFallbackDebugEnabled(environment: ProcessInfo.processInfo.environment) else {
+            return
+        }
+
+        let appReference = snapshot.app.bundleIdentifier ?? snapshot.app.name
+        fputs(
+            "[open-computer-use] global pointer fallback tool=\(tool) app=\(appReference) target=\(targetDescription)\n",
+            stderr
         )
     }
 
