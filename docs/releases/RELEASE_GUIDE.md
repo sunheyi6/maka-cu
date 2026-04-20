@@ -114,8 +114,8 @@ gh run view -R iFurySt/open-codex-computer-use <run-id> --log-failed
 ## 当前已知边界
 
 - `Open Computer Use` 的 npm release 产物在没有配置 `OPEN_COMPUTER_USE_CODESIGN_P12_BASE64` / `OPEN_COMPUTER_USE_CODESIGN_P12_PASSWORD` 等 secrets 时，仍会退回 ad-hoc signing；配置后会先导入 `Developer ID Application` 证书，再按该 identity 统一签名。
-- `Cursor Motion` 当前 release 资产仍只做 ad-hoc codesign，不包含 Apple Developer ID 签名和 notarization。
-- 如果后续要把下载体验收口成更标准的 macOS 分发流程，还需要继续补 notarization 和对应 App Store Connect API key 流程。
+- `Cursor Motion` 当前 release 资产会优先复用 `OPEN_COMPUTER_USE_CODESIGN_*` 对 app 做 `Developer ID Application` 签名；如果同时配置 `APPLE_NOTARY_API_KEY_P8_BASE64`、`APPLE_NOTARY_KEY_ID`、`APPLE_NOTARY_ISSUER_ID`、`APPLE_DEVELOPER_TEAM_ID`，workflow 会继续对 `.dmg` 执行 notarization 和 staple。
+- 如果上述 secrets 缺失，workflow 会分别退回 ad-hoc signing 或跳过 notarization，而不是阻塞整条 release。
 
 ## 如果 tag 已经打错了
 

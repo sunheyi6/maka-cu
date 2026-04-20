@@ -7,6 +7,9 @@ configuration="release"
 arch_mode="native"
 version=""
 output_dir=""
+codesign_mode="${CURSOR_MOTION_CODESIGN_MODE:-adhoc}"
+codesign_identity="${CURSOR_MOTION_CODESIGN_IDENTITY:-}"
+codesign_keychain="${CURSOR_MOTION_CODESIGN_KEYCHAIN:-}"
 
 usage() {
   cat <<'EOF'
@@ -15,6 +18,11 @@ Usage: ./scripts/build-cursor-motion-dmg.sh [--configuration debug|release] [--a
 Examples:
   ./scripts/build-cursor-motion-dmg.sh
   ./scripts/build-cursor-motion-dmg.sh --configuration release --arch universal --version 0.1.0
+
+Environment:
+  CURSOR_MOTION_CODESIGN_MODE=identity|adhoc|none
+  CURSOR_MOTION_CODESIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)"
+  CURSOR_MOTION_CODESIGN_KEYCHAIN=/path/to/signing.keychain-db
 EOF
 }
 
@@ -74,6 +82,11 @@ if [[ "${arch_mode}" != "native" && "${arch_mode}" != "arm64" && "${arch_mode}" 
   exit 1
 fi
 
+if [[ "${codesign_mode}" != "identity" && "${codesign_mode}" != "adhoc" && "${codesign_mode}" != "none" ]]; then
+  echo "Unsupported CURSOR_MOTION_CODESIGN_MODE: ${codesign_mode}" >&2
+  exit 1
+fi
+
 if [[ -z "${version}" ]]; then
   if tag="$(git -C "${repo_root}" describe --tags --exact-match 2>/dev/null)"; then
     version="${tag#v}"
@@ -103,6 +116,94 @@ build_binary() {
   binary_dir="$(swift build "${args[@]}" --show-bin-path)"
   swift build "${args[@]}" --product CursorMotion >&2
   printf '%s/CursorMotion\n' "${binary_dir}"
+}
+
+list_user_keychains() {
+  security list-keychains -d user \
+    | sed -n 's/^[[:space:]]*"\(.*\)"$/\1/p'
+}
+
+run_with_codesign_keychain() {
+  local keychain_path="${1:-}"
+  shift
+
+  if [[ -z "${keychain_path}" ]]; then
+    "$@"
+    return
+  fi
+
+  local -a existing_keychains=()
+  while IFS= read -r keychain; do
+    if [[ -n "${keychain}" ]]; then
+      existing_keychains+=("${keychain}")
+    fi
+  done < <(list_user_keychains)
+
+  local -a desired_keychains=("${keychain_path}")
+  local existing=""
+  for existing in "${existing_keychains[@]}"; do
+    if [[ "${existing}" != "${keychain_path}" ]]; then
+      desired_keychains+=("${existing}")
+    fi
+  done
+
+  security list-keychains -d user -s "${desired_keychains[@]}" >/dev/null
+
+  local status=0
+  "$@" || status=$?
+
+  if [[ ${#existing_keychains[@]} -gt 0 ]]; then
+    security list-keychains -d user -s "${existing_keychains[@]}" >/dev/null
+  else
+    security list-keychains -d user -s >/dev/null
+  fi
+
+  return "${status}"
+}
+
+resolve_codesign_identity() {
+  case "${codesign_mode}" in
+    none)
+      return 1
+      ;;
+    adhoc)
+      printf '%s\n' "-"
+      return 0
+      ;;
+    identity)
+      if [[ -z "${codesign_identity}" ]]; then
+        echo "CURSOR_MOTION_CODESIGN_IDENTITY is required when CURSOR_MOTION_CODESIGN_MODE=identity" >&2
+        exit 1
+      fi
+      printf '%s\n' "${codesign_identity}"
+      return 0
+      ;;
+  esac
+}
+
+codesign_app_bundle() {
+  local app_path="${1:-}"
+  local identity=""
+
+  if ! identity="$(resolve_codesign_identity)"; then
+    echo "Skipping codesign for ${app_path} (CURSOR_MOTION_CODESIGN_MODE=none)" >&2
+    return
+  fi
+
+  local -a args=(--force --deep --sign "${identity}")
+
+  if [[ -n "${codesign_keychain}" && "${identity}" != "-" ]]; then
+    args+=(--keychain "${codesign_keychain}")
+  fi
+
+  run_with_codesign_keychain "${codesign_keychain}" \
+    codesign "${args[@]}" "${app_path}" >/dev/null
+
+  if [[ "${identity}" == "-" ]]; then
+    echo "Signed ${app_path} with ad-hoc identity." >&2
+  else
+    echo "Signed ${app_path} with ${identity}" >&2
+  fi
 }
 
 app_name="Cursor Motion.app"
@@ -204,7 +305,7 @@ cat > "${contents_dir}/Info.plist" <<PLIST
 PLIST
 
 plutil -lint "${contents_dir}/Info.plist" >/dev/null
-codesign --force --deep --sign - "${app_root}" >/dev/null 2>&1 || true
+codesign_app_bundle "${app_root}"
 
 cp -R "${app_root}" "${dmg_root}/"
 ln -s /Applications "${dmg_root}/Applications"
