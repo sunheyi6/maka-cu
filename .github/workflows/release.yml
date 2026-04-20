@@ -44,7 +44,7 @@ jobs:
         run: |
           echo "OPEN_COMPUTER_USE_CODESIGN_MODE=adhoc" >> "${GITHUB_ENV}"
 
-          if [ -z "${OPEN_COMPUTER_USE_CODESIGN_P12_BASE64}" ] || [ -z "${OPEN_COMPUTER_USE_CODESIGN_P12_PASSWORD}" ] || [ -z "${OPEN_COMPUTER_USE_CODESIGN_IDENTITY}" ]; then
+          if [ -z "${OPEN_COMPUTER_USE_CODESIGN_P12_BASE64}" ] || [ -z "${OPEN_COMPUTER_USE_CODESIGN_P12_PASSWORD}" ]; then
             echo "No Open Computer Use signing certificate configured; release artifacts will fall back to ad-hoc signing and may create install-specific macOS permission identities."
             exit 0
           fi
@@ -61,9 +61,17 @@ jobs:
           security import "${cert_path}" -k "${keychain_path}" -P "${OPEN_COMPUTER_USE_CODESIGN_P12_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
 
+          resolved_identity="$(security find-identity -v -p codesigning "${keychain_path}" | sed -n 's/.*\"\\(.*\\)\"/\\1/p' | head -n 1)"
+          if [ -z "${resolved_identity}" ]; then
+            echo "Imported signing certificate, but no usable codesigning identity was found in ${keychain_path}." >&2
+            exit 1
+          fi
+
+          echo "Resolved Open Computer Use signing identity: ${resolved_identity}"
+
           {
             echo "OPEN_COMPUTER_USE_CODESIGN_MODE=identity"
-            echo "OPEN_COMPUTER_USE_CODESIGN_IDENTITY=${OPEN_COMPUTER_USE_CODESIGN_IDENTITY}"
+            echo "OPEN_COMPUTER_USE_CODESIGN_IDENTITY=${resolved_identity}"
             echo "OPEN_COMPUTER_USE_CODESIGN_KEYCHAIN=${keychain_path}"
           } >> "${GITHUB_ENV}"
 
