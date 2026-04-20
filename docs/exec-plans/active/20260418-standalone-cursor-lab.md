@@ -74,6 +74,12 @@
 - 2026-04-20：对照用户提供的官方视频抽帧后，确认 moving 阶段的可见箭头确实会持续跟随当前 move heading，而不是只保留一个轻微 lean；lab 现已撤回那层 `displayRotation` 分离，glyph 渲染重新直接使用 visual dynamics 的主 `rotation`。
 - 2026-04-20：继续对照 `official-software-cursor-window-252.png` 与独立脚本的静止朝向后，确认 lab 之前额外加的 `-26.5°` glyph 补偿会让 moving heading 固定偏掉；当前已把静止基线收敛到和主运行时一致的“零旋转即左上朝向”，也就是 y-down 画布里的 `-3π/4`。
 - 2026-04-20：继续排查“屁股超前”后，确认真正的问题是 lab 的 motion/heading 运行在 SwiftUI 的 y-down 坐标，但 glyph 渲染落在 AppKit 默认 y-up `NSView`；当前已在 glyph 渲染层对 angle、body offset 和 fog offset 统一做 y-down -> y-up 转换，避免 moving 姿态被垂直镜像。
+- 2026-04-20：把刚确认的 slider 语义进一步收回到 `StandaloneCursorLab` 主线上；`START HANDLE` 现在主要调起步段的 guide / reach / normal，`END HANDLE` 主要调收尾段的 guide / reach / normal，不再只是对整条曲线做对称缩放。同时移除了过紧的 corridor clipping，改用内缩 canvas bounds，避免默认样例里 `END HANDLE` 被提前裁没。
+- 2026-04-20：继续按同样方法收紧 `ARC SIZE`；当前它明确表示轨迹弧度而不是 cursor 大小，并且已经同时接到局部 path 的弧高/控制点侧向偏移，以及 chooser 对 `direct` 和 `arched` family 的偏好。默认点位采样下，`arcSize=0.04 -> 0.12` 会让 `curveScale` 从约 `10.3` 提升到 `47.7`，中段 `y` 也从约 `326.8` 抬到 `345.5`。
+- 2026-04-20：继续收紧 `ARC FLOW`；当前它明确表示“最宽弧段在 chord 上更靠前还是更靠后”，实现上不再只是改 start/end reach 的抽象 bias，而是改到单段 cubic 控制点的前后相位偏置。
+- 2026-04-20：继续收紧 `SPRING`；当前它明确表示 progress spring 的 `response / damping` 与 endpoint-lock 时间，默认 `spring=0.5` 会精确回到官方 `.official` 配置。采样下，`spring=0.25 / 0.5 / 0.75` 分别对应约 `1.0958s / 1.4292s / 1.8750s` 的 endpoint-lock，语义已经收成稳定的“左快右慢”。
+- 2026-04-20：修正 `ARC FLOW` 首轮实现引入的中段“节点感”；问题不在 `SPRING`，而在那版显式中间锚点的双段曲线把路径本身做出了 join，叠加 debug overlay 又把这个中点强调出来。当前已经收回到单段 cubic，相位控制继续保留，但几何上不再存在中间 join。
+- 2026-04-20：继续修正 slider 调参状态流；当前已把“当前 cursor 位置”和“当前会话的 reference path”拆开，slider 重算时用最近一次真实 move 的 origin / startRotation + `queuedTarget` 更新整条调试曲线，同时只把 cursor snap 在当前位置，因此 settled 后调参也不会把 DEBUG 线重建成 `target -> target` 的零长度路径。
 
 ## 决策记录
 
@@ -84,3 +90,8 @@
 - 2026-04-19：对 `swift_once` 恢复出的 guide 系数，当前默认采用“常量已确认、世界坐标解释不成立、局部基底投影更贴近官方视频”的实现策略；后续如果拿到更强的二进制级证据，再继续下沉这层解释。
 - 2026-04-19：raw binary lift 的 `20` candidate pool 保留在 `StandaloneCursor` 这条分析线；`StandaloneCursorLab` 和主 runtime overlay 则统一切到 heading-driven 主线，实现上优先保证“朝向约束 + 单侧转弯”这个更贴近官方视频的结构行为。
 - 2026-04-20：恢复 slider UI 时，继续把“调参入口”和“binary-confirmed 结构”分开表述；lab 可以暴露 `start/end handle`、`arc size/flow`、`spring` 这些测试旋钮，但文档和代码都不把它们说成官方一一字段对照。
+- 2026-04-20：对 `start/end handle` 这两个旋钮，当前实验线采用“作用在局部 start/end control 几何，而不是全局统一缩放”的策略；这更接近 binary lift 里 `startControl/endControl` 与 `startExtent/endExtent` 的边界。
+- 2026-04-20：对 `ARC SIZE`，当前实验线采用“作用在局部 arc height / normal bias / family chooser，而不是 cursor glyph 尺寸”的策略；这更接近 binary lift 里 `handleExtent / arcExtent / tableA / tableB` 对曲线宽度的作用边界。
+- 2026-04-20：对 `ARC FLOW`，当前实验线采用“作用在单段 cubic 控制点的前后相位，而不是单纯抽象 reach bias”的策略；这更接近 reverse-engineering 里“最宽弧段被沿 guide 方向推前/推后”的边界。
+- 2026-04-20：对 `SPRING`，当前实验线采用“围绕官方 `.official` 的 centered response/damping remap，而不是再叠加额外 distance-based duration 层”的策略；这更接近当前 binary-backed 证据里“主链直接吃 `1.4 / 0.9` spring config”的边界。
+- 2026-04-20：调左上角 slider 时，path 重建现在统一基于当前会话里最近一次 move 的 reference origin / startRotation / `queuedTarget`，而不是外层 `@State start/end` 或 settled 后的 live endpoint；这样参数调节既不会把曲线起点误拉回初始位置，也不会把 DEBUG 反馈线消成零长度。

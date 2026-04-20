@@ -39,6 +39,11 @@ swift run StandaloneCursorLab
 
 - 点击画布任意位置，先预览当前 heading-driven candidate 族，再自动选一路径并驱动 cursor 过去。
 - 左上角保留 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW`、`SPRING` 5 个 slider，面板本身不再附带 `REPLAY` / `RESET` 按钮或额外指标文案，便于直接对照当前轨迹和画面观感。
+- slider 调参时会重算当前 session 的整条 reference path，同时保持 cursor 本体停在当前位置；因此 `DEBUG` 开着时，settled 后继续拖 slider 也还能看到完整曲线反馈，不会退化成零长度路径。
+- `START HANDLE` 现在优先改变起步段的 guide / reach / normal 偏置，`END HANDLE` 则优先改变收尾段的 guide / reach / normal 偏置；两者不再只是一起放大整条曲线。
+- `ARC SIZE` 现在明确表示轨迹弧度本身，不是 cursor glyph 的尺寸；它会同时改变弧高/控制点侧向偏移，以及 chooser 对更直路径和更宽弧线路径的偏好。
+- `ARC FLOW` 现在明确表示“最宽弧段沿 start→end 主轴更靠前还是更靠后”；它不负责把弧变大，而是优先改单段 cubic 控制点的前后相位偏置。
+- `SPRING` 现在明确表示 progress spring 本身的快慢与阻尼，不再叠加额外 distance-based duration fudge；`0.5` 档会精确回到官方 `response=1.4`、`damping=0.9`、`343/240` endpoint-lock 时间，往左更快，往右更慢。
 - debug overlay 会显示控制点、arc handle 和当前选中的 candidate id / score。
 - 关闭 `DEBUG` 后不会展示任何轨迹线或目标点，只保留 cursor 本体，便于单独观察最终运动观感。
 - lab 主线不再直接复用 raw binary lift 的 `20` 条 candidate + score；当前改为 reverse-engineering 约束下的 heading-driven chooser，把起始朝向和最终 resting pose 一起喂给路径选择器，让默认曲线更稳定收敛到单侧 C 形或近直线。
@@ -54,7 +59,10 @@ swift run StandaloneCursorLab
 
 - 不要再把未验证的 slider 参数语义伪装成“官方实现”。
 - slider 可以作为本地调参入口保留，但要明确它们是 heading-driven lab 的测试旋钮，不是已经 binary-confirmed 的一一字段映射。
-- `SPRING` slider 可以改变 spring 本身的 response / damping 与对应 settle 时间，但默认档应继续保持官方 `1.4291667s` endpoint-lock 节奏。
+- 为了避免默认样例里 `END HANDLE` 被过紧的 corridor bounds 提前裁掉，lab 现在直接以画布内缩后的实际 canvas bounds 做选路和 control clipping。
+- 当前 `ARC SIZE` 的实现边界是“局部 heading-driven path 的弧高和 arched family 倾向”；它不是在调 cursor 资源尺寸，也不宣称已经和 release binary 的 `tableA/tableB/arcExtent` 一一对上。
+- 当前 `ARC FLOW` 的实现边界是“单段 cubic 的前后相位偏置”；它更接近 reverse-engineering 里 `arcAnchorBias` 这类几何前后偏置，不宣称已经和 release binary 内部某个独立 `flow` 字段一一对应。
+- 当前 `SPRING` 的实现边界是“围绕官方 `1.4 / 0.9` 的 centered spring remap”；它直接改变 progress spring 的 `response / damping` 与 endpoint-lock 时间，但不宣称已经恢复出 release app 内部 debug slider 的精确 remap helper。
 - 路径层、progress 层和 visible pose 层继续保持分离。
 - 没有真实 target window 的场景里，要明确区分 `StandaloneCursor` 的 raw reverse-engineered pool 和 `StandaloneCursorLab` 的 heading-driven 主线实现。
 - demo host 可以替换，但 motion model 和 visual dynamics 应保持可单独复用。

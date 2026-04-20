@@ -175,6 +175,44 @@ Bounds: X=1949 Y=796 Width=126 Height=126
 - 但当前版本下，`Software Cursor` 作为独立 window 仍然存在，只是如果只做“新窗口差分”而不按 pid 全量扫，很容易漏掉它；
 - 因此“host 侧可能参与了一部分合成”仍然成立，但“service 侧已经没有独立 software cursor window”这个结论当前不成立。
 
+### 7. 2026 年 4 月 20 日补做 tool 级触发矩阵后，可以确认 overlay 不是只绑定 `click`
+
+这轮又补做了一次更细的官方路径实测，重点不是“有没有 `Software Cursor`”，而是“哪些 public tool 会把它真正拉出来”。
+
+这里有一个前提很重要：
+
+- 这台机器的日常 Codex 用户态配置里，官方 bundled `computer-use@openai-bundled` 默认是关的，而本地 `open-computer-use` MCP 是开的。
+- 所以这次所有样本都先切到一个隔离的临时 `HOME`，只启用官方 bundled `computer-use`，再通过 `codex app-server` 走同一条 signed host 路径。
+- 否则很容易把本地开源实现和官方闭源实现混在一起，得出错误结论。
+
+在这个前提下，对 `1.0.750` 做同线程 tool call，并同时抓 `SkyComputerUseService` 日志与 `CGWindowList` 后，结论可以收成下面这张表：
+
+| Tool | 2026-04-20 结果 | 观察到的直接证据 |
+| --- | --- | --- |
+| `set_value` | 会触发 | 命中 `Prepare to interact with element ...`、`Move to location ...`、`Move cursor to ...`；对 `Activity Monitor` 搜索框样本还能看到 `Start Bezier cursor animation ...` |
+| `scroll` | 会触发 | 命中 `Prepare to interact with element 1`、`Move cursor to ...`、`Start Bezier cursor animation ...`、`Moving mouse to ...` |
+| `drag` | 会触发 | 命中 `Move cursor to ...`、`Start Bezier cursor animation ...`、`Moving mouse to ...`、`Dragging from ... to ...` |
+| `perform_secondary_action` | 会触发 | 对 `TextEdit` window 的 `Raise` 样本命中 `Prepare to interact with element 0` 和 `Move cursor to ...` |
+| `click` | 分路径 | 坐标点击会命中 `Move cursor to ...`、`Start Bezier cursor animation ...`、`Moving mouse to ...`、`Clicking at ...`；但 element-scoped `click(element_index)` 不一定会 |
+| `type_text` | 这轮未触发 | 前台 `TextEdit`、前台 `Activity Monitor`、以及“Finder 在前台但向后台 `TextEdit` 投递文字”三组样本里，都没看到 `Computer Use Cursor` 日志，也没枚举到 `Software Cursor` window |
+| `press_key` | 这轮未触发 | 前台 `TextEdit` 的 `Return`，以及“Finder 在前台但向后台 `TextEdit` 投递 `Return`”两组样本里，都没看到 cursor motion 日志 |
+| `get_app_state` | 未触发 | 没有看到 `Computer Use Cursor` 相关日志 |
+| `list_apps` | 未单独重放，但静态上不支持它会触发 | 当前没有任何与 cursor motion 相关的运行证据 |
+
+其中有三条更关键的收敛：
+
+- `set_value` 确认不是纯“AX 直接赋值然后结束”这么简单。至少在部分控件上，它会先走一段 element preparation，再把软件光标移动到目标附近。
+- `type_text` 和 `press_key` 当前更像纯键盘注入路径。尤其在“目标 app 不在前台”的样本里，`TextEdit` 文本内容确实被改动了，但整个时间窗里仍然没有 `Software Cursor` window，也没有任何 `Computer Use Cursor` motion 日志。
+- `click` 需要拆成两类看：坐标点击更像“真实鼠标模拟”，而 element-scoped `click` 有时会走更偏 Accessibility action 的路径，因此不一定显出 overlay。
+
+这一点和二进制里的 feature flag 也对得上：
+
+- `feature/computerUseCursor`
+- `feature/computerUseAlwaysSimulateClick`
+- `Prefer simulating physical clicks over Accessibility actions.`
+
+也就是说，官方实现更像是“按这次 interaction 最终走的是哪条执行链”来决定是否出 overlay，而不是简单按 public tool 名字一刀切。
+
 ## 当前推断
 
 ### 1. 黄色小鼠标是软件光标，不是系统硬件光标

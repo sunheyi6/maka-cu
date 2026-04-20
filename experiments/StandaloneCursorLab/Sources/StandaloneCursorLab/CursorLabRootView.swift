@@ -52,7 +52,7 @@ struct CursorLabRootView: View {
                     model.queueMove(to: newValue)
                 }
                 .onChange(of: motionParameters) { _, newValue in
-                    model.updateParameters(newValue, start: start, end: end)
+                    model.updateParameters(newValue)
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -133,6 +133,8 @@ final class CursorLabViewModel: ObservableObject {
     private var lastTimestamp: CFTimeInterval?
     private var previewRemaining: CGFloat = 0
     private var queuedTarget = CGPoint(x: 860, y: 260)
+    private var pathReferenceOrigin = CGPoint(x: 220, y: 440)
+    private var pathReferenceStartRotation = CursorGlyphCalibration.restingRotation
     private var canvasBounds = CGRect(x: 0, y: 0, width: 1080, height: 720)
     private var motionParameters = CursorMotionParameters.default
 
@@ -172,6 +174,8 @@ final class CursorLabViewModel: ObservableObject {
         motionParameters = parameters
         simulator.updateParameters(parameters)
         queuedTarget = end
+        pathReferenceOrigin = start
+        pathReferenceStartRotation = CursorGlyphCalibration.restingRotation
         canvasBounds = CGRect(origin: .zero, size: canvasSize)
         let selection = bestSelection(
             from: start,
@@ -192,15 +196,14 @@ final class CursorLabViewModel: ObservableObject {
         canvasBounds = CGRect(origin: .zero, size: canvasSize)
     }
 
-    func updateParameters(_ parameters: CursorMotionParameters, start: CGPoint, end: CGPoint) {
+    func updateParameters(_ parameters: CursorMotionParameters) {
         motionParameters = parameters
         simulator.updateParameters(parameters)
-        queuedTarget = end
 
         let selection = bestSelection(
-            from: start,
-            to: end,
-            startRotation: CursorGlyphCalibration.restingRotation
+            from: pathReferenceOrigin,
+            to: queuedTarget,
+            startRotation: pathReferenceStartRotation
         )
         candidates = selection.candidates
         selectedCandidateID = selection.selected.id
@@ -212,10 +215,13 @@ final class CursorLabViewModel: ObservableObject {
     }
 
     func updateStart(_ value: CGPoint) {
+        let startRotation = currentState.rotation
+        pathReferenceOrigin = value
+        pathReferenceStartRotation = startRotation
         let selection = bestSelection(
             from: value,
             to: queuedTarget,
-            startRotation: currentState.rotation
+            startRotation: startRotation
         )
         candidates = selection.candidates
         selectedCandidateID = selection.selected.id
@@ -235,6 +241,8 @@ final class CursorLabViewModel: ObservableObject {
     private func scheduleMove(from origin: CGPoint, to target: CGPoint, snapOrigin: Bool) {
         queuedTarget = target
         let startRotation = snapOrigin ? CursorGlyphCalibration.restingRotation : currentState.rotation
+        pathReferenceOrigin = origin
+        pathReferenceStartRotation = startRotation
 
         let selection = bestSelection(from: origin, to: target, startRotation: startRotation)
         candidates = selection.candidates
@@ -317,7 +325,7 @@ final class CursorLabViewModel: ObservableObject {
         to end: CGPoint,
         startRotation: CGFloat
     ) -> (candidates: [CursorMotionCandidate], selected: CursorMotionCandidate) {
-        let selectionBounds = syntheticMotionBounds(from: start, to: end)
+        let selectionBounds = motionBounds()
         let candidates = HeadingDrivenCursorMotionModel.makeCandidates(
             start: start,
             end: end,
@@ -341,26 +349,17 @@ final class CursorLabViewModel: ObservableObject {
         return (candidates, defaultCandidate)
     }
 
-    private func syntheticMotionBounds(from start: CGPoint, to end: CGPoint) -> CGRect? {
-        guard canvasBounds.isNull == false else {
+    private func motionBounds() -> CGRect? {
+        guard canvasBounds.isNull == false, canvasBounds.isEmpty == false else {
             return nil
         }
 
-        let distance = hypot(end.x - start.x, end.y - start.y)
-        let margin = min(max(distance * 0.14, 90), 180)
-        let corridorBounds = CGRect(
-            x: min(start.x, end.x),
-            y: min(start.y, end.y),
-            width: abs(end.x - start.x),
-            height: abs(end.y - start.y)
-        ).insetBy(dx: -margin, dy: -margin)
-
-        let resolved = canvasBounds.intersection(corridorBounds)
-        if resolved.isNull || resolved.isEmpty {
+        let paddedBounds = canvasBounds.insetBy(dx: 24, dy: 24)
+        if paddedBounds.isNull || paddedBounds.isEmpty {
             return canvasBounds
         }
 
-        return resolved
+        return paddedBounds
     }
 
     private func headingVector(rotation: CGFloat) -> CGVector {
@@ -458,11 +457,6 @@ private struct CursorLabCanvas: View {
             for point in debugPoints {
                 let rect = CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
                 context.fill(Path(ellipseIn: rect), with: .color(CursorLabPalette.ink.opacity(0.40)))
-            }
-
-            if let arc = model.path.arc {
-                let rect = CGRect(x: arc.x - 5, y: arc.y - 5, width: 10, height: 10)
-                context.fill(Path(ellipseIn: rect), with: .color(CursorLabPalette.mainStrong.opacity(0.78)))
             }
 
             if let selectedCandidate = model.candidates.first(where: { $0.id == model.selectedCandidateID }) {

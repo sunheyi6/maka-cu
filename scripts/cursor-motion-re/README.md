@@ -47,6 +47,16 @@ python3 scripts/cursor-motion-re/reconstruct_cursor_motion.py demo \
   --pretty
 ```
 
+分析视频里那 5 个 slider 在 shipping bundle 中是否还有直接证据，并输出它们和当前 binary-confirmed 几何 / spring 量的敏感性分析：
+
+```bash
+python3 scripts/cursor-motion-re/reconstruct_cursor_motion.py slider-study \
+  --start 220 440 \
+  --end 860 260 \
+  --bounds 0 0 1120 760 \
+  --pretty
+```
+
 ## 输出说明
 
 - `inspect`：
@@ -64,3 +74,7 @@ python3 scripts/cursor-motion-re/reconstruct_cursor_motion.py demo \
   - 当前仍未完全恢复的是 duration / wall-clock timing、`0x1005934b0` 第二段里几个泛型 buffer 的精确语义命名，以及调用前那层 runtime bounds 自动发现。
   - `first_endpoint_lock_*` 依赖一个已确认前提：`sample(progress)` 会 clamp 到 `0...1`；但它和 `SpringAnimation` finished optional-return 的最终联动，当前仍按“多段已确认证据拼接出的 inference”标注。
   - 当前输出的 `speed_units_per_progress` 是几何速度，不是带真实 duration 的时间速度；duration 仍在继续逆向。
+- `slider-study`：
+  - 先扫描 shipping bundle，确认 `START HANDLE` / `END HANDLE` / `ARC SIZE` / `ARC FLOW` 这些完整 phrase 是否还存在。
+  - 再把这 5 个 knob 分别映射到当前已经 binary-confirmed 的 `startControl` / `endControl` / `arc*` / `SpringParameters` 相关量，并输出 baseline 与扰动后的 chosen candidate / best arched candidate / endpoint-lock timing 变化。
+  - 输出里会明确区分“release bundle phrase evidence”和“基于 binary-confirmed 几何做的 slider mapping inference”。

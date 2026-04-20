@@ -684,6 +684,14 @@ class CandidatePath:
         }
 
 
+@dataclass(frozen=True)
+class BinaryGuidedPathOverrides:
+    start_extent_scale: float = 1.0
+    end_extent_scale: float = 1.0
+    arc_size_scale: float = 1.0
+    arc_flow_scale: float = 1.0
+
+
 def _sample_cubic(start: Vec2, control1: Vec2, control2: Vec2, end: Vec2, t: float) -> Vec2:
     omt = 1.0 - t
     omt2 = omt * omt
@@ -716,9 +724,23 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+def signed_angle(lhs: Vec2, rhs: Vec2) -> float:
+    return math.atan2((lhs.x * rhs.y) - (lhs.y * rhs.x), (lhs.x * rhs.x) + (lhs.y * rhs.y))
+
+
 def build_scalar_spring_configuration() -> ScalarSpringConfiguration:
     response = CONFIRMED_CURSOR_TIMING_CONSTANTS["cursor_path_spring_response"]
     damping_fraction = CONFIRMED_CURSOR_TIMING_CONSTANTS["cursor_path_spring_damping_fraction"]
+    return build_scalar_spring_configuration_for(
+        response=response,
+        damping_fraction=damping_fraction,
+    )
+
+
+def build_scalar_spring_configuration_for(
+    response: float,
+    damping_fraction: float,
+) -> ScalarSpringConfiguration:
     dt = CONFIRMED_CURSOR_TIMING_CONSTANTS["velocity_verlet_dt"]
     idle_velocity_threshold = CONFIRMED_CURSOR_TIMING_CONSTANTS["velocity_verlet_idle_velocity_threshold"]
 
@@ -795,10 +817,11 @@ def advance_scalar_velocity_verlet_to_time(
 
 def build_timed_cursor_timeline(
     path: CursorMotionPath,
+    config: ScalarSpringConfiguration | None = None,
     report_every_steps: int = 4,
     max_duration_seconds: float = 2.0,
 ) -> dict[str, object]:
-    config = build_scalar_spring_configuration()
+    config = config or build_scalar_spring_configuration()
     current = 0.0
     target = 1.0
     state = ScalarVelocityVerletState(time=0.0, velocity=0.0, force=0.0)
@@ -954,7 +977,14 @@ class BinaryGuidedPathGenerator:
         self.tables = tables
         self.guide_local = Vec2(-0.6946583704589973, 0.7193398003386512)
 
-    def build_candidates(self, start: Vec2, end: Vec2, bounds: Bounds | None) -> list[CandidatePath]:
+    def build_candidates(
+        self,
+        start: Vec2,
+        end: Vec2,
+        bounds: Bounds | None,
+        overrides: BinaryGuidedPathOverrides | None = None,
+    ) -> list[CandidatePath]:
+        overrides = overrides or BinaryGuidedPathOverrides()
         delta = end - start
         distance = max(delta.length(), self.constants["normalization_epsilon"])
         direction = delta.normalized()
@@ -967,8 +997,8 @@ class BinaryGuidedPathGenerator:
             constants=self.constants,
             guide=guide,
         )
-        start_extent = min(start_extent_pre, _clip_positive_ray(start, guide, bounds))
-        end_extent = min(end_extent_pre, _clip_positive_ray(end, reverse_guide, bounds))
+        start_extent = min(start_extent_pre * overrides.start_extent_scale, _clip_positive_ray(start, guide, bounds))
+        end_extent = min(end_extent_pre * overrides.end_extent_scale, _clip_positive_ray(end, reverse_guide, bounds))
 
         start_extent_scaled = min(
             max(start_extent * self.constants["side_bias_scale"], 0.0),
@@ -984,9 +1014,9 @@ class BinaryGuidedPathGenerator:
         scaled_start_control = start + guide.scale(start_extent_scaled)
         scaled_end_control = end - guide.scale(end_extent_scaled)
 
-        raw_handle_extent = _binary_piecewise_handle_extent(distance, self.constants)
+        raw_handle_extent = _binary_piecewise_handle_extent(distance, self.constants) * overrides.arc_size_scale
         raw_arc_extent = clamp(
-            distance * self.constants["distance_scale_tertiary"],
+            distance * self.constants["distance_scale_tertiary"] * overrides.arc_size_scale,
             self.constants["candidate_arc_min"],
             self.constants["candidate_arc_max"],
         )
@@ -996,7 +1026,7 @@ class BinaryGuidedPathGenerator:
         cross = (guide.y * direction.x) - (guide.x * direction.y)
         if cross < 0.0:
             signed_normal = signed_normal.scale(-1.0)
-        arc_anchor_bias = guide.scale(start_extent * self.constants["side_bias_scale"])
+        arc_anchor_bias = guide.scale(start_extent * self.constants["side_bias_scale"] * overrides.arc_flow_scale)
         forward_unit = _normalized_or_default(
             direction.scale(distance) + signed_normal.scale(raw_arc_extent),
             minimum_length=raw_handle_extent,
@@ -1144,6 +1174,320 @@ class BinaryGuidedPathGenerator:
             measurement=measurement,
             path=path,
         )
+
+
+def _derive_bundle_root(binary_path: Path) -> Path:
+    if binary_path.parent.name == "MacOS" and binary_path.parent.parent.name == "Contents":
+        return binary_path.parent.parent.parent
+    return binary_path.parent
+
+
+def scan_bundle_for_slider_labels(binary_path: Path) -> dict[str, object]:
+    bundle_root = _derive_bundle_root(binary_path)
+    exact_slider_phrases = [
+        "START HANDLE",
+        "END HANDLE",
+        "ARC SIZE",
+        "ARC FLOW",
+    ]
+    ambiguous_single_tokens = [
+        "SPRING",
+        "DEBUG",
+        "MAIL",
+        "CLICK",
+    ]
+    exact_findings = {label: False for label in exact_slider_phrases}
+    ambiguous_findings = {label: False for label in ambiguous_single_tokens}
+    files_scanned = 0
+
+    for file_path in bundle_root.rglob("*"):
+        if not file_path.is_file():
+            continue
+        files_scanned += 1
+        try:
+            payload = file_path.read_bytes().lower()
+        except OSError:
+            continue
+
+        for label in exact_slider_phrases:
+            if exact_findings[label]:
+                continue
+            if label.lower().encode("utf-8") in payload:
+                exact_findings[label] = True
+
+        for label in ambiguous_single_tokens:
+            if ambiguous_findings[label]:
+                continue
+            if label.lower().encode("utf-8") in payload:
+                ambiguous_findings[label] = True
+
+    return {
+        "bundle_root": str(bundle_root),
+        "files_scanned": files_scanned,
+        "exact_slider_phrases": exact_findings,
+        "ambiguous_single_tokens": ambiguous_findings,
+        "notes": {
+            "exact_slider_phrase_scan": "used to check whether the shipping bundle still carries the specific slider UI labels from the video.",
+            "ambiguous_single_token_scan": "single words like SPRING / DEBUG / MAIL / CLICK can appear for unrelated reasons in a release bundle, so these hits are not enough to claim the debug UI still ships.",
+        },
+    }
+
+
+def summarize_path_shape(path: CursorMotionPath, sample_count: int = 128) -> dict[str, float | list[float]]:
+    chord = path.end - path.start
+    chord_length = chord.length()
+    chord_direction = chord.normalized() if chord_length > 1e-9 else Vec2(1.0, 0.0)
+    normal = chord_direction.perpendicular()
+
+    max_signed_offset = 0.0
+    apex_progress = 0.0
+    for sample in path.sample_points(sample_count):
+        offset_vector = sample.point - path.start
+        signed_offset = (offset_vector.x * normal.x) + (offset_vector.y * normal.y)
+        if abs(signed_offset) > abs(max_signed_offset):
+            max_signed_offset = signed_offset
+            apex_progress = sample.progress
+
+    start_tangent = path.sample(0.04)[1]
+    end_tangent = path.sample(0.96)[1]
+    return {
+        "chord_length": chord_length,
+        "max_signed_offset_from_chord": max_signed_offset,
+        "max_offset_from_chord": abs(max_signed_offset),
+        "apex_progress": apex_progress,
+        "start_heading_error_degrees": math.degrees(signed_angle(chord_direction, start_tangent)),
+        "end_heading_error_degrees": math.degrees(signed_angle(chord_direction, end_tangent)),
+    }
+
+
+def summarize_candidate_geometry(candidate: CandidatePath, sample_count: int = 128) -> dict[str, object]:
+    return {
+        "identifier": candidate.identifier,
+        "kind": candidate.kind,
+        "side": candidate.side,
+        "measurement": candidate.measurement.to_dict(),
+        "shape_metrics": summarize_path_shape(candidate.path, sample_count=sample_count),
+        "control_points": {
+            "start_control": candidate.path.start_control.to_list() if candidate.path.start_control else None,
+            "arc": candidate.path.arc.to_list() if candidate.path.arc else None,
+            "arc_in": candidate.path.arc_in.to_list() if candidate.path.arc_in else None,
+            "arc_out": candidate.path.arc_out.to_list() if candidate.path.arc_out else None,
+            "end_control": candidate.path.end_control.to_list() if candidate.path.end_control else None,
+        },
+    }
+
+
+def _find_best_arched_candidate(candidates: list[CandidatePath]) -> CandidatePath | None:
+    arched = [candidate for candidate in candidates if candidate.kind == "arched"]
+    if not arched:
+        return None
+    in_bounds = [candidate for candidate in arched if candidate.measurement.stays_in_bounds]
+    pool = in_bounds if in_bounds else arched
+    return min(pool, key=lambda item: item.score)
+
+
+def _build_geometry_slider_variants(
+    generator: BinaryGuidedPathGenerator,
+    start: Vec2,
+    end: Vec2,
+    bounds: Bounds | None,
+    sample_count: int,
+    variant_overrides: list[tuple[str, BinaryGuidedPathOverrides]],
+) -> list[dict[str, object]]:
+    payload: list[dict[str, object]] = []
+    for name, overrides in variant_overrides:
+        candidates = generator.build_candidates(start=start, end=end, bounds=bounds, overrides=overrides)
+        chosen_candidate, selection_policy = generator.choose_candidate(candidates)
+        best_arched = _find_best_arched_candidate(candidates)
+        payload.append(
+            {
+                "variant": name,
+                "selection_policy": selection_policy,
+                "chosen_candidate": summarize_candidate_geometry(chosen_candidate, sample_count=sample_count)
+                if chosen_candidate
+                else None,
+                "best_arched_candidate": summarize_candidate_geometry(best_arched, sample_count=sample_count)
+                if best_arched
+                else None,
+            }
+        )
+    return payload
+
+
+def build_slider_study_output(
+    binary: MachOBinary,
+    start: Vec2,
+    end: Vec2,
+    bounds: Bounds | None,
+    sample_count: int,
+) -> dict[str, object]:
+    constants = build_model_constants(binary)
+    tables = extract_candidate_tables(binary)
+    generator = BinaryGuidedPathGenerator(constants=constants, tables=tables)
+    baseline_candidates = generator.build_candidates(start=start, end=end, bounds=bounds)
+    baseline_choice, selection_policy = generator.choose_candidate(baseline_candidates)
+    baseline_best_arched = _find_best_arched_candidate(baseline_candidates)
+
+    if baseline_choice is None:
+        raise ValueError("no baseline candidate produced for slider study")
+
+    baseline_timeline = build_timed_cursor_timeline(path=baseline_choice.path)
+    spring_response_baseline = CONFIRMED_CURSOR_TIMING_CONSTANTS["cursor_path_spring_response"]
+    spring_damping_baseline = CONFIRMED_CURSOR_TIMING_CONSTANTS["cursor_path_spring_damping_fraction"]
+    spring_variants = [
+        (
+            "response_minus_15pct",
+            build_scalar_spring_configuration_for(
+                response=spring_response_baseline * 0.85,
+                damping_fraction=spring_damping_baseline,
+            ),
+        ),
+        (
+            "response_plus_15pct",
+            build_scalar_spring_configuration_for(
+                response=spring_response_baseline * 1.15,
+                damping_fraction=spring_damping_baseline,
+            ),
+        ),
+    ]
+    spring_variant_payload = []
+    for name, config in spring_variants:
+        timeline = build_timed_cursor_timeline(path=baseline_choice.path, config=config)
+        spring_variant_payload.append(
+            {
+                "variant": name,
+                "spring_configuration": config.to_dict(),
+                "timed_cursor_timeline": {
+                    "first_endpoint_lock_time": timeline["first_endpoint_lock_time"],
+                    "close_enough_first_time": timeline["close_enough_first_time"],
+                    "raw_progress_first_ge_target_time": timeline["raw_progress_first_ge_target_time"],
+                },
+            }
+        )
+
+    return {
+        "binary_path": str(binary.path),
+        "input": {
+            "start": start.to_list(),
+            "end": end.to_list(),
+            "bounds": asdict(bounds) if bounds else None,
+            "sample_count": sample_count,
+        },
+        "shipping_bundle_label_evidence": scan_bundle_for_slider_labels(binary.path),
+        "binary_confirmed_motion_terms": {
+            "path_fields": ["startControl", "arc", "arcIn", "arcOut", "endControl"],
+            "timing_fields": ["Animation.SpringParameters.response", "Animation.SpringParameters.dampingFraction"],
+            "candidate_tables": extract_candidate_tables(binary),
+            "fixed_geometry_constants": {
+                "guide_vector": [-0.6946583704589973, 0.7193398003386512],
+                "start_extent_piecewise": "48 / d*0.41960295031576633 / 640 depending on region",
+                "end_extent_piecewise": "48 / d*0.9 / 640 depending on region",
+                "handle_extent_piecewise": "50 / d*0.2765523188064277 / 520",
+                "arc_extent_piecewise": "clamp(d*0.5783555327868779, 38, 440)",
+                "arc_anchor_bias": "guide * (startExtent * 0.65)",
+            },
+            "spring_defaults": {
+                "response": spring_response_baseline,
+                "damping_fraction": spring_damping_baseline,
+                "dt": CONFIRMED_CURSOR_TIMING_CONSTANTS["velocity_verlet_dt"],
+            },
+        },
+        "baseline": {
+            "selection_policy": selection_policy,
+            "chosen_candidate": summarize_candidate_geometry(baseline_choice, sample_count=sample_count),
+            "best_arched_candidate": summarize_candidate_geometry(baseline_best_arched, sample_count=sample_count)
+            if baseline_best_arched
+            else None,
+            "timed_cursor_timeline": {
+                "spring_configuration": baseline_timeline["spring_configuration"],
+                "first_endpoint_lock_time": baseline_timeline["first_endpoint_lock_time"],
+                "close_enough_first_time": baseline_timeline["close_enough_first_time"],
+            },
+        },
+        "slider_mapping_analysis": {
+            "start_handle": {
+                "release_bundle_label_found": False,
+                "mapping_confidence": "inferred_from_binary_fields",
+                "affects_current_baseline_choice_directly": True,
+                "binary_terms_touched": ["CursorMotionPath.startControl", "guide startExtent piecewise"],
+                "effect_summary": "changes how far the launch-side control point projects along the guide direction, so it mainly changes the first third of the curve and the initial heading commitment.",
+                "variants": _build_geometry_slider_variants(
+                    generator=generator,
+                    start=start,
+                    end=end,
+                    bounds=bounds,
+                    sample_count=sample_count,
+                    variant_overrides=[
+                        ("start_extent_minus_25pct", BinaryGuidedPathOverrides(start_extent_scale=0.75)),
+                        ("start_extent_plus_25pct", BinaryGuidedPathOverrides(start_extent_scale=1.25)),
+                    ],
+                ),
+            },
+            "end_handle": {
+                "release_bundle_label_found": False,
+                "mapping_confidence": "inferred_from_binary_fields",
+                "affects_current_baseline_choice_directly": True,
+                "binary_terms_touched": ["CursorMotionPath.endControl", "guide endExtent piecewise"],
+                "effect_summary": "changes how far the arrival-side control point projects before the endpoint, so it mainly changes the terminal braking / hook-in segment and the final tangent alignment.",
+                "variants": _build_geometry_slider_variants(
+                    generator=generator,
+                    start=start,
+                    end=end,
+                    bounds=bounds,
+                    sample_count=sample_count,
+                    variant_overrides=[
+                        ("end_extent_minus_25pct", BinaryGuidedPathOverrides(end_extent_scale=0.75)),
+                        ("end_extent_plus_25pct", BinaryGuidedPathOverrides(end_extent_scale=1.25)),
+                    ],
+                ),
+            },
+            "arc_size": {
+                "release_bundle_label_found": False,
+                "mapping_confidence": "inferred_from_binary_fields",
+                "affects_current_baseline_choice_directly": baseline_choice.kind == "arched",
+                "binary_terms_touched": ["handleExtent piecewise", "arcExtent piecewise", "table_a", "table_b"],
+                "effect_summary": "changes how far the arched family pushes the apex off the chord and how wide the arc tangents open, so it mainly changes peak bowing, total turn, and path length.",
+                "variants": _build_geometry_slider_variants(
+                    generator=generator,
+                    start=start,
+                    end=end,
+                    bounds=bounds,
+                    sample_count=sample_count,
+                    variant_overrides=[
+                        ("arc_size_minus_30pct", BinaryGuidedPathOverrides(arc_size_scale=0.7)),
+                        ("arc_size_plus_30pct", BinaryGuidedPathOverrides(arc_size_scale=1.3)),
+                    ],
+                ),
+            },
+            "arc_flow": {
+                "release_bundle_label_found": False,
+                "mapping_confidence": "inferred_from_binary_fields",
+                "affects_current_baseline_choice_directly": baseline_choice.kind == "arched",
+                "binary_terms_touched": ["arc_anchor_bias = guide * (startExtent * 0.65)"],
+                "effect_summary": "the current lift has no dedicated flow field, but the fixed arc-anchor bias shifts the apex forward along the guide direction; perturbing it mainly moves where the curve reaches its widest bow, making the turn feel earlier or later.",
+                "variants": _build_geometry_slider_variants(
+                    generator=generator,
+                    start=start,
+                    end=end,
+                    bounds=bounds,
+                    sample_count=sample_count,
+                    variant_overrides=[
+                        ("arc_flow_minus_25pct", BinaryGuidedPathOverrides(arc_flow_scale=0.75)),
+                        ("arc_flow_plus_25pct", BinaryGuidedPathOverrides(arc_flow_scale=1.25)),
+                    ],
+                ),
+            },
+            "spring": {
+                "release_bundle_label_found": False,
+                "mapping_confidence": "direct_binary_timing_fields_confirmed_but_one_dimensional_ui_mapping_unrecovered",
+                "affects_current_baseline_choice_directly": True,
+                "binary_terms_touched": ["Animation.SpringParameters.response", "Animation.SpringParameters.dampingFraction"],
+                "effect_summary": "shipping cursor motion definitely uses SpringParameters(response=1.4, dampingFraction=0.9); varying response changes endpoint-lock timing and how quickly progress approaches 1.0, but the exact single-slider mapping used by the internal debug UI is still unrecovered.",
+                "normalization_helper_note": CONFIRMED_TIMING_PIPELINE["spring_parameter_normalization_helper"],
+                "variants": spring_variant_payload,
+            },
+        },
+    }
 
 
 def build_inspect_output(binary: MachOBinary) -> dict[str, object]:
@@ -1327,6 +1671,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include full path and sample output for every candidate instead of only the chosen candidate.",
     )
 
+    slider_study = subparsers.add_parser(
+        "slider-study",
+        help="Study how slider-like parameter hypotheses map onto binary-confirmed geometry and spring terms.",
+    )
+    slider_study.add_argument("--pretty", dest="pretty_local", action="store_true", help="Pretty-print JSON output.")
+    slider_study.add_argument("--start", nargs=2, metavar=("X", "Y"), required=True, help="Start position.")
+    slider_study.add_argument("--end", nargs=2, metavar=("X", "Y"), required=True, help="End position.")
+    slider_study.add_argument(
+        "--bounds",
+        nargs=4,
+        metavar=("MIN_X", "MIN_Y", "MAX_X", "MAX_Y"),
+        help="Optional bounds used for stays_in_bounds measurement.",
+    )
+    slider_study.add_argument("--samples", type=int, default=96, help="Number of sample points used for geometry summaries.")
+
     return parser
 
 
@@ -1348,6 +1707,17 @@ def main(argv: list[str] | None = None) -> int:
             bounds=bounds,
             sample_count=args.samples,
             include_all_candidates=args.include_all_candidates,
+        )
+    elif args.command == "slider-study":
+        start = parse_vec2(args.start)
+        end = parse_vec2(args.end)
+        bounds = parse_bounds(args.bounds) if args.bounds else None
+        payload = build_slider_study_output(
+            binary,
+            start=start,
+            end=end,
+            bounds=bounds,
+            sample_count=args.samples,
         )
     else:
         raise AssertionError(f"unsupported command: {args.command}")

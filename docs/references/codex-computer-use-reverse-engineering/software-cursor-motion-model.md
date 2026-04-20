@@ -28,6 +28,10 @@
 
 这说明至少在官方内部调试构建里，cursor motion 不是黑盒常量，而是一组可实时调的参数。
 
+需要补一条边界：当前本机 shipping bundle
+`~/.codex/plugins/cache/openai-bundled/computer-use/1.0.750/Codex Computer Use.app`
+做整包 phrase scan 后，并没有命中 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW` 这些完整 label。也就是说，视频里的 slider UI 仍然是有效证据，但更像内部调试构建或未发布调试面板，而不是当前 release app 里可直接字符串恢复出来的现成界面。
+
 ### 2. `SkyComputerUseService` 里不仅有字符串，还有可恢复的 Swift motion 类型
 
 这次除了 `strings`，还额外做了两步：

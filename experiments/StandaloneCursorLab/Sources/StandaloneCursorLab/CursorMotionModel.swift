@@ -2,6 +2,8 @@ import CoreGraphics
 import Foundation
 
 struct CursorMotionParameters: Equatable {
+    private static let springBaselineEpsilon: CGFloat = 0.0001
+
     var startHandle: CGFloat
     var endHandle: CGFloat
     var arcSize: CGFloat
@@ -31,9 +33,15 @@ struct CursorMotionParameters: Equatable {
     }
 
     var progressSpringConfiguration: CursorMotionSpringConfiguration {
-        CursorMotionSpringConfiguration(
-            response: 0.96 + (0.88 * spring),
-            dampingFraction: 0.98 - (0.16 * spring)
+        if abs(spring - Self.default.spring) <= Self.springBaselineEpsilon {
+            return .official
+        }
+
+        let tuning = centeredSpringTuning
+        return CursorMotionSpringConfiguration(
+            response: CursorMotionSpringConfiguration.official.response * (1 + (tuning * 0.30)),
+            dampingFraction: (CursorMotionSpringConfiguration.official.dampingFraction + (tuning * 0.04))
+                .clamped(to: 0.86...0.94)
         )
     }
 
@@ -44,6 +52,17 @@ struct CursorMotionParameters: Equatable {
         // The official move timing is driven by the spring reaching endpoint lock,
         // not by an extra distance-based wall-clock scaling layer.
         CursorMotionProgressAnimator.closeEnoughTime(configuration: progressSpringConfiguration)
+    }
+
+    private var centeredSpringTuning: CGFloat {
+        let baseline = Self.default.spring
+        if spring >= baseline {
+            let upperSpan = max(1 - baseline, Self.springBaselineEpsilon)
+            return (spring - baseline) / upperSpan
+        }
+
+        let lowerSpan = max(baseline, Self.springBaselineEpsilon)
+        return (spring - baseline) / lowerSpan
     }
 }
 
@@ -675,7 +694,11 @@ enum HeadingDrivenCursorMotionModel {
             metrics: metrics,
             startForward: resolvedStartForward,
             endForward: resolvedEndForward,
-            preferredSide: preferredSide
+            preferredSide: preferredSide,
+            arcSizeTuning: signedSliderOffset(
+                parameters.arcSize,
+                baseline: CursorMotionParameters.default.arcSize
+            )
         )
 
         return descriptors(for: metrics, preferredSide: preferredSide).map { descriptor in
@@ -730,14 +753,44 @@ enum HeadingDrivenCursorMotionModel {
         let direction = metrics.direction
         let normal = metrics.normal
         let resolvedFlow = (parameters.arcFlow + descriptor.flowShift).clamped(to: 0...1)
-        let flowBias = (resolvedFlow - 0.5) * distance * 0.18
+        let resolvedDefaultFlow = (CursorMotionParameters.default.arcFlow + descriptor.flowShift).clamped(to: 0...1)
+        let flowPhaseTuning = signedSliderOffset(
+            resolvedFlow,
+            baseline: resolvedDefaultFlow
+        )
+        let flowBias = flowPhaseTuning * distance * 0.18
+        let startHandleTuning = signedSliderOffset(
+            parameters.startHandle,
+            baseline: CursorMotionParameters.default.startHandle
+        )
+        let endHandleTuning = signedSliderOffset(
+            parameters.endHandle,
+            baseline: CursorMotionParameters.default.endHandle
+        )
+        let arcSizeTuning = signedSliderOffset(
+            parameters.arcSize,
+            baseline: CursorMotionParameters.default.arcSize
+        )
+        let arcGeometryScale = tunedArcScale(
+            arcSizeTuning,
+            delta: descriptor.family == "direct" ? 0.32 : 0.82
+        )
+        let flowStartNormalBiasDelta = descriptor.family == "direct" ? -0.04 : -0.14
+        let flowEndNormalBiasDelta = descriptor.family == "direct" ? 0.04 : 0.16
+        let flowNormalScaleDelta = descriptor.family == "direct" ? 0.24 : 0.78
+        let startFlowChordBias = direction.scaled(
+            by: distance * flowPhaseTuning * (descriptor.family == "direct" ? -0.04 : -0.12)
+        )
+        let endFlowChordBias = direction.scaled(
+            by: distance * flowPhaseTuning * (descriptor.family == "direct" ? 0.05 : 0.16)
+        )
 
         let baseStartReach = distance * (0.10 + parameters.startHandle * 0.56)
         let baseEndReach = distance * (0.11 + parameters.endHandle * 0.62)
         let distanceLift = 0.68 + (metrics.farFactor * 0.56)
         let baseArcHeight = min(
-            max(distance * (0.10 + parameters.arcSize * 0.92) * descriptor.arcScale * distanceLift, 20),
-            distance * 0.96
+            max(distance * (0.10 + parameters.arcSize * 0.92) * descriptor.arcScale * arcGeometryScale * distanceLift, 12),
+            distance * (0.84 + max(arcSizeTuning, 0) * 0.18)
         )
 
         let sideSign = CGFloat(descriptor.side)
@@ -751,30 +804,104 @@ enum HeadingDrivenCursorMotionModel {
             forward: startForward,
             normal: normal,
             sideSign: sideSign,
-            lineWeight: descriptor.startLineWeight,
-            headingWeight: descriptor.startHeadingWeight,
-            normalBias: descriptor.startGuideNormalBias
+            lineWeight: tunedHandleComponent(
+                descriptor.startLineWeight,
+                tuning: startHandleTuning,
+                delta: -0.22,
+                range: -0.56...1.30
+            ),
+            headingWeight: tunedHandleComponent(
+                descriptor.startHeadingWeight,
+                tuning: startHandleTuning,
+                delta: 0.52,
+                range: 0.04...2.24
+            ),
+            normalBias: tunedHandleComponent(
+                tunedFlowComponent(
+                    tunedArcComponent(
+                        descriptor.startGuideNormalBias,
+                        tuning: arcSizeTuning,
+                        delta: descriptor.family == "direct" ? 0.04 : 0.12,
+                        range: -0.24...0.74
+                    ),
+                    tuning: flowPhaseTuning,
+                    delta: flowStartNormalBiasDelta,
+                    range: -0.32...0.82
+                ),
+                tuning: startHandleTuning,
+                delta: 0.20,
+                range: -0.20...0.82
+            )
         )
         let endGuide = resolvedGuide(
             line: direction,
             forward: endForward,
             normal: normal,
             sideSign: sideSign,
-            lineWeight: descriptor.endLineWeight,
-            headingWeight: descriptor.endHeadingWeight,
-            normalBias: descriptor.endGuideNormalBias
+            lineWeight: tunedHandleComponent(
+                descriptor.endLineWeight,
+                tuning: endHandleTuning,
+                delta: -0.18,
+                range: -0.48...1.16
+            ),
+            headingWeight: tunedHandleComponent(
+                descriptor.endHeadingWeight,
+                tuning: endHandleTuning,
+                delta: 0.48,
+                range: 0.08...2.28
+            ),
+            normalBias: tunedHandleComponent(
+                tunedFlowComponent(
+                    tunedArcComponent(
+                        descriptor.endGuideNormalBias,
+                        tuning: arcSizeTuning,
+                        delta: descriptor.family == "direct" ? 0.05 : 0.14,
+                        range: -0.20...0.82
+                    ),
+                    tuning: flowPhaseTuning,
+                    delta: flowEndNormalBiasDelta,
+                    range: -0.28...0.90
+                ),
+                tuning: endHandleTuning,
+                delta: 0.22,
+                range: -0.16...0.90
+            )
         )
 
-        let startReach = max(baseStartReach * descriptor.startReachScale + flowBias * descriptor.startFlowWeight, 12)
-        let endReach = max(baseEndReach * descriptor.endReachScale - flowBias * descriptor.endFlowWeight, 12)
-        let control1Base = start + startGuide.scaled(by: startReach)
-        let control2Base = end - endGuide.scaled(by: endReach)
+        let startReach = max(
+            (baseStartReach
+                * descriptor.startReachScale
+                * tunedHandleScale(startHandleTuning, delta: 0.58))
+                + flowBias * descriptor.startFlowWeight,
+            12
+        )
+        let endReach = max(
+            (baseEndReach
+                * descriptor.endReachScale
+                * tunedHandleScale(endHandleTuning, delta: 0.68))
+                - flowBias * descriptor.endFlowWeight,
+            12
+        )
+        let control1Base = start
+            + startGuide.scaled(by: startReach)
+            + startFlowChordBias
+        let control2Base = end
+            - endGuide.scaled(by: endReach)
+            + endFlowChordBias
+        let startNormalScale = descriptor.startNormalScale
+            * tunedHandleScale(startHandleTuning, delta: 0.40)
+            * tunedArcScale(arcSizeTuning, delta: descriptor.family == "direct" ? 0.46 : 0.94)
+            * tunedFlowScale(flowPhaseTuning, direction: -1, delta: flowNormalScaleDelta)
+        let endNormalScale = descriptor.endNormalScale
+            * tunedHandleScale(endHandleTuning, delta: 0.44)
+            * tunedArcScale(arcSizeTuning, delta: descriptor.family == "direct" ? 0.46 : 0.94)
+            * tunedFlowScale(flowPhaseTuning, direction: 1, delta: flowNormalScaleDelta)
 
-        let control1 = control1Base + arcVector.scaled(by: descriptor.startNormalScale)
-        let control2 = control2Base + arcVector.scaled(by: descriptor.endNormalScale)
+        let control1 = control1Base + arcVector.scaled(by: startNormalScale)
+        let control2 = control2Base + arcVector.scaled(by: endNormalScale)
         let resolvedArcHeight = baseArcHeight * max(
-            abs(descriptor.startNormalScale),
-            abs(descriptor.endNormalScale),
+            abs(startNormalScale),
+            abs(endNormalScale),
             0.12
         )
 
@@ -855,12 +982,20 @@ enum HeadingDrivenCursorMotionModel {
         switch descriptor.family {
         case "turn":
             score += (1 - context.turnDemand) * 55
+            score += max(-context.arcSizeTuning, 0) * 48
+            score -= max(context.arcSizeTuning, 0) * 24
         case "brake":
             score += (1 - context.arrivalDemand) * 40
+            score += max(-context.arcSizeTuning, 0) * 42
+            score -= max(context.arcSizeTuning, 0) * 20
         case "orbit":
             score += context.directness * 70
+            score += max(-context.arcSizeTuning, 0) * 68
+            score -= max(context.arcSizeTuning, 0) * 40
         case "direct":
             score += max(context.turnDemand - 0.12, 0) * 80
+            score += max(context.arcSizeTuning, 0) * 110
+            score -= max(-context.arcSizeTuning, 0) * 44
         default:
             break
         }
@@ -1124,6 +1259,59 @@ enum HeadingDrivenCursorMotionModel {
         return CGVector(dx: vector.dx / length, dy: vector.dy / length)
     }
 
+    private static func signedSliderOffset(_ value: CGFloat, baseline: CGFloat) -> CGFloat {
+        if value >= baseline {
+            let upperSpan = max(1 - baseline, normalizationEpsilon)
+            return (value - baseline) / upperSpan
+        }
+
+        let lowerSpan = max(baseline, normalizationEpsilon)
+        return (value - baseline) / lowerSpan
+    }
+
+    private static func tunedHandleComponent(
+        _ base: CGFloat,
+        tuning: CGFloat,
+        delta: CGFloat,
+        range: ClosedRange<CGFloat>
+    ) -> CGFloat {
+        (base + (tuning * delta)).clamped(to: range)
+    }
+
+    private static func tunedHandleScale(_ tuning: CGFloat, delta: CGFloat) -> CGFloat {
+        max(0.28, 1 + (tuning * delta))
+    }
+
+    private static func tunedArcComponent(
+        _ base: CGFloat,
+        tuning: CGFloat,
+        delta: CGFloat,
+        range: ClosedRange<CGFloat>
+    ) -> CGFloat {
+        (base + (tuning * delta)).clamped(to: range)
+    }
+
+    private static func tunedArcScale(_ tuning: CGFloat, delta: CGFloat) -> CGFloat {
+        max(0.16, 1 + (tuning * delta))
+    }
+
+    private static func tunedFlowComponent(
+        _ base: CGFloat,
+        tuning: CGFloat,
+        delta: CGFloat,
+        range: ClosedRange<CGFloat>
+    ) -> CGFloat {
+        (base + (tuning * delta)).clamped(to: range)
+    }
+
+    private static func tunedFlowScale(
+        _ tuning: CGFloat,
+        direction: CGFloat,
+        delta: CGFloat
+    ) -> CGFloat {
+        max(0.18, 1 + (tuning * direction * delta))
+    }
+
     private static func signedAngle(from lhs: CGVector, to rhs: CGVector) -> CGFloat {
         atan2((lhs.dx * rhs.dy) - (lhs.dy * rhs.dx), (lhs.dx * rhs.dx) + (lhs.dy * rhs.dy))
     }
@@ -1133,6 +1321,7 @@ enum HeadingDrivenCursorMotionModel {
         let startForward: CGVector
         let endForward: CGVector
         let preferredSide: Int
+        let arcSizeTuning: CGFloat
 
         var turnDemand: CGFloat {
             min(abs(HeadingDrivenCursorMotionModel.signedAngle(from: startForward, to: metrics.direction)) / .pi, 1)

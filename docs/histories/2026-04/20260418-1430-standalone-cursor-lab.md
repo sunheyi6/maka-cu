@@ -163,6 +163,62 @@
 - `experiments/StandaloneCursorLab/README.md`
 - `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
 
+### 🔁 Follow-up (2026-04-20, apply arc-size semantics from slider investigation)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[明确 ARC SIZE 不是 cursor 大小]**: `ARC SIZE` 这次明确收口为“轨迹弧度”旋钮，不再给出任何会让人误解成 cursor glyph 尺寸的语义空间。
+- **[接到弧高与控制点侧向偏移]**: heading-driven path builder 现在会用 `ARC SIZE` 同时调 `baseArcHeight`、guide normal bias 和 start/end normal scale，让 slider 直接影响中段离 chord 的偏移和整条曲线的开口宽度。
+- **[接到 chooser 偏好]**: scoring 也补了 `ARC SIZE` 对 family 选择的影响；arc 更小时更偏 `direct/tight`，arc 更大时会更愿意保留 `turn/brake/orbit` 这类更宽的弧线路径。
+- **[补默认样例采样]**: 用 lab 默认点位验证后，`arcSize=0.04` 时选中 `brake-primary-tight`、`curveScale≈10.3`、中段 `y≈326.8`；调到 `0.12` 后仍在主 family 内，但 `curveScale≈47.7`、中段 `y≈345.5`，能直接看出弧度抬高。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorMotionModel.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, remove mid-curve point feel introduced by arc-flow)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[定位到不是 SPRING 问题]**: 重新检查后确认 `SPRING` 只影响 progress timing，不参与路径几何；用户看到的“中间多了一个点”来自 `ARC FLOW` 首轮实现。
+- **[直接移除中间 join]**: `ARC FLOW` 当前不再通过显式中间锚点双段曲线实现，而是收回到单段 cubic 的控制点前后相位偏置，从根上消掉“曲线中间多了一个节点”的几何来源。
+- **[移除中点 debug 强调]**: `DEBUG` overlay 也不再单独渲染那个中间锚点，避免视觉上继续像“曲线中间有个控制节点”。
+- **[保留 ARC FLOW 的作用边界]**: 修完后 `ARC FLOW` 仍然会影响路径前后相位，但不再靠一条显式 join 来表达。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorMotionModel.swift`
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, apply spring semantics from slider investigation)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[把 SPRING 收回官方中心档]**: `SPRING` slider 不再走之前那套“拖高以后反而更快收口”的映射；现在改成围绕官方 `response=1.4 / damping=0.9` 的 centered remap，并在 `spring=0.5` 时精确返回 `.official`。
+- **[保持 timing 只由 spring 决定]**: 这次没有再引入任何新的距离驱动时长层；`travelDuration` 继续直接取 spring 的 endpoint-lock 时间，保持和当前 reverse-engineering 边界一致。
+- **[把语义收成左快右慢]**: 当前档位已经稳定成“往左更快更硬，往右更慢更稳”。采样下，`spring=0.25 / 0.5 / 0.75` 分别对应约 `1.0958s / 1.4292s / 1.8750s` 的 endpoint-lock。
+- **[补默认档验证]**: 额外验证了 `spring=0.5` 时 `progressSpringConfiguration == .official`，因此默认档会继续命中 `343/240` 的官方 endpoint-lock 快路，而不是只算出一个近似值。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorMotionModel.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, apply arc-flow semantics from slider investigation)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[明确 ARC FLOW 不是改弧度大小]**: `ARC FLOW` 这次明确收口为“最宽弧段沿主轴的前后相位位置”，不再和 `ARC SIZE` 混成同一个“弯曲程度”旋钮。
+- **[先把 ARC FLOW 接到显式中间锚点]**: 首轮实现里，heading-driven path builder 曾短暂把 `turn / brake / orbit` family 切到显式中间锚点的双段曲线，让 `ARC FLOW` 能更直接前后移动弧顶。
+- **[保留 start/end handle 与 arc size 的局部几何语义]**: 这次没有回退前面已经确认的 `START/END HANDLE` 和 `ARC SIZE` 语义，而是在其上叠加 `ARC FLOW` 对 apex phase 的控制。
+- **[随后收回成单段 cubic]**: 用户确认显式中间锚点会让曲线读起来像“中间多了一个点”后，`ARC FLOW` 已收回到单段 cubic 的前后相位偏置；当前继续保留相位控制，但不再通过可见 join 来实现。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorMotionModel.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
 ### 🔁 Follow-up (2026-04-20, align default move speed with official endpoint-lock timing)
 **Scope:** `experiments/StandaloneCursorLab/`、`docs/`
 
@@ -200,4 +256,44 @@
 
 ### 📁 Additional Files Modified
 - `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, preserve live path origin while tuning sliders)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[修正 slider 调参回跳]**: `motionParameters` 变化时不再把外层 `@State start/end` 重新喂回 `updateParameters`；当前会话的调试曲线现在改由最近一次真实 move 的 reference origin 和 `queuedTarget` 重建，避免曲线起点偶发回到初始点。
+- **[保留当前 session 的 start heading]**: slider 调参时会继续沿用这次 move 开始时记录下来的 `startRotation`，而不是临时取 settled 后的 endpoint 姿态；这样 candidate chooser 不会因为调参时机不同而突然换成另一套起步朝向。
+- **[同步记录]**: active plan 补充这次 bugfix，明确“参数调节不应改写当前会话位置”已经和此前的 resize 修复收口到同一原则。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, keep debug path visible while tuning sliders)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[修正 DEBUG 线消失]**: 上一轮把 slider 调参直接绑到 `currentState.point -> queuedTarget` 后，在 settled 态会退化成 `target -> target` 的零长度 path；现在把“cursor 当前点位”和“reference path”分离，DEBUG 模式下调参仍会显示完整曲线反馈。
+- **[保留当前 cursor 不回跳]**: 调参时仍然只把 simulator snap 在当前位置，不会因为恢复完整 reference path 而把 cursor 本体重新拉回起点。
+- **[同步文档口径]**: active plan 和 README 都补充这次调整，明确 slider 的可视反馈来自当前 session path，而不是简单拿 live endpoint 直接重建。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, apply start/end handle semantics from slider investigation)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[收紧 START HANDLE 语义]**: `START HANDLE` 不再只是参与全局 curve reach 的对称缩放；现在优先改变起步段的 guide line/heading mix、start reach 和 start-side normal 偏置，让前段轨迹能更明确地体现“先甩出去多远、多久才回咬主轴”。
+- **[收紧 END HANDLE 语义]**: `END HANDLE` 也改为只优先作用在 end guide / end reach / end-side normal 上，使末段收束钩子的长度和贴回目标的时机能单独变化，而不是跟起步段一起等比例变化。
+- **[放宽默认样例的 bounds clipping]**: lab 选路不再使用过紧的 corridor bounds，而是改用画布内缩后的实际 canvas bounds；这样默认样例下 `END HANDLE` 不会因为提前 clipping 而看起来“几乎没反应”。
+- **[补验证采样]**: 除了 `swift build --product StandaloneCursorLab` 之外，还用默认点位做了小脚本采样，确认 `START HANDLE` 和 `END HANDLE` 在接近默认档的小范围调节下也会改变 early/late path sample 与 control geometry。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorMotionModel.swift`
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`
 - `docs/exec-plans/active/20260418-standalone-cursor-lab.md`

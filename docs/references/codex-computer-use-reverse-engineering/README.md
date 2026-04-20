@@ -20,6 +20,8 @@
   - 结合视频样本、官方字符串和当前开源实现，对 cursor motion 参数模型的推断。
 - `software-cursor-motion-reconstruction.md`
   - 继续下钻到函数级后，对 `CursorMotionPath.sample(progress)`、`CursorMotionPathMeasurement`、`CursorMotionPath/Segment` 布局、20 条候选几何、score 公式、in-bounds 优先选择策略，以及 `SpringAnimation -> VelocityVerletSimulation` timing 链、finished predicate 和 endpoint-lock 观测的重建说明。
+- `software-cursor-slider-parameter-investigation.md`
+  - 针对视频里 5 个 slider，记录 shipping bundle 中是否还带对应 label phrase、它们与当前 binary-confirmed 几何 / spring 量的映射关系，以及对实际曲线的敏感性分析。
 - `permission-onboarding.md`
   - 对 Accessibility / Screen Recording 权限引导和 System Settings accessory window 的分析。
 - `assets/README.md`
