@@ -64,6 +64,9 @@ This repo includes a ready-to-run example at
 That sample covers all 9 official tools against `TextEdit`, and it intentionally
 repeats `get_app_state` between state-changing actions because the official
 bundled `computer-use` invalidates the cached app state after each mutation.
+Before running it, make sure `TextEdit` already has a normal document window open;
+otherwise `get_app_state` may only expose the application root and the hard-coded
+`element_index` values in the sample will no longer line up.
 
 For a smaller cursor-comparison path, use
 `examples/textedit-set-value-click-raise-seq.json`.

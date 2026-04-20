@@ -214,8 +214,8 @@ app_name="Cursor Motion.app"
 bundle_identifier="com.ifuryst.cursormotion"
 bundle_version="${CURSOR_MOTION_BUNDLE_VERSION:-${GITHUB_RUN_NUMBER:-$(git -C "${repo_root}" rev-list --count HEAD 2>/dev/null || echo 1)}}"
 bundle_icon_name="CursorMotion.icns"
-icon_render_script="${repo_root}/scripts/render-open-computer-use-icon.swift"
-cursor_reference_source="${repo_root}/docs/references/codex-computer-use-reverse-engineering/assets/extracted-2026-04-19/official-software-cursor-window-252.png"
+icon_master_png="${repo_root}/assets/app-icons/open-computer-use-1024.png"
+iconset_build_script="${repo_root}/scripts/build-apple-iconset.sh"
 app_root="${output_dir}/${app_name}"
 contents_dir="${app_root}/Contents"
 macos_dir="${contents_dir}/MacOS"
@@ -248,15 +248,13 @@ esac
 
 chmod +x "${macos_dir}/CursorMotion"
 
-if [[ ! -f "${cursor_reference_source}" ]]; then
-  echo "Missing cursor reference asset: ${cursor_reference_source}" >&2
+if [[ ! -f "${icon_master_png}" ]]; then
+  echo "Missing icon master PNG: ${icon_master_png}" >&2
   exit 1
 fi
 
-cp "${cursor_reference_source}" "${resources_dir}/official-software-cursor-window-252.png"
-
-if [[ ! -f "${icon_render_script}" ]]; then
-  echo "Missing icon render script: ${icon_render_script}" >&2
+if [[ ! -f "${iconset_build_script}" ]]; then
+  echo "Missing iconset build script: ${iconset_build_script}" >&2
   exit 1
 fi
 
@@ -270,7 +268,7 @@ trap cleanup EXIT
 icon_work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cursor-motion-icon.XXXXXX")"
 iconset_dir="${icon_work_dir}/CursorMotion.iconset"
 mkdir -p "${iconset_dir}"
-swift "${icon_render_script}" "${iconset_dir}"
+"${iconset_build_script}" "${icon_master_png}" "${iconset_dir}"
 iconutil -c icns "${iconset_dir}" -o "${resources_dir}/${bundle_icon_name}"
 
 cat > "${contents_dir}/Info.plist" <<PLIST

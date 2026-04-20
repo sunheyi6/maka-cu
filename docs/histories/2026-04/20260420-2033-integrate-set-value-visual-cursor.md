@@ -57,3 +57,22 @@
 - `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
 - `docs/ARCHITECTURE.md`
 - `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
+
+### 🔁 Follow-up (2026-04-20, remove PNG-first glyph split and re-isolate `CursorMotion`)
+
+- **[撤回 `CursorMotion` 的 PNG-first glyph]**: 继续对照当前实现后，确认 `CursorMotion` 仍然优先加载 `official-software-cursor-window-252.png`，这和用户要求的“代码绘制 cursor”不一致；现在 lab 已改成固定使用程序化 pointer/fog glyph，不再依赖这张 PNG。
+- **[解除实验线对主 runtime 的直接依赖]**: 上一轮为了复用 glyph renderer 临时让 `CursorMotion` 直接依赖了 `OpenComputerUseKit`，这和仓库里一直强调的“实验线独立于主 MCP runtime”边界相冲突；现在已把 renderer 抽到中立 `SoftwareCursorGlyphKit` target，由 runtime 和 lab 共同依赖。
+- **[清理打包脚本的过时资源链]**: `scripts/build-cursor-motion-dmg.sh` 不再要求把 `official-software-cursor-window-252.png` 复制进 `.app` bundle，因为 packaged `CursorMotion` 已经不再从 bundle 读取这张图。
+- **[同步当前文档]**: README、架构说明和 active execution plan 都更新成“程序化 glyph + 中立 target 共享”的最终状态，避免继续留下 PNG-first 和 `CursorMotion -> OpenComputerUseKit` 两套互相冲突的说法。
+
+**Follow-up Files:**
+- `Package.swift`
+- `packages/SoftwareCursorGlyphKit/Sources/SoftwareCursorGlyphKit/SoftwareCursorGlyphRenderer.swift`
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift`
+- `experiments/CursorMotion/Sources/CursorMotion/SynthesizedCursorGlyphView.swift`
+- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
+- `scripts/build-cursor-motion-dmg.sh`
+- `experiments/CursorMotion/README.md`
+- `docs/ARCHITECTURE.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+- `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`

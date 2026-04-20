@@ -1,4 +1,5 @@
 import AppKit
+import SoftwareCursorGlyphKit
 import XCTest
 @testable import OpenComputerUseKit
 
