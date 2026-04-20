@@ -67,6 +67,10 @@
 - 2026-04-19：继续对照官方视频后，确认 lab 主线不能直接拿 raw reverse-engineered `20` candidates 当 chooser；当前已改成 heading-driven 选路，把当前可见朝向和最终 resting pose 一起参与选路，主路径重新收敛到“需要掉头时走单侧 C 形，不需要掉头时近直线”的分布。
 - 2026-04-20：在对照 `scripts/render-synthesized-software-cursor.swift` 与用户截图后，确认共享 glyph renderer 的亮白 asset 风格并不对；当前已把 lab 改成优先显示仓库里的官方 `252x252` runtime baseline 图，fallback 才走脚本同款 procedural pointer/fog，同时把 idle 从 XY 漂移收紧为中心固定的小幅摆角。
 - 2026-04-20：继续按用户反馈收紧姿态后，lab 现在把“内部 heading”与“可见箭头角度”分离；选路仍可参考当前 heading，但屏幕上看到的箭头不再像车头一样沿切线持续转向，只在转弯时轻微 lean。
+- 2026-04-20：按用户反馈把左上角 5 个 slider 恢复回来，并重新接到 heading-driven 路径几何与 progress spring；当前 slider 明确只作为本地调参入口，不宣称是已完全确认的官方字段映射。
+- 2026-04-20：继续按用户反馈把左上角控件区裁成纯 slider，并把 slider label / panel accent 收回当前中性灰紫主色系；不再保留 `REPLAY` / `RESET` 按钮和额外 metrics 文案，避免信息噪音和低对比白字。
+- 2026-04-20：修正窗口 resize 时的状态重置 bug；`proxy.size` 变化现在只更新 canvas bounds，不再重新走 `configure + snap(to: start)`，因此调整窗口大小不会把 cursor 强行拉回起始点。
+- 2026-04-20：基于 `Codex Computer Use.app` 的新一轮 timing 逆向，确认默认 move 的 wall-clock endpoint-lock 是固定的 `343 / 240 = 1.4291667s`；lab 现已移除距离驱动的 travel-duration 压缩，默认档直接按官方 spring timeline 走，`SPRING` slider 只再改变 spring 本身的 response / damping 与对应时长。
 
 ## 决策记录
 
@@ -76,3 +80,4 @@
 - 2026-04-19：在拿到更完整的 binary-backed 路径与视觉层实现后，lab 改为直接演示 recovered 结构，不再把未经确认的 slider 语义继续当成主实现。
 - 2026-04-19：对 `swift_once` 恢复出的 guide 系数，当前默认采用“常量已确认、世界坐标解释不成立、局部基底投影更贴近官方视频”的实现策略；后续如果拿到更强的二进制级证据，再继续下沉这层解释。
 - 2026-04-19：raw binary lift 的 `20` candidate pool 保留在 `StandaloneCursor` 这条分析线；`StandaloneCursorLab` 和主 runtime overlay 则统一切到 heading-driven 主线，实现上优先保证“朝向约束 + 单侧转弯”这个更贴近官方视频的结构行为。
+- 2026-04-20：恢复 slider UI 时，继续把“调参入口”和“binary-confirmed 结构”分开表述；lab 可以暴露 `start/end handle`、`arc size/flow`、`spring` 这些测试旋钮，但文档和代码都不把它们说成官方一一字段对照。

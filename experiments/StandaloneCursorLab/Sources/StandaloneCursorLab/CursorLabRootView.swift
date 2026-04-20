@@ -8,11 +8,14 @@ private enum CursorLabPalette {
     static let mainSoft = Color(red: 0.95, green: 0.95, blue: 0.97)
     static let mainMuted = Color(red: 0.82, green: 0.81, blue: 0.85)
     static let mainStrong = Color(red: 0.63, green: 0.62, blue: 0.68)
+    static let accent = Color(red: 0.58, green: 0.57, blue: 0.65)
+    static let accentSoft = Color(red: 0.77, green: 0.76, blue: 0.82)
 }
 
 struct CursorLabRootView: View {
     @State private var start = CGPoint(x: 220, y: 440)
     @State private var end = CGPoint(x: 860, y: 260)
+    @State private var motionParameters = CursorMotionParameters.default
     @State private var debugEnabled = true
     @State private var mailEnabled = false
     @State private var clickEnabled = true
@@ -31,18 +34,25 @@ struct CursorLabRootView: View {
                     model: model
                 )
                 .onAppear {
-                    model.configure(start: start, end: end, canvasSize: proxy.size)
+                    model.configure(
+                        start: start,
+                        end: end,
+                        canvasSize: proxy.size,
+                        parameters: motionParameters
+                    )
                     model.replay(from: start, to: end)
                 }
                 .onChange(of: proxy.size) { _, newSize in
-                    clampPoints(to: newSize)
-                    model.configure(start: start, end: end, canvasSize: newSize)
+                    model.updateCanvasSize(newSize)
                 }
                 .onChange(of: start) { _, newValue in
                     model.updateStart(newValue)
                 }
                 .onChange(of: end) { _, newValue in
                     model.queueMove(to: newValue)
+                }
+                .onChange(of: motionParameters) { _, newValue in
+                    model.updateParameters(newValue, start: start, end: end)
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -57,27 +67,31 @@ struct CursorLabRootView: View {
     }
 
     private var controlPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("HEADING-DRIVEN MOTION")
-                .font(.system(size: 10, weight: .black, design: .rounded))
-                .foregroundStyle(CursorLabPalette.ink.opacity(0.82))
-                .tracking(0.8)
-
-            Text(model.selectionLabel)
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(CursorLabPalette.ink.opacity(0.68))
-                .tracking(0.6)
-
-            Text(model.selectionMetricsLabel)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(CursorLabPalette.ink.opacity(0.52))
-
-            Button("REPLAY") {
-                model.replay(from: start, to: end)
-            }
-            .buttonStyle(CursorActionButtonStyle())
-            .padding(.top, 6)
+        VStack(alignment: .leading, spacing: 12) {
+            CursorParameterSliderRow(
+                title: "START HANDLE",
+                value: $motionParameters.startHandle
+            )
+            CursorParameterSliderRow(
+                title: "END HANDLE",
+                value: $motionParameters.endHandle
+            )
+            CursorParameterSliderRow(
+                title: "ARC SIZE",
+                value: $motionParameters.arcSize
+            )
+            CursorParameterSliderRow(
+                title: "ARC FLOW",
+                value: $motionParameters.arcFlow
+            )
+            CursorParameterSliderRow(
+                title: "SPRING",
+                value: $motionParameters.spring
+            )
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(CursorPanelBackground())
     }
 
     private var togglePanel: some View {
@@ -88,13 +102,6 @@ struct CursorLabRootView: View {
         }
     }
 
-    private func clampPoints(to size: CGSize) {
-        let inset: CGFloat = 80
-        start.x = min(max(start.x, inset), size.width - inset)
-        start.y = min(max(start.y, inset), size.height - inset)
-        end.x = min(max(end.x, inset), size.width - inset)
-        end.y = min(max(end.y, inset), size.height - inset)
-    }
 }
 
 @MainActor
@@ -128,6 +135,7 @@ final class CursorLabViewModel: ObservableObject {
     private var previewRemaining: CGFloat = 0
     private var queuedTarget = CGPoint(x: 860, y: 260)
     private var canvasBounds = CGRect(x: 0, y: 0, width: 1080, height: 720)
+    private var motionParameters = CursorMotionParameters.default
 
     var selectionLabel: String {
         guard let selectedCandidate else {
@@ -156,7 +164,14 @@ final class CursorLabViewModel: ObservableObject {
         candidates.first(where: { $0.id == selectedCandidateID }) ?? candidates.first
     }
 
-    func configure(start: CGPoint, end: CGPoint, canvasSize: CGSize) {
+    func configure(
+        start: CGPoint,
+        end: CGPoint,
+        canvasSize: CGSize,
+        parameters: CursorMotionParameters
+    ) {
+        motionParameters = parameters
+        simulator.updateParameters(parameters)
         queuedTarget = end
         canvasBounds = CGRect(origin: .zero, size: canvasSize)
         let selection = bestSelection(
@@ -172,6 +187,29 @@ final class CursorLabViewModel: ObservableObject {
         previewRemaining = 0
         lastTimestamp = nil
         ensureDisplayLink()
+    }
+
+    func updateCanvasSize(_ canvasSize: CGSize) {
+        canvasBounds = CGRect(origin: .zero, size: canvasSize)
+    }
+
+    func updateParameters(_ parameters: CursorMotionParameters, start: CGPoint, end: CGPoint) {
+        motionParameters = parameters
+        simulator.updateParameters(parameters)
+        queuedTarget = end
+
+        let selection = bestSelection(
+            from: start,
+            to: end,
+            startRotation: CursorGlyphCalibration.restingRotation
+        )
+        candidates = selection.candidates
+        selectedCandidateID = selection.selected.id
+        path = selection.selected.path
+        currentState = simulator.snap(to: currentState.point, path: selection.selected.path)
+        clickPulse = 0
+        previewRemaining = 0
+        lastTimestamp = nil
     }
 
     func updateStart(_ value: CGPoint) {
@@ -285,6 +323,7 @@ final class CursorLabViewModel: ObservableObject {
             start: start,
             end: end,
             bounds: selectionBounds,
+            parameters: motionParameters,
             startForward: headingVector(rotation: startRotation),
             endForward: headingVector(rotation: CursorGlyphCalibration.restingRotation)
         )
@@ -579,6 +618,106 @@ private struct SynthesizedCursorGlyphRepresentable: NSViewRepresentable {
     }
 }
 
+private struct CursorParameterSliderRow: View {
+    let title: String
+    @Binding var value: CGFloat
+
+    var body: some View {
+        HStack(spacing: 16) {
+            CursorParameterSlider(value: $value)
+                .frame(width: 142, height: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 10, weight: .black, design: .rounded))
+                    .foregroundStyle(CursorLabPalette.ink.opacity(0.82))
+                    .tracking(0.8)
+
+                Text(String(format: "%.2f", Double(value)))
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(CursorLabPalette.mainStrong.opacity(0.90))
+            }
+            .frame(width: 110, alignment: .leading)
+        }
+    }
+}
+
+private struct CursorParameterSlider: View {
+    @Binding var value: CGFloat
+    let range: ClosedRange<CGFloat>
+
+    init(value: Binding<CGFloat>, range: ClosedRange<CGFloat> = 0...1) {
+        _value = value
+        self.range = range
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            let normalized = ((value - range.lowerBound) / (range.upperBound - range.lowerBound)).clamped(to: 0...1)
+            let knobCenterX = normalized * width
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(CursorLabPalette.ink.opacity(0.12))
+                    .frame(height: 5)
+
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [CursorLabPalette.accent, CursorLabPalette.accentSoft],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(knobCenterX, 8), height: 5)
+
+                Circle()
+                    .fill(CursorLabPalette.mainSoft)
+                    .frame(width: 24, height: 24)
+                    .overlay {
+                        Circle()
+                            .stroke(Color.white.opacity(0.64), lineWidth: 1)
+                    }
+                    .shadow(color: CursorLabPalette.ink.opacity(0.12), radius: 8, y: 3)
+                    .offset(x: knobCenterX - 12)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        let clampedX = gesture.location.x.clamped(to: 0...width)
+                        let progress = clampedX / width
+                        value = (range.lowerBound + ((range.upperBound - range.lowerBound) * progress))
+                            .clamped(to: range)
+                    }
+            )
+        }
+    }
+}
+
+private struct CursorPanelBackground: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 26, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        CursorLabPalette.mainSoft.opacity(0.82),
+                        CursorLabPalette.main.opacity(0.72),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(Color.white.opacity(0.30), lineWidth: 1)
+            }
+            .shadow(color: CursorLabPalette.ink.opacity(0.10), radius: 20, y: 8)
+    }
+}
+
 private struct CursorToggleRow: View {
     let title: String
     @Binding var isOn: Bool
@@ -615,18 +754,6 @@ private struct CursorToggleStyle: ToggleStyle {
             .onTapGesture {
                 configuration.isOn.toggle()
             }
-    }
-}
-
-private struct CursorActionButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(CursorLabPalette.ink.opacity(configuration.isPressed ? 0.16 : 0.10))
-            .foregroundStyle(CursorLabPalette.ink.opacity(0.88))
-            .clipShape(Capsule())
     }
 }
 

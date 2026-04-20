@@ -2,7 +2,49 @@ import CoreGraphics
 import Foundation
 
 struct CursorMotionParameters: Equatable {
-    static let `default` = CursorMotionParameters()
+    var startHandle: CGFloat
+    var endHandle: CGFloat
+    var arcSize: CGFloat
+    var arcFlow: CGFloat
+    var spring: CGFloat
+
+    static let `default` = CursorMotionParameters(
+        startHandle: 0.29,
+        endHandle: 0.08,
+        arcSize: 0.06,
+        arcFlow: 0.64,
+        spring: 0.5
+    )
+
+    init(
+        startHandle: CGFloat = 0.29,
+        endHandle: CGFloat = 0.08,
+        arcSize: CGFloat = 0.06,
+        arcFlow: CGFloat = 0.64,
+        spring: CGFloat = 0.5
+    ) {
+        self.startHandle = startHandle.clamped(to: 0...1)
+        self.endHandle = endHandle.clamped(to: 0...1)
+        self.arcSize = arcSize.clamped(to: 0...1)
+        self.arcFlow = arcFlow.clamped(to: 0...1)
+        self.spring = spring.clamped(to: 0...1)
+    }
+
+    var progressSpringConfiguration: CursorMotionSpringConfiguration {
+        CursorMotionSpringConfiguration(
+            response: 0.96 + (0.88 * spring),
+            dampingFraction: 0.98 - (0.16 * spring)
+        )
+    }
+
+    func calibratedTravelDuration(
+        distance _: CGFloat,
+        measurement _: CursorMotionMeasurement
+    ) -> CGFloat {
+        // The official move timing is driven by the spring reaching endpoint lock,
+        // not by an extra distance-based wall-clock scaling layer.
+        CursorMotionProgressAnimator.closeEnoughTime(configuration: progressSpringConfiguration)
+    }
 }
 
 struct CursorMotionSegment: Equatable {
@@ -227,26 +269,32 @@ struct CursorMotionSpringConfiguration: Equatable {
     let closeEnoughDistanceThreshold: CGFloat
     let idleVelocityThreshold: CGFloat
 
-    static let official: CursorMotionSpringConfiguration = {
-        let response: CGFloat = 1.4
-        let dampingFraction: CGFloat = 0.9
-        let dt: CGFloat = 1.0 / 240.0
-        let idleVelocityThreshold: CGFloat = 28_800
+    init(
+        response: CGFloat,
+        dampingFraction: CGFloat,
+        dt: CGFloat = 1.0 / 240.0,
+        closeEnoughProgressThreshold: CGFloat = 1,
+        closeEnoughDistanceThreshold: CGFloat = 0.01,
+        idleVelocityThreshold: CGFloat = 28_800
+    ) {
         let rawStiffness = response > 0 ? pow((2 * .pi) / response, 2) : .infinity
         let stiffness = min(rawStiffness, idleVelocityThreshold)
         let drag = 2 * dampingFraction * sqrt(stiffness)
 
-        return CursorMotionSpringConfiguration(
-            response: response,
-            dampingFraction: dampingFraction,
-            stiffness: stiffness,
-            drag: drag,
-            dt: dt,
-            closeEnoughProgressThreshold: 1,
-            closeEnoughDistanceThreshold: 0.01,
-            idleVelocityThreshold: idleVelocityThreshold
-        )
-    }()
+        self.response = response
+        self.dampingFraction = dampingFraction
+        self.stiffness = stiffness
+        self.drag = drag
+        self.dt = dt
+        self.closeEnoughProgressThreshold = closeEnoughProgressThreshold
+        self.closeEnoughDistanceThreshold = closeEnoughDistanceThreshold
+        self.idleVelocityThreshold = idleVelocityThreshold
+    }
+
+    static let official = CursorMotionSpringConfiguration(
+        response: 1.4,
+        dampingFraction: 0.9
+    )
 }
 
 struct CursorMotionSpringState: Equatable {
@@ -256,6 +304,8 @@ struct CursorMotionSpringState: Equatable {
 }
 
 enum CursorMotionProgressAnimator {
+    private static let officialEndpointLockTime: CGFloat = 343.0 / 240.0
+
     static func advance(
         current: CGFloat,
         target: CGFloat = 1,
@@ -316,6 +366,10 @@ enum CursorMotionProgressAnimator {
     static func closeEnoughTime(
         configuration: CursorMotionSpringConfiguration = .official
     ) -> CGFloat {
+        if configuration == .official {
+            return officialEndpointLockTime
+        }
+
         var current: CGFloat = 0
         var state = CursorMotionSpringState()
         var step = 0
@@ -505,14 +559,6 @@ enum OfficialCursorMotionModel {
         }
     }
 
-    static func calibratedTravelDuration(distance: CGFloat, measurement: CursorMotionMeasurement) -> CGFloat {
-        let weightedRatio = max((measurement.length / max(distance, 1)) - 1, 0)
-        let distanceTerm = 0.18 + min(distance / 1300, 0.35)
-        let curvatureTerm = min(weightedRatio, 1.5) * 0.18
-        let settleTerm = min(weightedRatio, 1.0) * 0.04
-        return max(distanceTerm + curvatureTerm + settleTerm, 0.23)
-    }
-
     private static func makeCandidate(
         id: String,
         kind: CursorMotionKind,
@@ -607,16 +653,13 @@ enum OfficialCursorMotionModel {
 }
 
 enum HeadingDrivenCursorMotionModel {
-    private static let defaultStartHandle: CGFloat = 0.29
-    private static let defaultEndHandle: CGFloat = 0.08
-    private static let defaultArcSize: CGFloat = 0.06
-    private static let defaultArcFlow: CGFloat = 0.64
     private static let normalizationEpsilon: CGFloat = 0.001
 
     static func makeCandidates(
         start: CGPoint,
         end: CGPoint,
         bounds: CGRect?,
+        parameters: CursorMotionParameters,
         startForward: CGVector,
         endForward: CGVector
     ) -> [CursorMotionCandidate] {
@@ -641,6 +684,7 @@ enum HeadingDrivenCursorMotionModel {
                 to: end,
                 metrics: metrics,
                 descriptor: descriptor,
+                parameters: parameters,
                 startForward: resolvedStartForward,
                 endForward: resolvedEndForward
             )
@@ -673,29 +717,26 @@ enum HeadingDrivenCursorMotionModel {
         }
     }
 
-    static func calibratedTravelDuration(distance: CGFloat, measurement: CursorMotionMeasurement) -> CGFloat {
-        OfficialCursorMotionModel.calibratedTravelDuration(distance: distance, measurement: measurement)
-    }
-
     private static func makePath(
         from start: CGPoint,
         to end: CGPoint,
         metrics: MotionMetrics,
         descriptor: MotionDescriptor,
+        parameters: CursorMotionParameters,
         startForward: CGVector,
         endForward: CGVector
     ) -> CursorMotionPath {
         let distance = metrics.distance
         let direction = metrics.direction
         let normal = metrics.normal
-        let resolvedFlow = (defaultArcFlow + descriptor.flowShift).clamped(to: 0...1)
+        let resolvedFlow = (parameters.arcFlow + descriptor.flowShift).clamped(to: 0...1)
         let flowBias = (resolvedFlow - 0.5) * distance * 0.18
 
-        let baseStartReach = distance * (0.10 + defaultStartHandle * 0.56)
-        let baseEndReach = distance * (0.11 + defaultEndHandle * 0.62)
+        let baseStartReach = distance * (0.10 + parameters.startHandle * 0.56)
+        let baseEndReach = distance * (0.11 + parameters.endHandle * 0.62)
         let distanceLift = 0.68 + (metrics.farFactor * 0.56)
         let baseArcHeight = min(
-            max(distance * (0.10 + defaultArcSize * 0.92) * descriptor.arcScale * distanceLift, 20),
+            max(distance * (0.10 + parameters.arcSize * 0.92) * descriptor.arcScale * distanceLift, 20),
             distance * 0.96
         )
 
@@ -1455,6 +1496,8 @@ final class CursorMotionSimulator {
     private var phase: CursorMotionPhase
     private var progress: CGFloat
     private var progressSpringState: CursorMotionSpringState
+    private var progressSpringConfiguration: CursorMotionSpringConfiguration
+    private var progressCloseEnoughTime: CGFloat
     private var moveElapsed: CGFloat
     private var travelDuration: CGFloat
     private var visualState: CursorVisualDynamicsState
@@ -1462,6 +1505,7 @@ final class CursorMotionSimulator {
     private var idlePhase: CGFloat
 
     init(start: CGPoint, end: CGPoint, parameters: CursorMotionParameters) {
+        let progressSpringConfiguration = parameters.progressSpringConfiguration
         self.parameters = parameters
         path = CursorMotionPath(start: start, end: end)
         self.start = start
@@ -1470,14 +1514,26 @@ final class CursorMotionSimulator {
         phase = .idle(restingTipPosition: start)
         progress = 1
         progressSpringState = CursorMotionSpringState()
+        self.progressSpringConfiguration = progressSpringConfiguration
+        progressCloseEnoughTime = CursorMotionProgressAnimator.closeEnoughTime(
+            configuration: progressSpringConfiguration
+        )
         moveElapsed = 0
-        travelDuration = OfficialCursorMotionModel.calibratedTravelDuration(
+        travelDuration = parameters.calibratedTravelDuration(
             distance: distanceBetween(start, end),
             measurement: measurement
         )
         visualState = CursorVisualDynamicsAnimator.state(at: start)
         time = 0
         idlePhase = 0
+    }
+
+    func updateParameters(_ parameters: CursorMotionParameters) {
+        self.parameters = parameters
+        progressSpringConfiguration = parameters.progressSpringConfiguration
+        progressCloseEnoughTime = CursorMotionProgressAnimator.closeEnoughTime(
+            configuration: progressSpringConfiguration
+        )
     }
 
     @discardableResult
@@ -1508,7 +1564,7 @@ final class CursorMotionSimulator {
         progressSpringState = CursorMotionSpringState()
         moveElapsed = 0
         idlePhase = 0
-        travelDuration = OfficialCursorMotionModel.calibratedTravelDuration(
+        travelDuration = parameters.calibratedTravelDuration(
             distance: distanceBetween(path.start, path.end),
             measurement: measurement
         )
@@ -1527,16 +1583,21 @@ final class CursorMotionSimulator {
         case .moving:
             moveElapsed += clampedDelta
             let normalizedElapsed = (moveElapsed / max(travelDuration, 0.001)).clamped(to: 0...1)
-            let springTime = normalizedElapsed * OfficialCursorMotionModel.closeEnoughTime
+            let springTime = normalizedElapsed * progressCloseEnoughTime
             (progress, progressSpringState) = CursorMotionProgressAnimator.advance(
                 current: progress,
                 state: progressSpringState,
+                configuration: progressSpringConfiguration,
                 to: springTime
             )
 
             let sample = path.sample(at: progress)
             let renderState = advanceVisualDynamics(toward: sample.point)
-            let finished = normalizedElapsed >= 1 || CursorMotionProgressAnimator.isCloseEnough(progress: progress)
+            let finished = normalizedElapsed >= 1
+                || CursorMotionProgressAnimator.isCloseEnough(
+                    progress: progress,
+                    configuration: progressSpringConfiguration
+                )
 
             if finished {
                 progress = 1

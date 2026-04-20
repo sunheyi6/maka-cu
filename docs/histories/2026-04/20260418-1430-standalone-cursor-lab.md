@@ -107,3 +107,57 @@
 ### 📁 Additional Files Modified
 - `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
 - `experiments/StandaloneCursorLab/README.md`
+
+### 🔁 Follow-up (2026-04-20, restore slider tuning surface)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[恢复左上角 slider 面板]**: 把用户指出被删掉的 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW`、`SPRING` 五个滑块重新加回 `StandaloneCursorLab` 左上角，并保留 `REPLAY` / candidate metrics 作为辅助观察面板。
+- **[重新接回参数语义]**: `CursorMotionParameters` 不再只是空壳默认值；现在这些 slider 会直接驱动 heading-driven path builder 的 start/end handle、arc size/flow，以及 progress spring 配置和 travel duration。
+- **[补自定义滑块样式]**: 用更接近用户截图的细轨道 + 白色圆形 thumb 实现本地调参控件，避免直接退回系统默认控件风格。
+- **[同步文档边界]**: `StandaloneCursorLab` README 和 active execution plan 都改成显式说明“slider 是本地调参入口，不等于已 binary-confirmed 的官方字段映射”。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorMotionModel.swift`
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, align default move speed with official endpoint-lock timing)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[移除距离驱动时长压缩]**: `StandaloneCursorLab` 的默认 move 不再用本地经验公式根据路径长度压缩 wall-clock 时长，避免中长距离移动明显快于官方。
+- **[默认档对齐官方 1.429s timeline]**: 基于最新逆向确认的 `343 / 240 = 1.4291667s` endpoint-lock 时间，把默认 `response=1.4 / damping=0.9` 档位直接对齐到官方 spring timeline。
+- **[保留 spring slider 但收紧语义]**: `SPRING` slider 继续只改变 progress spring 的 response / damping 与对应 settle 时间，不再叠加独立的 distance-based duration fudge factor。
+- **[同步文档口径]**: README 和 active plan 现在都明确写出默认档的官方 endpoint-lock 时长，避免继续把 move 速度表述成不稳定的本地校准结果。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorMotionModel.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, simplify slider panel styling)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[移除左上角多余文案]**: 把 slider 面板里的 `REPLAY`、`RESET`、heading-driven 标题和 candidate metrics 全部移除，只保留 5 个调参 slider。
+- **[收回当前色系]**: 面板文字从低对比的白色改回深色，slider accent 也从偏粉高亮切回当前 lab 的中性灰紫主色系。
+- **[同步说明文档]**: README 和 active plan 不再把左上角 panel 描述成带 `REPLAY` 的观察面板，而是明确为纯 slider 调参入口。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+
+### 🔁 Follow-up (2026-04-20, preserve cursor state on resize)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[修正 resize 回跳]**: 窗口尺寸变化时不再重新调用 `configure(...)+snap(to: start)`；现在只更新 canvas bounds，避免 cursor 因为 resize 被强制拉回起始点。
+- **[移除错误的 resize clamp]**: 左上角 slider 面板和 canvas 的 resize 流程不再顺手重写 `start/end` 坐标，避免窗口变化意外改写当前会话状态。
+- **[同步记录]**: active plan 补充这次 resize bugfix，明确“调窗口大小不应改变当前 cursor 位置”已经收口。
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
