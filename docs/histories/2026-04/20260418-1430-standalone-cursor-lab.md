@@ -393,3 +393,16 @@
 ### 📁 Additional Files Modified
 - `experiments/CursorMotion/Sources/CursorMotion/SynthesizedCursorGlyphView.swift`
 - `scripts/build-cursor-motion-dmg.sh`
+
+### 🔁 Follow-up (2026-04-20, reuse Open Computer Use logo for packaged Cursor Motion icon)
+**Scope:** `scripts/`、`docs/`
+
+**Key Actions:**
+- **[定位到是 bundle icon 缺失]**: 用户继续指出 DMG 里的 `Cursor Motion.app` 仍然显示 Finder 通用占位图标；确认这次不是 cursor glyph 资源问题，而是 `.app` 的 `Info.plist` 还没有 `CFBundleIconFile`，同时 bundle 里也没有 `.icns`。
+- **[直接复用现有 icon render 链路]**: `build-cursor-motion-dmg.sh` 现在直接复用 `scripts/render-open-computer-use-icon.swift` 生成 `CursorMotion.icns`，先让 packaged `Cursor Motion` 使用 `Open Computer Use` 的现有 logo。
+- **[补 bundle icon 声明]**: 打包脚本会把 `CursorMotion.icns` 写入 `Contents/Resources/`，并在 `Info.plist` 里补 `CFBundleIconFile=CursorMotion.icns`，让 Finder / Dock 读到真正的 app icon。
+- **[补本地验证]**: 已本地重打 `./scripts/build-cursor-motion-dmg.sh --configuration release --arch native --version 0.1.14-iconcheck`，并确认 `.app/Contents/Resources/` 内同时存在 `CursorMotion.icns` 和官方 cursor PNG。
+
+### 📁 Additional Files Modified
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+- `scripts/build-cursor-motion-dmg.sh`
