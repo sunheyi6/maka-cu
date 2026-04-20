@@ -4,6 +4,7 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-04-20 | Open Computer Use 权限身份 | 从 npm、brew、DMG 或本地构建安装后，`Open Computer Use.app` 的权限身份现在更容易收口到同一条签名链，不会再默认把 npm 路径当成唯一稳定授权目标。 | 发布 `0.1.15`，给 `Open Computer Use.app` 的打包链路补上统一 codesign 入口，CI release 支持通过 GitHub Actions secrets 导入证书后统一签名；权限发现也改成按 bundle identity 搜索当前运行副本、`/Applications`、npm 和 Homebrew 安装位置。 |
 | 2026-04-20 | Cursor Motion 打包一致性 | Releases 里的 `CursorMotion.dmg` 现在会和 `swift run CursorMotion` 更一致，不再因为缺少官方 cursor 资源而退回更锯齿、朝向也更差的 fallback glyph。 | 发布 `0.1.14`，修复打包 `.app` 时没有把官方 `official-software-cursor-window-252.png` 带进 bundle 的问题；`Cursor Motion` 现在会优先从 `Bundle.main` 读取这张图，DMG 打包脚本也会把它复制进 `Contents/Resources`，并显式打开高分屏渲染。 |
 | 2026-04-20 | Cursor Motion 与发版链路 | Cursor Motion 作为独立 demo 的命名和入口更统一，同时 release tag 现在可以直接产出可下载的 macOS `.dmg`。 | 发布 `0.1.13`，把 `StandaloneCursorLab` 统一更名为 `Cursor Motion` / `CursorMotion`，同步中英文 README 与架构文档，并新增 tag 驱动的 `CursorMotion-<version>.dmg` GitHub Releases 发布链路。 |
 | 2026-04-19 | 权限浮窗细节收口 | `Allow` 后的引导浮窗动效更连贯，且在系统设置窗口稳定后能自动落到正确位置，不需要用户手动点一下再归位。 | 发布 `0.1.12`，补齐权限 panel 的 source-to-target 入场动画、返回按钮，以及动画结束后的持续 re-anchor，修复 release workflow 因 npm 版本仍停在 `0.1.11` 而发布失败的问题。 |
