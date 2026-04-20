@@ -1,6 +1,6 @@
 {
   "name": "open-computer-use",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Open-source macOS Computer Use MCP server packaged as a Codex plugin.",
   "author": {
     "name": "Leo",
