@@ -62,3 +62,16 @@
 - **[主线切到 heading-driven chooser]**: 继续对照官方视频后，确认 standalone lab 不能把 raw reverse-engineered `20` candidate pool 直接拿来做默认选路；当前已改成把当前可见朝向和最终 resting pose 一起喂给 chooser，让“需要掉头时是单侧 C 形、无需掉头时接近直线”重新成为默认分布。
 - **[同步 runtime overlay 选路]**: 主 `SoftwareCursorOverlay` 现在也改为同一套 heading-driven candidate 族；raw reverse-engineered `20` candidates 仍然保留在 `StandaloneCursor` / Python 重建脚本里做分析对照，但不再直接作为 runtime 主 chooser。
 - **[补方向约束回归测试]**: 新增测试，显式验证“朝向已对齐时优先近直线”和“起步朝向反向时优先掉头大弧”两类行为，避免后续再次回到怪异扭曲曲线。
+
+### 🔁 Follow-up (2026-04-20)
+**Scope:** `experiments/StandaloneCursorLab/`、`docs/`
+
+**Key Actions:**
+- **[移除起始点残留白点]**: `StandaloneCursorLab` 画布不再常驻渲染起始点白色 marker，避免 cursor 沿曲线移动后仍在起点留下误导性的白点。
+- **[收紧 DEBUG 关闭态]**: `DEBUG` 关闭后不再保留选中主轨迹或目标点 marker，整层调试 overlay 会一起隐藏，避免非调试模式下仍残留轨迹线和圆点。
+- **[主视觉改为中性灰紫]**: 把 lab 的背景渐变、调试高亮和控件 accent 从原先偏粉色的方案切到接近 `#E3E2E6` 的中性灰紫配色，避免画面继续带明显粉色倾向。
+
+
+### 📁 Additional Files Modified
+- `experiments/StandaloneCursorLab/Sources/StandaloneCursorLab/CursorLabRootView.swift`
+- `experiments/StandaloneCursorLab/README.md`

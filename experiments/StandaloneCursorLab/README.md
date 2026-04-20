@@ -40,6 +40,7 @@ swift run StandaloneCursorLab
 - debug overlay 会显示控制点、arc handle 和当前选中的 candidate id / score。
 - lab 主线不再直接复用 raw binary lift 的 `20` 条 candidate + score；当前改为 reverse-engineering 约束下的 heading-driven chooser，把起始朝向和最终 resting pose 一起喂给路径选择器，让默认曲线更稳定收敛到单侧 C 形或近直线。
 - 主路径进度不再用 speculative `easeInOut` 或 terminal settle；现在直接复用官方风格 spring progress。
+- 关闭 `DEBUG` 后不会展示任何轨迹线或目标点，只保留 cursor 本体，便于单独观察最终运动观感。
 - 可见 cursor 不再直接贴在 path sample 上，而是经过独立 visual dynamics 状态，再输出 `rotation + cursorBodyOffset + fogOffset + fogScale`。
 - 候选路径现在显式约束“先顺车头方向掉头，再沿主轴推进，再按 resting pose 收尾”；因此大多数跨向移动会呈现单侧 C 形，需要直接切入时才会退化为近直线，而不会再出现两侧乱甩的 S 形扭曲。
 - 箭头主朝向会重新明显跟随运动方向；小幅摆动单独作为额外 angle offset 叠加，而不是把整套 rotation 压成一个小角度 wiggle。

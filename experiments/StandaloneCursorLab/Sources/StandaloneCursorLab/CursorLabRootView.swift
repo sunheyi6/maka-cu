@@ -2,6 +2,14 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+private enum CursorLabPalette {
+    static let ink = Color(red: 0.18, green: 0.19, blue: 0.24)
+    static let main = Color(red: 0.89, green: 0.89, blue: 0.90)
+    static let mainSoft = Color(red: 0.95, green: 0.95, blue: 0.97)
+    static let mainMuted = Color(red: 0.82, green: 0.81, blue: 0.85)
+    static let mainStrong = Color(red: 0.63, green: 0.62, blue: 0.68)
+}
+
 struct CursorLabRootView: View {
     @State private var start = CGPoint(x: 220, y: 440)
     @State private var end = CGPoint(x: 860, y: 260)
@@ -52,17 +60,17 @@ struct CursorLabRootView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("HEADING-DRIVEN MOTION")
                 .font(.system(size: 10, weight: .black, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.82))
+                .foregroundStyle(CursorLabPalette.ink.opacity(0.82))
                 .tracking(0.8)
 
             Text(model.selectionLabel)
                 .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.72))
+                .foregroundStyle(CursorLabPalette.ink.opacity(0.68))
                 .tracking(0.6)
 
             Text(model.selectionMetricsLabel)
                 .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.58))
+                .foregroundStyle(CursorLabPalette.ink.opacity(0.52))
 
             Button("REPLAY") {
                 model.replay(from: start, to: end)
@@ -331,25 +339,16 @@ private struct CursorLabCanvas: View {
 
     var body: some View {
         ZStack {
-            persistentPathLayer
-
             if debugEnabled {
+                persistentPathLayer
                 debugCandidateLayer
+                Circle()
+                    .fill(CursorLabPalette.mainStrong)
+                    .frame(width: 14, height: 14)
+                    .overlay(Circle().stroke(Color.white.opacity(0.52), lineWidth: 8))
+                    .position(end)
+                    .allowsHitTesting(false)
             }
-
-            Circle()
-                .fill(Color.white.opacity(0.9))
-                .frame(width: 12, height: 12)
-                .overlay(Circle().stroke(Color.white.opacity(0.4), lineWidth: 8))
-                .position(start)
-                .allowsHitTesting(false)
-
-            Circle()
-                .fill(Color(red: 0.98, green: 0.45, blue: 0.68))
-                .frame(width: 14, height: 14)
-                .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 8))
-                .position(end)
-                .allowsHitTesting(false)
 
             CursorGlyph(
                 rotation: model.currentState.rotation,
@@ -375,8 +374,8 @@ private struct CursorLabCanvas: View {
                 selectedPath,
                 with: .linearGradient(
                     Gradient(colors: [
-                        Color.white.opacity(0.28),
-                        Color(red: 0.98, green: 0.72, blue: 0.86).opacity(0.16),
+                        CursorLabPalette.ink.opacity(0.18),
+                        CursorLabPalette.mainStrong.opacity(0.24),
                     ]),
                     startPoint: model.path.start,
                     endPoint: model.path.end
@@ -389,8 +388,8 @@ private struct CursorLabCanvas: View {
                 livePath,
                 with: .linearGradient(
                     Gradient(colors: [
-                        Color.white.opacity(0.88),
-                        Color(red: 0.97, green: 0.38, blue: 0.65).opacity(0.95),
+                        CursorLabPalette.ink.opacity(0.72),
+                        CursorLabPalette.mainStrong.opacity(0.92),
                     ]),
                     startPoint: model.path.start,
                     endPoint: model.path.end
@@ -405,7 +404,7 @@ private struct CursorLabCanvas: View {
         Canvas { context, _ in
             for (index, candidate) in model.candidates.enumerated() where candidate.id != model.selectedCandidateID {
                 let path = Path(candidate.path.cgPath)
-                let strokeColor = Color.white.opacity(max(0.10, 0.22 - CGFloat(index) * 0.016))
+                let strokeColor = CursorLabPalette.ink.opacity(max(0.08, 0.20 - CGFloat(index) * 0.016))
                 context.stroke(
                     path,
                     with: .color(strokeColor),
@@ -414,17 +413,17 @@ private struct CursorLabCanvas: View {
             }
 
             let handleStroke = StrokeStyle(lineWidth: 1.0, dash: [4, 6])
-            let handleColor = Color.white.opacity(0.22)
+            let handleColor = CursorLabPalette.ink.opacity(0.18)
             context.stroke(handlePath, with: .color(handleColor), style: handleStroke)
 
             for point in debugPoints {
                 let rect = CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
-                context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(0.55)))
+                context.fill(Path(ellipseIn: rect), with: .color(CursorLabPalette.ink.opacity(0.40)))
             }
 
             if let arc = model.path.arc {
                 let rect = CGRect(x: arc.x - 5, y: arc.y - 5, width: 10, height: 10)
-                context.fill(Path(ellipseIn: rect), with: .color(Color(red: 0.98, green: 0.45, blue: 0.68).opacity(0.78)))
+                context.fill(Path(ellipseIn: rect), with: .color(CursorLabPalette.mainStrong.opacity(0.78)))
             }
 
             if let selectedCandidate = model.candidates.first(where: { $0.id == model.selectedCandidateID }) {
@@ -434,7 +433,7 @@ private struct CursorLabCanvas: View {
                 )
                 let text = Text("SELECTED")
                     .font(.system(size: 10, weight: .black, design: .rounded))
-                    .foregroundColor(.white.opacity(0.82))
+                    .foregroundColor(CursorLabPalette.ink.opacity(0.78))
                 context.draw(text, at: labelPoint, anchor: .leading)
             }
         }
@@ -611,13 +610,13 @@ private struct CursorGlyphFallbackShape: Shape {
 private struct CursorToggleRow: View {
     let title: String
     @Binding var isOn: Bool
-    var accent: Color = Color(red: 0.92, green: 0.22, blue: 0.58)
+    var accent: Color = CursorLabPalette.mainStrong
 
     var body: some View {
         HStack(spacing: 10) {
             Text(title)
                 .font(.system(size: 10, weight: .black, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.82))
+                .foregroundStyle(CursorLabPalette.ink.opacity(0.82))
                 .tracking(0.8)
 
             Toggle("", isOn: $isOn)
@@ -632,7 +631,7 @@ private struct CursorToggleStyle: ToggleStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         RoundedRectangle(cornerRadius: 10)
-            .fill(configuration.isOn ? accent : Color.white.opacity(0.34))
+            .fill(configuration.isOn ? accent : CursorLabPalette.ink.opacity(0.18))
             .frame(width: 38, height: 20)
             .overlay(alignment: configuration.isOn ? .trailing : .leading) {
                 Circle()
@@ -653,8 +652,8 @@ private struct CursorActionButtonStyle: ButtonStyle {
             .font(.system(size: 11, weight: .bold, design: .rounded))
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Color.white.opacity(configuration.isPressed ? 0.18 : 0.12))
-            .foregroundStyle(Color.white.opacity(0.88))
+            .background(CursorLabPalette.ink.opacity(configuration.isPressed ? 0.16 : 0.10))
+            .foregroundStyle(CursorLabPalette.ink.opacity(0.88))
             .clipShape(Capsule())
     }
 }
@@ -663,10 +662,10 @@ private struct CursorLabBackground: View {
     var body: some View {
         LinearGradient(
             colors: [
-                Color(red: 0.96, green: 0.75, blue: 0.85),
-                Color(red: 0.92, green: 0.71, blue: 0.91),
-                Color(red: 0.97, green: 0.62, blue: 0.76),
-                Color(red: 0.44, green: 0.77, blue: 0.97),
+                CursorLabPalette.mainSoft,
+                CursorLabPalette.main,
+                CursorLabPalette.mainMuted,
+                Color(red: 0.72, green: 0.73, blue: 0.79),
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -674,9 +673,9 @@ private struct CursorLabBackground: View {
         .overlay {
             Canvas { context, size in
                 let blobs: [(CGPoint, CGSize, Color)] = [
-                    (CGPoint(x: size.width * 0.18, y: size.height * 0.20), CGSize(width: 360, height: 620), Color.white.opacity(0.20)),
-                    (CGPoint(x: size.width * 0.55, y: size.height * 0.58), CGSize(width: 420, height: 720), Color(red: 1, green: 0.72, blue: 0.82).opacity(0.22)),
-                    (CGPoint(x: size.width * 0.82, y: size.height * 0.26), CGSize(width: 360, height: 520), Color(red: 0.52, green: 0.82, blue: 1).opacity(0.26)),
+                    (CGPoint(x: size.width * 0.18, y: size.height * 0.20), CGSize(width: 360, height: 620), Color.white.opacity(0.28)),
+                    (CGPoint(x: size.width * 0.55, y: size.height * 0.58), CGSize(width: 420, height: 720), CursorLabPalette.main.opacity(0.36)),
+                    (CGPoint(x: size.width * 0.82, y: size.height * 0.26), CGSize(width: 360, height: 520), CursorLabPalette.mainStrong.opacity(0.16)),
                 ]
 
                 for blob in blobs {
