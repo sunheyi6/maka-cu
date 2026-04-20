@@ -64,6 +64,8 @@ Cursor Motion is an open-source cursor motion system for macOS, based on public 
 swift run CursorMotion
 ```
 
+[![Watch the demo](https://img.youtube.com/vi/KRUq5GUHv1Q/0.jpg)](https://youtu.be/KRUq5GUHv1Q)
+
 ## License
 
 [MIT](./LICENSE)

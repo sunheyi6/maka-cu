@@ -69,6 +69,9 @@ Cursor Motion 是一个面向 macOS 的开源光标运动系统，基于 Softwar
 swift run CursorMotion
 ```
 
+[![查看演示视频](https://img.youtube.com/vi/KRUq5GUHv1Q/0.jpg)](https://youtu.be/KRUq5GUHv1Q)
+
+
 ## License
 
 [MIT](./LICENSE)
