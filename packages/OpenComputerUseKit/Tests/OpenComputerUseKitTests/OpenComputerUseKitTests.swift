@@ -363,21 +363,48 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(drawingState.clickProgress, 0.6)
     }
 
-    func testDefaultVisualCursorAppearanceStartsBehindRestingForward() {
-        let target = CGPoint(x: 300, y: 240)
-        let restingForward = CGVector(dx: -1, dy: -1)
-        let start = defaultVisualCursorAppearancePoint(
-            for: target,
-            restingForward: restingForward,
-            distance: 90
+    func testDefaultVisualCursorInitialTipMatchesZeroWindowOrigin() {
+        let geometry = CursorWindowGeometry(
+            windowSize: CGSize(width: 126, height: 126),
+            tipAnchor: CGPoint(x: 60.35, y: 70.3)
         )
-        let travelDirection = normalizedVector(from: start, to: target)
-        let expectedDirection = normalizedVector(from: .zero, to: CGPoint(x: restingForward.dx, y: restingForward.dy))
+        let start = defaultVisualCursorInitialTipPosition(
+            windowOrigin: .zero,
+            tipAnchor: geometry.tipAnchor
+        )
 
-        XCTAssertGreaterThan(start.x, target.x)
-        XCTAssertGreaterThan(start.y, target.y)
-        XCTAssertEqual(travelDirection.dx, expectedDirection.dx, accuracy: 0.0001)
-        XCTAssertEqual(travelDirection.dy, expectedDirection.dy, accuracy: 0.0001)
+        XCTAssertEqual(geometry.origin(forTipPosition: start), .zero)
+        XCTAssertEqual(start.x, geometry.tipAnchor.x, accuracy: 0.0001)
+        XCTAssertEqual(start.y, geometry.tipAnchor.y, accuracy: 0.0001)
+    }
+
+    func testVisualCursorRuntimeMapsAppKitUpwardMotionToCursorMotionScreenState() {
+        let renderBaseHeading = visualCursorRenderBaseHeading(
+            artworkNeutralHeading: SoftwareCursorGlyphMetrics.targetNeutralHeading
+        )
+        let screenVelocity = visualCursorScreenStateVelocity(
+            fromRuntimeVelocity: CGVector(dx: 0, dy: 1),
+            yAxisMultiplier: visualCursorRuntimeRenderYAxisMultiplier()
+        )
+        let renderRotation = normalizedAngle(atan2(screenVelocity.dy, screenVelocity.dx) - renderBaseHeading)
+        let appKitForwardHeading = visualCursorAppKitForwardHeading(
+            renderRotation: renderRotation,
+            artworkNeutralHeading: SoftwareCursorGlyphMetrics.targetNeutralHeading
+        )
+
+        XCTAssertEqual(renderBaseHeading, -(3 * CGFloat.pi / 4), accuracy: 0.0001)
+        XCTAssertEqual(screenVelocity.dx, 0, accuracy: 0.0001)
+        XCTAssertEqual(screenVelocity.dy, -1, accuracy: 0.0001)
+        XCTAssertEqual(renderRotation, CGFloat.pi / 4, accuracy: 0.0001)
+        XCTAssertEqual(normalizedAngle(appKitForwardHeading), CGFloat.pi / 2, accuracy: 0.0001)
+        XCTAssertEqual(
+            visualCursorAppKitForwardHeading(
+                renderRotation: 0,
+                artworkNeutralHeading: SoftwareCursorGlyphMetrics.targetNeutralHeading
+            ),
+            3 * CGFloat.pi / 4,
+            accuracy: 0.0001
+        )
     }
 
     func testCursorMotionPathStartsAndEndsAtExpectedPoints() {
@@ -603,6 +630,17 @@ final class OpenComputerUseKitTests: XCTestCase {
         }
 
         return samples
+    }
+
+    private func normalizedAngle(_ angle: CGFloat) -> CGFloat {
+        var value = angle
+        while value > .pi {
+            value -= 2 * .pi
+        }
+        while value < -.pi {
+            value += 2 * .pi
+        }
+        return value
     }
 
     private func normalizedVector(from start: CGPoint, to end: CGPoint) -> CGVector {

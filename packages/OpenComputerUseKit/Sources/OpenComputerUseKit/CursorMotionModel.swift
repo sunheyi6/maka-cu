@@ -1254,6 +1254,7 @@ enum CursorVisualDynamicsAnimator {
         targetTime: CGFloat,
         idleAngleOffset: CGFloat = 0,
         baseHeading: CGFloat,
+        renderYAxisMultiplier: CGFloat = 1,
         configuration: CursorVisualDynamicsConfiguration = .officialInspired
     ) -> (state: CursorVisualDynamicsState, renderState: CursorVisualRenderState) {
         var adjustedState = state
@@ -1268,6 +1269,7 @@ enum CursorVisualDynamicsAnimator {
                 targetTipPosition: targetTipPosition,
                 idleAngleOffset: idleAngleOffset,
                 baseHeading: baseHeading,
+                renderYAxisMultiplier: renderYAxisMultiplier,
                 configuration: configuration
             )
         }
@@ -1278,6 +1280,7 @@ enum CursorVisualDynamicsAnimator {
                 state: adjustedState,
                 idleAngleOffset: idleAngleOffset,
                 baseHeading: baseHeading,
+                renderYAxisMultiplier: renderYAxisMultiplier,
                 configuration: configuration
             )
         )
@@ -1288,6 +1291,7 @@ enum CursorVisualDynamicsAnimator {
         targetTipPosition: CGPoint,
         idleAngleOffset: CGFloat,
         baseHeading: CGFloat,
+        renderYAxisMultiplier: CGFloat,
         configuration: CursorVisualDynamicsConfiguration
     ) -> CursorVisualDynamicsState {
         let dt = configuration.tipSpring.dt
@@ -1299,9 +1303,13 @@ enum CursorVisualDynamicsAnimator {
         let tipForce = tipDisplacement.scaled(by: configuration.tipSpring.stiffness)
             + tipVelocityHalf.scaled(by: -configuration.tipSpring.drag)
         let tipVelocity = tipVelocityHalf + tipForce.scaled(by: halfDT)
+        let renderVelocity = visualCursorScreenStateVelocity(
+            fromRuntimeVelocity: tipVelocity,
+            yAxisMultiplier: renderYAxisMultiplier
+        )
 
         let targetAngle = resolvedTargetAngle(
-            velocity: tipVelocity,
+            velocity: renderVelocity,
             idleAngleOffset: idleAngleOffset,
             baseHeading: baseHeading,
             configuration: configuration
@@ -1328,11 +1336,16 @@ enum CursorVisualDynamicsAnimator {
         state: CursorVisualDynamicsState,
         idleAngleOffset: CGFloat,
         baseHeading: CGFloat,
+        renderYAxisMultiplier: CGFloat,
         configuration: CursorVisualDynamicsConfiguration
     ) -> CursorVisualRenderState {
-        let speed = state.tipVelocity.length
+        let renderVelocity = visualCursorScreenStateVelocity(
+            fromRuntimeVelocity: state.tipVelocity,
+            yAxisMultiplier: renderYAxisMultiplier
+        )
+        let speed = renderVelocity.length
         let direction = speed > 0.001
-            ? state.tipVelocity.normalized
+            ? renderVelocity.normalized
             : CGVector(dx: cos(baseHeading + idleAngleOffset), dy: sin(baseHeading + idleAngleOffset))
         let bodyBackward = direction.scaled(
             by: -min(speed * configuration.bodyOffsetScale, configuration.bodyOffsetMax)

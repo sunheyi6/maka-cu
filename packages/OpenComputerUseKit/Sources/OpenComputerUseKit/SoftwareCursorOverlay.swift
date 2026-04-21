@@ -32,17 +32,40 @@ func visualCursorEnabled(environment: [String: String]) -> Bool {
     return !["0", "false", "no", "off"].contains(rawValue)
 }
 
-func defaultVisualCursorAppearancePoint(
-    for targetPoint: CGPoint,
-    restingForward: CGVector,
-    distance: CGFloat
+func defaultVisualCursorInitialTipPosition(
+    windowOrigin: CGPoint = .zero,
+    tipAnchor: CGPoint = SoftwareCursorGlyphMetrics.tipAnchor
 ) -> CGPoint {
-    let length = max(hypot(restingForward.dx, restingForward.dy), 0.001)
-    let unitForward = CGVector(dx: restingForward.dx / length, dy: restingForward.dy / length)
     return CGPoint(
-        x: targetPoint.x - (unitForward.dx * distance),
-        y: targetPoint.y - (unitForward.dy * distance)
+        x: windowOrigin.x + tipAnchor.x,
+        y: windowOrigin.y + tipAnchor.y
     )
+}
+
+func visualCursorRenderBaseHeading(
+    artworkNeutralHeading: CGFloat = SoftwareCursorGlyphMetrics.targetNeutralHeading
+) -> CGFloat {
+    artworkNeutralHeading
+}
+
+func visualCursorAppKitForwardHeading(
+    renderRotation: CGFloat,
+    artworkNeutralHeading: CGFloat = SoftwareCursorGlyphMetrics.targetNeutralHeading
+) -> CGFloat {
+    -artworkNeutralHeading - renderRotation
+}
+
+func visualCursorRuntimeRenderYAxisMultiplier() -> CGFloat {
+    // Window placement uses AppKit global coordinates, but glyph render state is
+    // still interpreted as CursorMotion's y-down screen state before drawing.
+    -1
+}
+
+func visualCursorScreenStateVelocity(
+    fromRuntimeVelocity velocity: CGVector,
+    yAxisMultiplier: CGFloat
+) -> CGVector {
+    CGVector(dx: velocity.dx, dy: velocity.dy * yAxisMultiplier)
 }
 
 struct CursorTargetWindow: Equatable, Sendable {
@@ -82,8 +105,8 @@ private struct CursorArtwork {
 @MainActor
 enum SoftwareCursorOverlay {
     private static let artwork = CursorArtwork.active
-    private static let baseHeading = -(3 * CGFloat.pi / 4)
-    private static let defaultAppearanceDistance: CGFloat = 90
+    private static let renderBaseHeading = visualCursorRenderBaseHeading()
+    private static let renderYAxisMultiplier = visualCursorRuntimeRenderYAxisMultiplier()
     private static var panel: CursorPanel?
     private static var cursorView: SoftwareCursorView?
     private static var restingTipPosition: CGPoint?
@@ -105,18 +128,24 @@ enum SoftwareCursorOverlay {
         configureOrdering(relativeTo: targetWindow)
 
         let constrainedTarget = clampTipPosition(targetPoint)
-        let startPoint = displayedTipPosition ?? defaultAppearancePoint(for: constrainedTarget)
+        let isFreshStart = displayedTipPosition == nil
+        let startPoint = displayedTipPosition ?? defaultInitialTipPosition()
         let now = CACurrentMediaTime()
 
         panel?.alphaValue = 1
-        seedVisualDynamicsIfNeeded(at: startPoint, time: now)
-        placeCursor(
-            using: advanceVisualDynamics(
-                toward: startPoint,
-                at: now
-            ),
-            clickProgress: 0
-        )
+        if isFreshStart {
+            visualDynamicsState = CursorVisualDynamicsAnimator.state(at: startPoint, time: CGFloat(now))
+            placeCursor(using: initialRenderState(at: startPoint), clickProgress: 0)
+        } else {
+            seedVisualDynamicsIfNeeded(at: startPoint, time: now)
+            placeCursor(
+                using: advanceVisualDynamics(
+                    toward: startPoint,
+                    at: now
+                ),
+                clickProgress: 0
+            )
+        }
 
         if distanceBetween(startPoint, constrainedTarget) > 2 {
             animateMove(from: startPoint, to: constrainedTarget, relativeTo: targetWindow)
@@ -342,7 +371,7 @@ enum SoftwareCursorOverlay {
     }
 
     private static func forwardVector(renderRotation: CGFloat) -> CGVector {
-        let angle = baseHeading + renderRotation
+        let angle = visualCursorAppKitForwardHeading(renderRotation: renderRotation)
         return CGVector(dx: cos(angle), dy: sin(angle))
     }
 
@@ -545,13 +574,21 @@ enum SoftwareCursorOverlay {
         }
     }
 
-    private static func defaultAppearancePoint(for targetPoint: CGPoint) -> CGPoint {
-        clampTipPosition(
-            defaultVisualCursorAppearancePoint(
-                for: targetPoint,
-                restingForward: restingForwardVector(),
-                distance: defaultAppearanceDistance
-            )
+    private static func defaultInitialTipPosition() -> CGPoint {
+        defaultVisualCursorInitialTipPosition(
+            windowOrigin: .zero,
+            tipAnchor: artwork.geometry.tipAnchor
+        )
+    }
+
+    private static func initialRenderState(at tipPosition: CGPoint) -> CursorVisualRenderState {
+        CursorVisualRenderState(
+            tipPosition: tipPosition,
+            rotation: 0,
+            cursorBodyOffset: CGVector(dx: 0, dy: 0),
+            fogOffset: CGVector(dx: 0, dy: 0),
+            fogOpacity: CursorVisualDynamicsConfiguration.officialInspired.fogOpacityBase,
+            fogScale: 1
         )
     }
 
@@ -579,7 +616,8 @@ enum SoftwareCursorOverlay {
             targetTipPosition: clampedTarget,
             targetTime: CGFloat(time),
             idleAngleOffset: idleAngleOffset,
-            baseHeading: baseHeading
+            baseHeading: renderBaseHeading,
+            renderYAxisMultiplier: renderYAxisMultiplier
         )
         visualDynamicsState = result.state
         return result.renderState
