@@ -69,7 +69,7 @@ private struct CursorArtwork {
 @MainActor
 enum SoftwareCursorOverlay {
     private static let artwork = CursorArtwork.active
-    private static let baseHeading = 3 * CGFloat.pi / 4
+    private static let baseHeading = -(3 * CGFloat.pi / 4)
     private static var panel: CursorPanel?
     private static var cursorView: SoftwareCursorView?
     private static var restingTipPosition: CGPoint?

@@ -25,6 +25,17 @@ struct SoftwareCursorGlyphRenderState {
         self.fogScale = fogScale
         self.clickProgress = clickProgress
     }
+
+    var appKitDrawingState: SoftwareCursorGlyphRenderState {
+        SoftwareCursorGlyphRenderState(
+            rotation: -rotation,
+            cursorBodyOffset: CGVector(dx: cursorBodyOffset.dx, dy: -cursorBodyOffset.dy),
+            fogOffset: CGVector(dx: fogOffset.dx, dy: -fogOffset.dy),
+            fogOpacity: fogOpacity,
+            fogScale: fogScale,
+            clickProgress: clickProgress
+        )
+    }
 }
 
 enum SoftwareCursorGlyphMetrics {
@@ -46,14 +57,15 @@ enum SoftwareCursorGlyphRenderer {
         context: CGContext,
         state: SoftwareCursorGlyphRenderState
     ) {
-        let pulse = state.clickProgress
+        let drawingState = state.appKitDrawingState
+        let pulse = drawingState.clickProgress
         let fogCenter = CGPoint(
-            x: bounds.midX + state.fogOffset.dx,
-            y: bounds.midY + state.fogOffset.dy
+            x: bounds.midX + drawingState.fogOffset.dx,
+            y: bounds.midY + drawingState.fogOffset.dy
         )
         let pointerCenter = CGPoint(
-            x: bounds.midX + SoftwareCursorGlyphMetrics.pointerOffset.x + state.cursorBodyOffset.dx,
-            y: bounds.midY + SoftwareCursorGlyphMetrics.pointerOffset.y + state.cursorBodyOffset.dy + (pulse * 0.35)
+            x: bounds.midX + SoftwareCursorGlyphMetrics.pointerOffset.x + drawingState.cursorBodyOffset.dx,
+            y: bounds.midY + SoftwareCursorGlyphMetrics.pointerOffset.y + drawingState.cursorBodyOffset.dy + (pulse * 0.35)
         )
 
         drawFog(
@@ -66,9 +78,9 @@ enum SoftwareCursorGlyphRenderer {
         drawPointer(
             in: context,
             center: pointerCenter,
-            rotation: state.rotation,
+            rotation: drawingState.rotation,
             clickProgress: pulse,
-            cursorBodyOffset: state.cursorBodyOffset,
+            cursorBodyOffset: drawingState.cursorBodyOffset,
             boundsMidpoint: CGPoint(x: bounds.midX, y: bounds.midY)
         )
     }

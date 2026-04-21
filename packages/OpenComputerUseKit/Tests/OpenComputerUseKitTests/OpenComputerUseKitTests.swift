@@ -320,6 +320,28 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(SoftwareCursorGlyphMetrics.tipAnchor.y, 70.3, accuracy: 0.01)
     }
 
+    func testSoftwareCursorGlyphConvertsScreenStateToAppKitDrawingState() {
+        let screenState = SoftwareCursorGlyphRenderState(
+            rotation: .pi / 3,
+            cursorBodyOffset: CGVector(dx: 2, dy: -4),
+            fogOffset: CGVector(dx: -3, dy: 5),
+            fogOpacity: 0.2,
+            fogScale: 1.1,
+            clickProgress: 0.6
+        )
+
+        let drawingState = screenState.appKitDrawingState
+
+        XCTAssertEqual(drawingState.rotation, -.pi / 3, accuracy: 0.0001)
+        XCTAssertEqual(drawingState.cursorBodyOffset.dx, 2, accuracy: 0.0001)
+        XCTAssertEqual(drawingState.cursorBodyOffset.dy, 4, accuracy: 0.0001)
+        XCTAssertEqual(drawingState.fogOffset.dx, -3, accuracy: 0.0001)
+        XCTAssertEqual(drawingState.fogOffset.dy, -5, accuracy: 0.0001)
+        XCTAssertEqual(drawingState.fogOpacity, 0.2)
+        XCTAssertEqual(drawingState.fogScale, 1.1)
+        XCTAssertEqual(drawingState.clickProgress, 0.6)
+    }
+
     func testCursorMotionPathStartsAndEndsAtExpectedPoints() {
         let path = CursorMotionPath(
             start: CGPoint(x: 10, y: 20),
@@ -536,7 +558,7 @@ final class OpenComputerUseKitTests: XCTestCase {
                 state: state,
                 targetTipPosition: CGPoint(x: targetX, y: 0),
                 targetTime: time,
-                baseHeading: 3 * .pi / 4
+                baseHeading: -(3 * .pi / 4)
             )
             state = result.state
             samples.append(result.renderState)

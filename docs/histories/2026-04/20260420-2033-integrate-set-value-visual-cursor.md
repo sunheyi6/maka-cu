@@ -95,3 +95,17 @@
 - `docs/ARCHITECTURE.md`
 - `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
 - `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
+
+### 🔁 Follow-up (2026-04-21, fix runtime cursor drawing direction)
+
+- **[修正 runtime heading 基线]**: `SoftwareCursorOverlay` 的 resting heading 改回与 `CursorMotion` 一致的 y-down 坐标基线 `-3π/4`，避免 `TextEdit` 这类直接使用截图 / CGWindow 坐标的工具序列在纵向运动时出现可见箭头方向镜像。
+- **[补 AppKit 绘制转换]**: `SoftwareCursorGlyphRenderer` 继续接收 screen-space motion state，但在实际 AppKit 绘制前把 `rotation` 和 `dy` 转成 y-up drawing state，复刻 `CursorMotion` 里 `drawingAngle` / `drawingVector` 的边界。
+- **[保持 CursorMotion 不动]**: 本次只改 `OpenComputerUseKit` runtime，未修改 `experiments/CursorMotion` 的 demo 实现。
+- **[补单测与文档]**: 新增 drawing-state 转换单测，并在架构文档里写明 runtime motion 坐标与 AppKit drawing 坐标的转换点。
+
+**Follow-up Files:**
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift`
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorGlyphRenderer.swift`
+- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
+- `docs/ARCHITECTURE.md`
+- `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
