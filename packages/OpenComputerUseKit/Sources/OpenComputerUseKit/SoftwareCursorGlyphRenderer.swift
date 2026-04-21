@@ -44,6 +44,9 @@ enum SoftwareCursorGlyphMetrics {
 
     static let pointerSize = CGSize(width: 21, height: 21)
     static let pointerOffset = CGPoint(x: 2.6, y: -3.2)
+    static let targetNeutralHeading = -(3 * CGFloat.pi / 4)
+    static let proceduralContourNeutralHeading = -(96.5 * CGFloat.pi / 180)
+    static let pointerArtworkRotation = -(targetNeutralHeading - proceduralContourNeutralHeading)
 }
 
 private enum SoftwareCursorGlyphColors {
@@ -168,6 +171,9 @@ enum SoftwareCursorGlyphRenderer {
             x: -(boundsMidpoint.x + cursorBodyOffset.dx),
             y: -(boundsMidpoint.y + cursorBodyOffset.dy)
         )
+        context.translateBy(x: center.x, y: center.y)
+        context.rotate(by: SoftwareCursorGlyphMetrics.pointerArtworkRotation)
+        context.translateBy(x: -center.x, y: -center.y)
 
         NSGraphicsContext.saveGraphicsState()
         let shadow = NSShadow()

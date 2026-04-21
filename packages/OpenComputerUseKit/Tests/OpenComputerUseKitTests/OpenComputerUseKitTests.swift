@@ -320,6 +320,18 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(SoftwareCursorGlyphMetrics.tipAnchor.y, 70.3, accuracy: 0.01)
     }
 
+    func testSoftwareCursorGlyphArtworkNeutralHeadingMatchesCursorMotionBaseline() {
+        let correctedNeutralHeading = SoftwareCursorGlyphMetrics.proceduralContourNeutralHeading
+            - SoftwareCursorGlyphMetrics.pointerArtworkRotation
+
+        XCTAssertEqual(
+            correctedNeutralHeading,
+            SoftwareCursorGlyphMetrics.targetNeutralHeading,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(SoftwareCursorGlyphMetrics.targetNeutralHeading, -(3 * CGFloat.pi / 4), accuracy: 0.001)
+    }
+
     func testSoftwareCursorGlyphConvertsScreenStateToAppKitDrawingState() {
         let screenState = SoftwareCursorGlyphRenderState(
             rotation: .pi / 3,

@@ -109,3 +109,16 @@
 - `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
 - `docs/ARCHITECTURE.md`
 - `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
+
+### 🔁 Follow-up (2026-04-21, align procedural pointer neutral axis)
+
+- **[修正侧边朝前]**: 用户继续反馈 runtime cursor 仍然不是 tip 朝前，而是侧边在前；复查后确认 motion rotation 语义已经对齐 `CursorMotion`，偏差来自 runtime 程序化 pointer contour 自身的 neutral 轴不等于官方 baseline 的 `-3π/4`。
+- **[加 artwork neutral correction]**: `SoftwareCursorGlyphRenderer` 在 pointer 自身中心上额外应用固定 artwork correction，把 procedural contour 的天然轴校准到 `CursorMotion` / 官方 baseline 的 forward 方向；motion 层的 heading / path 逻辑保持不变。
+- **[保持实验线不动]**: 本次仍只改 `OpenComputerUseKit` runtime，没有修改 `experiments/CursorMotion`。
+- **[补单测与文档]**: 新增 corrected neutral heading 单测，并同步架构文档，明确这是 runtime 内部的程序化轮廓校准。
+
+**Follow-up Files:**
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorGlyphRenderer.swift`
+- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
+- `docs/ARCHITECTURE.md`
+- `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
