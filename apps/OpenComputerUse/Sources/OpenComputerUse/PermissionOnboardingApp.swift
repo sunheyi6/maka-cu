@@ -1154,8 +1154,9 @@ enum Branding {
         let image = NSImage(size: NSSize(width: size, height: size))
         image.lockFocus()
 
-        let rect = CGRect(origin: .zero, size: image.size)
-        let tile = NSBezierPath(roundedRect: rect, xRadius: size * 0.22, yRadius: size * 0.22)
+        let canvasInset = size * (92.0 / 1024.0)
+        let rect = CGRect(origin: .zero, size: image.size).insetBy(dx: canvasInset, dy: canvasInset)
+        let tile = NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.22, yRadius: rect.height * 0.22)
 
         let gradient = NSGradient(colors: [
             NSColor(calibratedRed: 0.12, green: 0.67, blue: 0.99, alpha: 1),
@@ -1164,11 +1165,11 @@ enum Branding {
         gradient.draw(in: tile, angle: 20)
 
         func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: size * x / 256, y: size * (1 - y / 256))
+            CGPoint(x: rect.minX + rect.width * x / 256, y: rect.minY + rect.height * (1 - y / 256))
         }
 
         func scale(_ value: CGFloat) -> CGFloat {
-            size * value / 256
+            rect.width * value / 256
         }
 
         let arc = NSBezierPath()

@@ -239,7 +239,8 @@ release_app_bundle_name="Open Computer Use.app"
 development_app_bundle_name="Open Computer Use (Dev).app"
 legacy_app_bundle_name="OpenComputerUse.app"
 bundle_icon_name="OpenComputerUse.icns"
-icon_render_script="${repo_root}/scripts/render-open-computer-use-icon.swift"
+icon_master_png="${repo_root}/assets/app-icons/open-computer-use-1024.png"
+iconset_build_script="${repo_root}/scripts/build-apple-iconset.sh"
 
 bundle_display_name="Open Computer Use"
 bundle_identifier="com.ifuryst.opencomputeruse"
@@ -288,6 +289,16 @@ esac
 
 chmod +x "${macos_dir}/OpenComputerUse"
 
+if [[ ! -f "${icon_master_png}" ]]; then
+  echo "Missing icon master PNG: ${icon_master_png}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${iconset_build_script}" ]]; then
+  echo "Missing iconset build script: ${iconset_build_script}" >&2
+  exit 1
+fi
+
 icon_work_dir="$(mktemp -d "${TMPDIR:-/tmp}/open-computer-use-icon.XXXXXX")"
 cleanup() {
   if [[ -n "${icon_work_dir:-}" ]]; then
@@ -297,7 +308,7 @@ cleanup() {
 trap cleanup EXIT
 iconset_dir="${icon_work_dir}/OpenComputerUse.iconset"
 mkdir -p "${iconset_dir}"
-swift "${icon_render_script}" "${iconset_dir}"
+"${iconset_build_script}" "${icon_master_png}" "${iconset_dir}"
 iconutil -c icns "${iconset_dir}" -o "${resources_dir}/${bundle_icon_name}"
 
 cat > "${contents_dir}/Info.plist" <<PLIST
