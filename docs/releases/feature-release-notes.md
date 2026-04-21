@@ -4,6 +4,7 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-04-21 | 软件光标视觉一致性 | `click` / `set_value` 期间显示的软件光标更接近 Cursor Motion 的参考渲染，首次出现、移动朝向和正式 app icon 的视觉边界更稳定。 | 发布 `0.1.21`，把 runtime overlay 切到共享的程序化 glyph renderer，修正初始朝向和 runtime 绘制方向，并同步收口 Open Computer Use app icon 的安全边距。 |
 | 2026-04-20 | 安装器宿主依赖 | `open-computer-use install-codex-plugin` 不再额外依赖 `rsync`，插件安装路径更接近“只要 npm/Node 已可用就能跑”。 | 发布 `0.1.20`，把 plugin installer 里复制 plugin 目录和 `.app` bundle 的实现从 `rsync` 改成 Node `cpSync`，继续收口 `open-computer-use` 的安装器运行时前提。 |
 | 2026-04-20 | 安装器运行时依赖 | `open-computer-use` 的一键安装命令不再因为系统 Python 版本太旧而失败，npm 全局安装后的首次接入路径更稳定。 | 发布 `0.1.19`，移除 `install-claude-mcp`、`install-codex-mcp`、`install-codex-plugin` 对 `python3` / `tomllib` 的运行时依赖，统一改为随 npm 包分发的 Node helper 处理配置读写。 |
 | 2026-04-20 | macOS 分发签名与公证 | `Cursor Motion` 的下载 `.dmg` 现在补齐了 Apple notarization 要求的 hardened runtime，release 链路离标准 macOS 分发更近了一步。 | 发布 `0.1.18`，修复 `Cursor Motion.app` 在 notarization 前缺少 hardened runtime 的问题；Developer ID 签名现在会显式启用 `codesign --options runtime`，用于新的 release 重跑。 |
