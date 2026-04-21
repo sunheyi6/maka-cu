@@ -216,6 +216,7 @@ bundle_version="${CURSOR_MOTION_BUNDLE_VERSION:-${GITHUB_RUN_NUMBER:-$(git -C "$
 bundle_icon_name="CursorMotion.icns"
 icon_master_png="${repo_root}/assets/app-icons/open-computer-use-1024.png"
 iconset_build_script="${repo_root}/scripts/build-apple-iconset.sh"
+cursor_reference_source="${repo_root}/docs/references/codex-computer-use-reverse-engineering/assets/extracted-2026-04-19/official-software-cursor-window-252.png"
 app_root="${output_dir}/${app_name}"
 contents_dir="${app_root}/Contents"
 macos_dir="${contents_dir}/MacOS"
@@ -247,6 +248,13 @@ case "${arch_mode}" in
 esac
 
 chmod +x "${macos_dir}/CursorMotion"
+
+if [[ ! -f "${cursor_reference_source}" ]]; then
+  echo "Missing cursor reference asset: ${cursor_reference_source}" >&2
+  exit 1
+fi
+
+cp "${cursor_reference_source}" "${resources_dir}/official-software-cursor-window-252.png"
 
 if [[ ! -f "${icon_master_png}" ]]; then
   echo "Missing icon master PNG: ${icon_master_png}" >&2

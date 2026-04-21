@@ -2,15 +2,15 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-package struct SoftwareCursorGlyphRenderState {
-    package let rotation: CGFloat
-    package let cursorBodyOffset: CGVector
-    package let fogOffset: CGVector
-    package let fogOpacity: CGFloat
-    package let fogScale: CGFloat
-    package let clickProgress: CGFloat
+struct SoftwareCursorGlyphRenderState {
+    let rotation: CGFloat
+    let cursorBodyOffset: CGVector
+    let fogOffset: CGVector
+    let fogOpacity: CGFloat
+    let fogScale: CGFloat
+    let clickProgress: CGFloat
 
-    package init(
+    init(
         rotation: CGFloat,
         cursorBodyOffset: CGVector,
         fogOffset: CGVector,
@@ -27,9 +27,9 @@ package struct SoftwareCursorGlyphRenderState {
     }
 }
 
-package enum SoftwareCursorGlyphMetrics {
-    package static let windowSize = CGSize(width: 126, height: 126)
-    package static let tipAnchor = CGPoint(x: 60.35, y: 70.3)
+enum SoftwareCursorGlyphMetrics {
+    static let windowSize = CGSize(width: 126, height: 126)
+    static let tipAnchor = CGPoint(x: 60.35, y: 70.3)
 
     static let pointerSize = CGSize(width: 21, height: 21)
     static let pointerOffset = CGPoint(x: 2.6, y: -3.2)
@@ -40,8 +40,8 @@ private enum SoftwareCursorGlyphColors {
     static let pointerStroke = NSColor(calibratedWhite: 0.90, alpha: 0.92)
 }
 
-package enum SoftwareCursorGlyphRenderer {
-    package static func draw(
+enum SoftwareCursorGlyphRenderer {
+    static func draw(
         in bounds: CGRect,
         context: CGContext,
         state: SoftwareCursorGlyphRenderState

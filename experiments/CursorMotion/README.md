@@ -9,7 +9,6 @@
 - 主线 `packages/OpenComputerUseKit/.../SoftwareCursorOverlay.swift` 已经承担产品行为，不适合继续塞大量实验代码。
 - 用户提供的视频和官方字符串都说明 cursor motion 有独立参数模型，适合先做一个 lab。
 - 这块后续可能单独开源，先在目录边界上收口更干净。
-- 当前与主 runtime 共享的只有一个中立 `SoftwareCursorGlyphKit` target，用来承载程序化 cursor glyph；`CursorMotion` 不再直接依赖 `OpenComputerUseKit`。
 
 ## 当前模块边界
 
@@ -20,7 +19,7 @@
 - `Sources/CursorLabRootView.swift`
   - 本地 demo UI、slider 调参面板、候选路径 overlay 与点击交互
 - `Sources/SynthesizedCursorGlyphView.swift`
-  - 复用共享 `SoftwareCursorGlyphKit` 的程序化 pointer/fog glyph renderer
+  - 参考 `scripts/render-synthesized-software-cursor.swift` 的 baseline/procedural cursor renderer
 
 ## 当前参考
 
@@ -56,7 +55,7 @@ swift run CursorMotion
 - 可见 cursor 不再直接贴在 path sample 上，而是经过独立 visual dynamics 状态，再输出 `rotation + cursorBodyOffset + fogOffset + fogScale`。
 - 候选路径现在显式约束“先顺车头方向掉头，再沿主轴推进，再按 resting pose 收尾”；因此大多数跨向移动会呈现单侧 C 形，需要直接切入时才会退化为近直线，而不会再出现两侧乱甩的 S 形扭曲。
 - 箭头的可见角度现在重新对齐官方抽帧与逆向证据：moving 阶段持续跟随当前 move heading，接近停住后再平滑回到默认 resting pose，并继续做原地小摆角。
-- cursor glyph 现在固定走代码绘制的程序化 pointer/fog renderer，不再依赖 `252x252` PNG baseline 图或其它图片资产。
+- cursor glyph 不再走之前那套亮白 asset；当前优先直接显示仓库里的官方 `252x252` runtime baseline 图，缺失时才退回脚本同款 procedural pointer/fog。
 - settle 态不再做 XY 漂移；现在改成和参考脚本一致的中心固定小摆角，让“停住以后原地轻微转动”的观感先对齐。
 
 后续实现应优先保持：

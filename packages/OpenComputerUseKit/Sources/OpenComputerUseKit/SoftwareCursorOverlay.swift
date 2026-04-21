@@ -2,7 +2,6 @@ import AppKit
 import CoreGraphics
 import Foundation
 import QuartzCore
-import SoftwareCursorGlyphKit
 
 public enum VisualCursorSupport {
     public static var isEnabled: Bool {

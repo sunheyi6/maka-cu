@@ -35,12 +35,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SoftwareCursorGlyphKit",
-            path: "packages/SoftwareCursorGlyphKit/Sources/SoftwareCursorGlyphKit"
-        ),
-        .target(
             name: "OpenComputerUseKit",
-            dependencies: ["SoftwareCursorGlyphKit"],
             path: "packages/OpenComputerUseKit/Sources/OpenComputerUseKit"
         ),
         .executableTarget(
@@ -60,7 +55,6 @@ let package = Package(
         ),
         .executableTarget(
             name: "CursorMotion",
-            dependencies: ["SoftwareCursorGlyphKit"],
             path: "experiments/CursorMotion/Sources/CursorMotion"
         ),
         .target(
@@ -74,7 +68,7 @@ let package = Package(
         ),
         .testTarget(
             name: "OpenComputerUseKitTests",
-            dependencies: ["OpenComputerUseKit", "SoftwareCursorGlyphKit"],
+            dependencies: ["OpenComputerUseKit"],
             path: "packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests"
         ),
         .testTarget(

@@ -76,3 +76,22 @@
 - `docs/ARCHITECTURE.md`
 - `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
 - `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`
+
+### 🔁 Follow-up (2026-04-20, restore `CursorMotion` and scope glyph reuse to runtime)
+
+- **[恢复 CursorMotion 边界]**: 用户明确反馈 `CursorMotion` 本身已经正常，不应被主 runtime 集成改动牵连；当前已撤回 `CursorMotion -> SoftwareCursorGlyphKit` 的 package 依赖，恢复它原来的独立 target 形态。
+- **[恢复 PNG-first lab glyph]**: `SynthesizedCursorGlyphView` 重新回到“优先读取官方 `official-software-cursor-window-252.png`，缺失时再使用本地 procedural fallback”的实现，DMG 打包脚本也继续把这张参考图复制进 bundle。
+- **[runtime 内部复刻即可]**: `click` / `set_value` 需要的程序化 glyph renderer 只保留在 `OpenComputerUseKit` 内部，作为主 MCP runtime overlay 的实现细节；不再新增中立共享 target，也不要求 `CursorMotion` 复用 runtime 代码。
+- **[同步文档口径]**: README、架构说明和 active execution plan 都改回“CursorMotion 独立、PNG-first；OpenComputerUseKit 自己参考 CursorMotion fallback 绘制”的边界，避免继续误导后续改动。
+
+**Follow-up Files:**
+- `Package.swift`
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorGlyphRenderer.swift`
+- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift`
+- `experiments/CursorMotion/Sources/CursorMotion/SynthesizedCursorGlyphView.swift`
+- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift`
+- `scripts/build-cursor-motion-dmg.sh`
+- `experiments/CursorMotion/README.md`
+- `docs/ARCHITECTURE.md`
+- `docs/exec-plans/active/20260418-standalone-cursor-lab.md`
+- `docs/histories/2026-04/20260420-2033-integrate-set-value-visual-cursor.md`

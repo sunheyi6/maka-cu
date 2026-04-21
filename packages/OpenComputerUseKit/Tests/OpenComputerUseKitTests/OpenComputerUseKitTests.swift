@@ -1,5 +1,4 @@
 import AppKit
-import SoftwareCursorGlyphKit
 import XCTest
 @testable import OpenComputerUseKit
 
@@ -315,7 +314,7 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(geometry.tipPosition(forOrigin: CGPoint(x: 1156, y: 712)), tipPosition)
     }
 
-    func testSoftwareCursorGlyphMetricsMatchSharedProceduralCalibration() {
+    func testSoftwareCursorGlyphMetricsMatchRuntimeProceduralCalibration() {
         XCTAssertEqual(SoftwareCursorGlyphMetrics.windowSize, CGSize(width: 126, height: 126))
         XCTAssertEqual(SoftwareCursorGlyphMetrics.tipAnchor.x, 60.35, accuracy: 0.01)
         XCTAssertEqual(SoftwareCursorGlyphMetrics.tipAnchor.y, 70.3, accuracy: 0.01)

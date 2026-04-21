@@ -65,7 +65,7 @@
 - 2026-04-19：已把 lab 从 speculative slider 驱动的曲线/收尾模型，重构为 recovered 的 `20` candidate path + 官方风格 spring progress + 独立 visual dynamics；收尾不再靠 endpoint 锁住后原地翻角。
 - 2026-04-19：在对照官方视频后发现 guide/arc 相关常量不能直接按屏幕坐标向量使用；当前已改成先投到 start→end 的局部基底，再生成候选路径，默认样例和反向斜移都不再出现起点附近打结式的扭曲回环。
 - 2026-04-19：继续对照官方视频后，确认 lab 主线不能直接拿 raw reverse-engineered `20` candidates 当 chooser；当前已改成 heading-driven 选路，把当前可见朝向和最终 resting pose 一起参与选路，主路径重新收敛到“需要掉头时走单侧 C 形，不需要掉头时近直线”的分布。
-- 2026-04-20：在对照 `scripts/render-synthesized-software-cursor.swift` 与用户截图后，确认共享 glyph renderer 的亮白 asset 风格并不对；当前已把 lab 改成优先显示仓库里的官方 `252x252` runtime baseline 图，fallback 才走脚本同款 procedural pointer/fog，同时把 idle 从 XY 漂移收紧为中心固定的小幅摆角。
+- 2026-04-20：在对照 `scripts/render-synthesized-software-cursor.swift` 与用户截图后，确认上一版亮白 asset 风格并不对；当前已把 lab 改成优先显示仓库里的官方 `252x252` runtime baseline 图，fallback 才走脚本同款 procedural pointer/fog，同时把 idle 从 XY 漂移收紧为中心固定的小幅摆角。
 - 2026-04-20：曾按用户反馈把“内部 heading”与“可见箭头角度”分离，短暂把 moving 阶段的可见箭头收紧成轻微 lean；这层假设随后已在对照官方抽帧后撤回。
 - 2026-04-20：按用户反馈把左上角 5 个 slider 恢复回来，并重新接到 heading-driven 路径几何与 progress spring；当前 slider 明确只作为本地调参入口，不宣称是已完全确认的官方字段映射。
 - 2026-04-20：继续按用户反馈把左上角控件区裁成纯 slider，并把 slider label / panel accent 收回当前中性灰紫主色系；不再保留 `REPLAY` / `RESET` 按钮和额外 metrics 文案，避免信息噪音和低对比白字。
@@ -87,7 +87,6 @@
 - 2026-04-20：已补一条 tag 驱动的 `Cursor Motion` 分发链路；本地可以通过 `scripts/build-cursor-motion-dmg.sh` 构建 DMG，GitHub Actions 在推送 release tag 后会自动生成 `CursorMotion-<version>.dmg` 并上传到 GitHub Releases。
 - 2026-04-20：继续修正“打包版和 `swift run CursorMotion` 观感不一致”的问题；当前已确认 release app 之前没把官方 `252x252` baseline cursor PNG 带进 bundle，导致退回 procedural glyph。现在 `.app` 会优先从 `Bundle.main` 读官方 cursor 图，DMG 打包脚本也会把这张图复制进 `Contents/Resources`，并显式打开 `NSHighResolutionCapable`。
 - 2026-04-20：继续修正 packaged `Cursor Motion` 的 app icon 资产链；当前已经收口到仓库内 checked-in 的 `1024x1024` master PNG，并在 DMG 打包阶段通过 `sips + iconutil` 生成 `CursorMotion.icns`，避免继续把 Dock 光学尺寸调校耦合在临时 icon render 脚本里。
-- 2026-04-20：继续收口 glyph 边界；`CursorMotion` 已不再优先走 `official-software-cursor-window-252.png`，而是固定使用代码绘制的程序化 pointer/fog glyph，并把这份 renderer 抽到中立 `SoftwareCursorGlyphKit` target，避免实验线重新直接依赖 `OpenComputerUseKit`。
 
 ## 决策记录
 
@@ -106,4 +105,3 @@
 - 2026-04-20：对 `Cursor Motion` 的对外交付，当前采用“源码运行 + GitHub Releases 分发 ad-hoc signed DMG”的策略；先把 tag 驱动的可复现封装链路稳定下来，不在这一轮提前引入 notarization 和 Developer ID 签名复杂度。
 - 2026-04-20：对 packaged `Cursor Motion` 的 glyph 资源，当前采用“bundle 内官方 baseline 图优先，仓库 reference 路径兜底”的策略；这样 release app 不再因为缺资源而静默退回低保真的 procedural glyph。
 - 2026-04-20：对 packaged `Cursor Motion` 的 app icon，当前采用“先直接复用 `Open Computer Use` 的现有 `.icns` 渲染脚本”的策略；先解决 Finder / DMG 里的无图标问题，后续如果需要再单独设计专属 icon。
-- 2026-04-20：对 `CursorMotion` 与主 runtime 的 glyph 共享，当前采用“抽独立 `SoftwareCursorGlyphKit` target、两边都依赖这份程序化 renderer”的策略；这样既能统一 cursor 轮廓，又不会把实验线重新绑回 `OpenComputerUseKit`。
