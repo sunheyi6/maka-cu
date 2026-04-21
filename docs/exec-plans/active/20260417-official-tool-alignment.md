@@ -55,10 +55,10 @@
   - `swift test`
   - `go run . list-tools --transport app-server`
   - `go run . list-tools --transport direct --server-bin ../../.build/debug/OpenComputerUse`
-  - `go run . call list_apps --transport app-server`
   - `go run . call list_apps --transport direct --server-bin ../../.build/debug/OpenComputerUse`
 - 手工检查：
   - 官方与开源 `tools/list` 的 9 个 tool surface 能一眼对齐。
+  - 官方 bundled `computer-use` 的 raw app-server helper 当前只用于 `tools/list` 探测；真实 tool call 走正常 Codex agent/tool 调用链或本仓库 direct server。
   - `get_app_state` 文本不再暴露 `_NS:` 内部 identifier、frame 噪音和过量 cell 递归。
   - `appNotFound`、安全拒绝等错误形态与官方一致地回到 `content` + `isError: true`。
 - 观测检查：

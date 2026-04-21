@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,12 +88,151 @@ func TestDiscoverPluginRootChoosesNewestCandidate(t *testing.T) {
 		t.Fatalf("chtimes older: %v", err)
 	}
 
-	root, err := discoverPluginRoot()
+	root, err := discoverPluginRoot("", false)
 	if err != nil {
 		t.Fatalf("discoverPluginRoot returned error: %v", err)
 	}
 	if got, want := root, newer; got != want {
 		t.Fatalf("discoverPluginRoot = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverPluginRootPrefersDefaultTestVersion(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	parent := filepath.Join(tempHome, defaultPluginVersionsDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+
+	legacy := filepath.Join(parent, defaultTestPluginVersion)
+	newer := filepath.Join(parent, "1.0.755")
+	createFakePluginRoot(t, legacy)
+	createFakePluginRoot(t, newer)
+
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(newer, future, future); err != nil {
+		t.Fatalf("chtimes newer: %v", err)
+	}
+
+	root, err := discoverPluginRoot(defaultTestPluginVersion, false)
+	if err != nil {
+		t.Fatalf("discoverPluginRoot returned error: %v", err)
+	}
+	if got, want := root, legacy; got != want {
+		t.Fatalf("discoverPluginRoot = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverPluginRootPrefersLegacyRootForDefaultTestVersion(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	parent := filepath.Join(tempHome, defaultPluginVersionsDir)
+	cacheRoot := filepath.Join(parent, defaultTestPluginVersion)
+	legacyRoot := filepath.Join(tempHome, defaultLegacyPluginRoot)
+	createFakePluginRoot(t, cacheRoot)
+	createFakePluginRoot(t, legacyRoot)
+	writeFakePluginManifest(t, legacyRoot, defaultTestPluginVersion)
+
+	root, err := discoverPluginRoot(defaultTestPluginVersion, false)
+	if err != nil {
+		t.Fatalf("discoverPluginRoot returned error: %v", err)
+	}
+	if got, want := root, legacyRoot; got != want {
+		t.Fatalf("discoverPluginRoot = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverPluginRootSkipsLegacyRootForMismatchedVersion(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	parent := filepath.Join(tempHome, defaultPluginVersionsDir)
+	cacheRoot := filepath.Join(parent, defaultTestPluginVersion)
+	legacyRoot := filepath.Join(tempHome, defaultLegacyPluginRoot)
+	createFakePluginRoot(t, cacheRoot)
+	createFakePluginRoot(t, legacyRoot)
+	writeFakePluginManifest(t, legacyRoot, "1.0.1")
+
+	root, err := discoverPluginRoot(defaultTestPluginVersion, false)
+	if err != nil {
+		t.Fatalf("discoverPluginRoot returned error: %v", err)
+	}
+	if got, want := root, cacheRoot; got != want {
+		t.Fatalf("discoverPluginRoot = %q, want %q", got, want)
+	}
+}
+
+func TestResolveTargetUsesExplicitPluginVersion(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	parent := filepath.Join(tempHome, defaultPluginVersionsDir)
+	legacy := filepath.Join(parent, defaultTestPluginVersion)
+	newer := filepath.Join(parent, "1.0.755")
+	createFakePluginRoot(t, legacy)
+	createFakePluginRoot(t, newer)
+
+	target, err := resolveTarget(commonFlags{pluginVersion: "1.0.755"})
+	if err != nil {
+		t.Fatalf("resolveTarget returned error: %v", err)
+	}
+	if got, want := target.PluginRoot, newer; got != want {
+		t.Fatalf("PluginRoot = %q, want %q", got, want)
+	}
+}
+
+func TestResolveTargetLatestPluginVersionSelectorUsesNewest(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	parent := filepath.Join(tempHome, defaultPluginVersionsDir)
+	legacy := filepath.Join(parent, defaultTestPluginVersion)
+	newer := filepath.Join(parent, "1.0.755")
+	createFakePluginRoot(t, legacy)
+	createFakePluginRoot(t, newer)
+
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(newer, future, future); err != nil {
+		t.Fatalf("chtimes newer: %v", err)
+	}
+
+	target, err := resolveTarget(commonFlags{pluginVersion: "latest"})
+	if err != nil {
+		t.Fatalf("resolveTarget returned error: %v", err)
+	}
+	if got, want := target.PluginRoot, newer; got != want {
+		t.Fatalf("PluginRoot = %q, want %q", got, want)
+	}
+}
+
+func TestResolveTargetRejectsMissingExplicitPluginVersion(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	parent := filepath.Join(tempHome, defaultPluginVersionsDir)
+	createFakePluginRoot(t, filepath.Join(parent, defaultTestPluginVersion))
+
+	if _, err := resolveTarget(commonFlags{pluginVersion: "9.9.999"}); err == nil {
+		t.Fatal("resolveTarget should reject a missing explicit plugin version")
+	}
+}
+
+func TestResolveTargetExplicitServerBinTakesPrecedenceOverPluginVersionEnv(t *testing.T) {
+	t.Setenv(pluginVersionEnvVar, "../bad")
+
+	root := t.TempDir()
+	createFakePluginRoot(t, root)
+	serverBin := filepath.Join(root, defaultServerRelativeBin)
+
+	target, err := resolveTarget(commonFlags{serverBin: serverBin})
+	if err != nil {
+		t.Fatalf("resolveTarget returned error: %v", err)
+	}
+	if got, want := target.ServerBin, serverBin; got != want {
+		t.Fatalf("ServerBin = %q, want %q", got, want)
 	}
 }
 
@@ -159,6 +299,43 @@ func TestResolveAppServerBinaryPrefersExplicitPath(t *testing.T) {
 	}
 }
 
+func TestResolveAppServerArgsInjectsDefaultTestVersionConfig(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	parent := filepath.Join(tempHome, defaultPluginVersionsDir)
+	legacy := filepath.Join(parent, defaultTestPluginVersion)
+	newer := filepath.Join(parent, "1.0.755")
+	createFakePluginRoot(t, legacy)
+	createFakePluginRoot(t, newer)
+
+	args, err := resolveAppServerArgs(commonFlags{serverName: defaultAppServerServerName})
+	if err != nil {
+		t.Fatalf("resolveAppServerArgs returned error: %v", err)
+	}
+
+	joined := strings.Join(args, "\n")
+	if !strings.Contains(joined, legacy) {
+		t.Fatalf("app-server args should point at %q, got %q", legacy, joined)
+	}
+	if !strings.Contains(joined, `mcp_servers.computer-use.command=`) {
+		t.Fatalf("app-server args should override computer-use command, got %q", joined)
+	}
+}
+
+func TestResolveAppServerArgsHostSelectorLeavesConfigUntouched(t *testing.T) {
+	args, err := resolveAppServerArgs(commonFlags{pluginVersion: "host"})
+	if err != nil {
+		t.Fatalf("resolveAppServerArgs returned error: %v", err)
+	}
+	if got, want := len(args), 1; got != want {
+		t.Fatalf("len(args) = %d, want %d: %v", got, want, args)
+	}
+	if got, want := args[0], "app-server"; got != want {
+		t.Fatalf("args[0] = %q, want %q", got, want)
+	}
+}
+
 func createFakePluginRoot(t *testing.T, root string) {
 	t.Helper()
 
@@ -168,5 +345,18 @@ func createFakePluginRoot(t *testing.T, root string) {
 	}
 	if err := os.WriteFile(serverBin, []byte("stub"), 0o755); err != nil {
 		t.Fatalf("write fake server bin: %v", err)
+	}
+}
+
+func writeFakePluginManifest(t *testing.T, root string, version string) {
+	t.Helper()
+
+	manifestPath := filepath.Join(root, defaultPluginManifest)
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatalf("mkdir plugin manifest dir: %v", err)
+	}
+	data := []byte(`{"name":"computer-use","version":"` + version + `"}`)
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatalf("write plugin manifest: %v", err)
 	}
 }

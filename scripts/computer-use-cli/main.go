@@ -24,14 +24,19 @@ const (
 	cliVersion               = "0.1.22"
 	defaultTimeout           = 60 * time.Second
 	pluginRootEnvVar         = "COMPUTER_USE_PLUGIN_ROOT"
+	pluginVersionEnvVar      = "COMPUTER_USE_PLUGIN_VERSION"
 	serverBinEnvVar          = "COMPUTER_USE_SERVER_BIN"
+	defaultLegacyPluginRoot  = ".codex/plugins/computer-use"
 	defaultPluginVersionsDir = ".codex/plugins/cache/openai-bundled/computer-use"
+	defaultPluginManifest    = ".codex-plugin/plugin.json"
 	defaultServerRelativeBin = "Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+	defaultTestPluginVersion = "1.0.750"
 )
 
 type commonFlags struct {
 	transport      string
 	pluginRoot     string
+	pluginVersion  string
 	serverBin      string
 	appServerBin   string
 	serverName     string
@@ -55,6 +60,10 @@ type toolCallSpec struct {
 type toolCallOutput struct {
 	Tool   string              `json:"tool"`
 	Result *mcp.CallToolResult `json:"result"`
+}
+
+type pluginManifest struct {
+	Version string `json:"version"`
 }
 
 type rpcSession struct {
@@ -322,6 +331,7 @@ func runCallSeq(ctx context.Context, args []string, stdout io.Writer, stderr io.
 func addCommonFlags(fs *flag.FlagSet, flags *commonFlags) {
 	fs.StringVar(&flags.transport, "transport", transportAuto, "Connection mode: auto, direct, or app-server")
 	fs.StringVar(&flags.pluginRoot, "plugin-root", "", "Path to the installed computer-use plugin root")
+	fs.StringVar(&flags.pluginVersion, "plugin-version", "", "Installed bundled computer-use version to select when auto-discovering; use latest for newest installed or host to leave app-server config untouched")
 	fs.StringVar(&flags.serverBin, "server-bin", "", "Path to the SkyComputerUseClient executable")
 	fs.StringVar(&flags.appServerBin, "app-server-bin", "", "Path to the Codex binary used for app-server proxy mode")
 	fs.StringVar(&flags.serverName, "server-name", defaultAppServerServerName, "Server name to target in app-server mode")
@@ -554,8 +564,12 @@ func resolveTarget(flags commonFlags) (resolvedTarget, error) {
 	}
 
 	if pluginRoot == "" {
-		var err error
-		pluginRoot, err = discoverPluginRoot()
+		pluginVersion, requirePluginVersion, err := resolvePluginVersionSelector(flags.pluginVersion)
+		if err != nil {
+			return resolvedTarget{}, err
+		}
+
+		pluginRoot, err = discoverPluginRoot(pluginVersion, requirePluginVersion)
 		if err != nil {
 			return resolvedTarget{}, err
 		}
@@ -619,13 +633,53 @@ func validateTarget(target resolvedTarget) (resolvedTarget, error) {
 	return target, nil
 }
 
-func discoverPluginRoot() (string, error) {
+func resolvePluginVersionSelector(flagValue string) (string, bool, error) {
+	explicit := firstNonEmpty(flagValue, os.Getenv(pluginVersionEnvVar))
+	if explicit == "" {
+		return defaultTestPluginVersion, false, nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(explicit)) {
+	case "latest", "newest", "auto", "host":
+		return "", false, nil
+	}
+
+	cleanVersion := filepath.Clean(explicit)
+	if strings.Contains(cleanVersion, string(filepath.Separator)) || cleanVersion == "." || cleanVersion == ".." {
+		return "", false, fmt.Errorf("invalid plugin version %q: pass a version directory name, not a path", explicit)
+	}
+
+	return cleanVersion, true, nil
+}
+
+func discoverPluginRoot(preferredVersion string, requirePreferred bool) (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 
 	parent := filepath.Join(homeDir, defaultPluginVersionsDir)
+	if preferredVersion != "" {
+		legacyPath, ok, err := discoverLegacyPluginRoot(homeDir, preferredVersion)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return legacyPath, nil
+		}
+
+		preferredPath := filepath.Join(parent, preferredVersion)
+		if _, err := os.Stat(filepath.Join(preferredPath, defaultServerRelativeBin)); err == nil {
+			return preferredPath, nil
+		} else if requirePreferred {
+			return "", fmt.Errorf(
+				"requested computer-use plugin version %q was not found under %q; pass --plugin-version latest to use newest installed",
+				preferredVersion,
+				parent,
+			)
+		}
+	}
+
 	entries, err := os.ReadDir(parent)
 	if err != nil {
 		return "", fmt.Errorf("read %q: %w", parent, err)
@@ -677,6 +731,47 @@ func discoverPluginRoot() (string, error) {
 	})
 
 	return candidates[0].path, nil
+}
+
+func discoverLegacyPluginRoot(homeDir string, preferredVersion string) (string, bool, error) {
+	if preferredVersion == "" {
+		return "", false, nil
+	}
+
+	root := filepath.Join(homeDir, defaultLegacyPluginRoot)
+	if _, err := os.Stat(filepath.Join(root, defaultServerRelativeBin)); err != nil {
+		return "", false, nil
+	}
+
+	version, ok, err := readPluginManifestVersion(root)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok || version != preferredVersion {
+		return "", false, nil
+	}
+
+	return root, true, nil
+}
+
+func readPluginManifestVersion(pluginRoot string) (string, bool, error) {
+	manifestPath := filepath.Join(pluginRoot, defaultPluginManifest)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read plugin manifest %q: %w", manifestPath, err)
+	}
+
+	var manifest pluginManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return "", false, fmt.Errorf("decode plugin manifest %q: %w", manifestPath, err)
+	}
+	if strings.TrimSpace(manifest.Version) == "" {
+		return "", false, nil
+	}
+	return strings.TrimSpace(manifest.Version), true, nil
 }
 
 func readToolArgs(argsJSON, argsFile string) (map[string]any, error) {
@@ -821,7 +916,8 @@ Examples:
 
 Environment:
   %s  Override the installed plugin root.
+  %s Override the installed bundled plugin version; use "latest" for newest installed or "host" for app-server host config.
   %s   Override the SkyComputerUseClient executable path.
   %s      Override the Codex binary used for app-server mode.
-`, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, pluginRootEnvVar, serverBinEnvVar, appServerBinEnvVar)
+`, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, cliName, pluginRootEnvVar, pluginVersionEnvVar, serverBinEnvVar, appServerBinEnvVar)
 }

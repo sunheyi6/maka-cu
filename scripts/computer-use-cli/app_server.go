@@ -128,13 +128,17 @@ func connectAppServer(ctx context.Context, flags commonFlags) (*appServerSession
 	if err != nil {
 		return nil, err
 	}
+	appServerArgs, err := resolveAppServerArgs(flags)
+	if err != nil {
+		return nil, err
+	}
 
 	threadCwd, err := resolveThreadCwd(flags)
 	if err != nil {
 		return nil, err
 	}
 
-	cmd := exec.Command(appServerBin, "app-server")
+	cmd := exec.Command(appServerBin, appServerArgs...)
 	cmd.Dir = threadCwd
 	cmd.Stderr = os.Stderr
 
@@ -165,6 +169,31 @@ func connectAppServer(ctx context.Context, flags commonFlags) (*appServerSession
 		return nil, fmt.Errorf("initialize app-server session: %w", err)
 	}
 	return session, nil
+}
+
+func resolveAppServerArgs(flags commonFlags) ([]string, error) {
+	args := []string{"app-server"}
+	if useHostAppServerConfig(flags) {
+		return args, nil
+	}
+
+	target, err := resolveTarget(flags)
+	if err != nil {
+		return nil, err
+	}
+
+	serverName := firstNonEmpty(flags.serverName, defaultAppServerServerName)
+	configPrefix := "mcp_servers." + serverName
+	return append(args,
+		"-c", configPrefix+".command="+strconv.Quote(target.ServerBin),
+		"-c", configPrefix+".args=[\"mcp\"]",
+		"-c", configPrefix+".cwd="+strconv.Quote(target.PluginRoot),
+	), nil
+}
+
+func useHostAppServerConfig(flags commonFlags) bool {
+	selector := firstNonEmpty(flags.pluginVersion, os.Getenv(pluginVersionEnvVar))
+	return strings.EqualFold(strings.TrimSpace(selector), "host")
 }
 
 func (s *appServerSession) Close() error {

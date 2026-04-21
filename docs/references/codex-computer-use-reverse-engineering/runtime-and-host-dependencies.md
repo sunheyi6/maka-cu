@@ -280,6 +280,36 @@ status=137
 - 私有 XPC / app group / bundle 发现机制
 - 或其他不直接暴露给任意外部进程的宿主内通信
 
+### 17. `1.0.755` 对 raw app-server helper 增加了 service-side sender authorization
+
+2026-04-21 复查官方 bundled `computer-use` `1.0.755` 时，同一台机器上出现了新的分叉行为：
+
+- `scripts/computer-use-cli` 的 `app-server` 模式仍然可以通过 `mcpServerStatus/list` 看到官方 `computer-use` 的 9 个 tools。
+- 但从外部 shell 启动一个临时 `codex app-server`，再调用 `mcpServer/tool/call list_apps`，返回：
+
+```text
+Apple event error -10000: Sender process is not authenticated
+```
+
+系统日志把这次失败分成了两段：
+
+- `SkyComputerUseClient` 通过 Apple Events 向 `SkyComputerUseService` 发送 `SkCu/SndR` 请求。
+- TCC 对这次 Apple Events 请求返回 `ACCESS GRANTED`。
+- 随后 service 侧出现多次签名 / trust 校验 activity，并输出 `Computer Use` 分类下的错误日志。
+- 失败路径没有出现 `Tracking Computer Use IPC client process ...`。
+
+对照同一轮里正常 Codex agent/tool 调用官方 `computer-use`：
+
+- `list_apps` 可以成功返回。
+- service 会先启动 `Codex AppServer Thread Events` observer，并连接到 `codex-ipc` socket。
+- service 随后记录 `Tracking Computer Use IPC client process ...`。
+
+所以当前更准确的判断是：
+
+- `codex app-server` 这个二进制由 OpenAI 签名，只能满足 `SkyComputerUseClient` 的 parent launch constraint。
+- 满足 parent launch constraint 并不等于 tool call 已经通过官方 Computer Use 的 sender authorization。
+- 官方 service 还要求请求来自它能认证并追踪的 Codex/ComputerUse IPC client；外部 helper 临时创建的 raw app-server thread 现在不再能稳定复用这条私有链路。
+
 ## 当前推断
 
 ### 1. client 很可能不是独立产品边界，而是宿主绑定的桥接层
@@ -297,6 +327,9 @@ status=137
 - macOS launch constraint 直接拦截外部自动化拉起
   - 证据：`CODESIGNING / Launch Constraint Violation`
   - 证据：`Has Parent Launch Constraints`
+- service-side sender authorization 拒绝 raw helper 发起的工具调用
+  - 证据：Apple Events/TCC 已 `ACCESS GRANTED` 后仍返回 `Sender process is not authenticated`
+  - 证据：成功路径会记录 active Computer Use IPC client，失败路径不会
 - 宿主集成层内部还依赖 Codex appserver / auth / plugin lifecycle
   - 证据：`CodexAppServerJSONRPCConnection`
   - 证据：`CodexAppServerAuthProvider`
@@ -323,7 +356,7 @@ status=137
 - `SkyComputerUseClient_Parent.coderequirement` 里的 parent launch constraint 除 team identifier 外还有没有更细的约束来源？
 - `turn-ended` 子命令除了会话清理，还会不会参与审批状态同步、idle timeout 刷新或后台 app 回收？
 - `approvedBundleIdentifiers` 的持久化位置在哪里，是否只保存在进程内？
-- 有没有办法通过受约束的父进程链、合法宿主 wrapper 或系统认可的启动方式绕过当前的 parent launch constraint？
+- 官方是否有计划暴露受支持的本地调试入口，让外部工具在不复用私有 sender authorization 的情况下探测 bundled `computer-use`？
 - `codex-ipc/ipc-501.sock` 上跑的具体 JSON-RPC 方法和认证过程是什么？
 
 ## 下一批分析建议
