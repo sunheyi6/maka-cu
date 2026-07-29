@@ -1,4 +1,4 @@
-# maka-cu Host Protocol (`maka.cu/1`)
+# maka-cu Host Protocol (`maka.cu/2`)
 
 The wire contract between the Maka Electron host (TypeScript) and `maka-cu`, the
 native macOS executor (Swift). Both sides are ours. This protocol answers to
@@ -12,6 +12,22 @@ model-facing prose: Maka's runtime owns every word the model reads.
 Two engineers who cannot talk to each other should be able to build the two ends
 from this document and have them interoperate. Where a rule exists because of a
 specific bug or measurement, the rule says so.
+
+### Why this is version 2
+
+`maka.cu/1` was built twice from this document, once in Swift and once in
+TypeScript, by engineers who could not talk to each other. The two ends did not
+interoperate, and six of the disagreements were holes in this text rather than
+bugs in either implementation: a refusal could not carry the fields §6.5 made
+mandatory (§6.5), hashes were written two ways in one document (§1.3), the key
+surface could not express what the caller actually holds (§6.4), apps were named
+in two namespaces (§5.1), one error code covered two situations (§6.2), and
+`element.frame` had one declared space and a different one in practice (§5.3).
+
+Each is closed below, and each closure names the defect that produced it. Five of
+them move the wire, so the version string moves with them: a `maka.cu/1` peer is
+not compatible and must fail the handshake rather than degrade (§2). There is no
+`maka.cu/1` peer worth interoperating with — no two of them agreed.
 
 ---
 
@@ -30,8 +46,8 @@ protocol does not differ gratuitously in framing, only in payload.
 - Responses MAY arrive out of order. The host correlates by `id` only. This is
   already true of the host implementation and is stated here so the executor is
   free to use lanes (§9) without a framing change when the capture stream lands.
-- Maximum encoded message size is `limits.maxResponseBytes` (§3). A response that
-  would exceed it MUST NOT be truncated silently — see §7.6.
+- Maximum encoded message size is `limits.maxResponseBytes` (§2). A response that
+  would exceed it MUST NOT be truncated silently — see §7.5.
 - The executor MUST emit exactly one response per request `id` it has read, and
   MUST NOT emit a response for an `id` it never received.
 
@@ -67,20 +83,73 @@ must see, they carry structured evidence, and a JSON-RPC error object has only
 `code`/`message`/`data` — which invites exactly the free-form-field archaeology
 this protocol exists to end.
 
+**The `ok: false` arm of a dispatch result carries the declared dispatch fields
+too.** `dispatch.element`, `dispatch.point` and `dispatch.key` answer with
+
+```json
+{ "ok": false, "toolCallId": "call_1",
+  "outcome": "refused", "tier": "ax", "path": "none",
+  "effect": "unverifiable",
+  "verification": { "method": "none", "observedChange": false },
+  "error": { "code": "…", "message": "…", "detail": { } } }
+```
+
+on both arms. `outcome`, `tier`, `path` and `effect` are required on the refusal
+arm exactly as they are on the success arm. In `maka.cu/1`
+this arm was `error` and nothing else, which put §6.5 ("four required fields on
+every dispatch result") in direct contradiction with §1.1, and the two
+implementations resolved it in opposite directions: the Swift executor's
+`refused()` computed `path` and `tier` and then dropped them on the floor at
+`emit(id:failure:)`, while the TypeScript host treated an `ok: true` result whose
+`outcome` was not `ok` as a protocol violation and SIGKILLed the child. Both were
+reading this document correctly. A refusal is an outcome the model must read, and
+§6.3 already assigns it `path: none`, so it was always meant to be expressible.
+
+No other method's `ok: false` arm carries these fields. `observe` refusing with
+`capture_failed` dispatched nothing, so an `outcome` on it would be a field with
+no producer.
+
 ### 1.2 No application text outside declared observation fields
 
 `error.message` is a fixed sentence chosen by `error.code`. `error.detail`
 contains enums and numbers only. The only fields in this protocol that may carry
 text belonging to the observed application are `element.label`,
 `element.value`, `element.placeholder`, `element.axIdentifier`,
-`snapshot.target.title`, `snapshot.selectedText.text`, and `app.name` —
-all of which the host already treats as untrusted content.
+`snapshot.target.title`, `snapshot.selectedText.text`, and the display names
+`appName` / `apps.list[].name` — all of which the host already treats as
+untrusted content, and none of which is ever used as a key (§5.1).
 
 This is a change of posture. The current backend carries a comment that
 `cua-driver does NOT redact secrets — the runtime redacts every backend-supplied
 message upstream` (`cua-driver-backend.ts:15-16`). Under this protocol the
 executor never puts application content in a diagnostic string, so there is no
 message-redaction pass to get wrong.
+
+### 1.3 One way to write a hash
+
+Every hash on this wire is the string `"<algorithm>:<lowercase hex>"`. In
+`maka.cu/2` the algorithm is always `sha256`, so every hash begins `sha256:`.
+
+This applies without exception to `element.digest`, `snapshot.windowDigest`,
+`image.sha256` — including the images in `screen.capture` (§6.6) and in the
+reserved capture stream (§10). The field name `image.sha256` is kept: it declares
+which algorithm the prefix is required to state, and renaming it would break the
+wire to buy nothing.
+
+Bare hex is not accepted anywhere. A host comparing hashes computes its own
+digest and prefixes it before comparing; it MUST NOT strip a prefix, MUST NOT
+accept both forms, and MUST NOT compare only the tail. A bare-hex value from the
+executor is a protocol violation like any other undeclared shape (§8).
+
+The rule exists because `maka.cu/1` wrote both forms in one document — bare hex
+in §5, §6.6 and §8, `"sha256:c40f…"` in §4.3 and the element example — and both
+implementations were consistent with the half they read. `maka-cu` emits the
+prefixed form everywhere (`HostDigest.sha256` prefixes; `HostImageStore` uses it
+for image bytes too), while the host verified an image with
+`createHash('sha256').update(bytes).digest('hex')` and compared for exact
+equality. Every screenshot therefore mismatched, and the host's response to a
+mismatch is to declare the session compromised and kill the executor. The
+executor is already correct; the host is the side that changes.
 
 ---
 
@@ -95,7 +164,7 @@ message-redaction pass to get wrong.
 {
   "jsonrpc": "2.0", "id": 1, "method": "host.hello",
   "params": {
-    "protocol": "maka.cu/1",
+    "protocol": "maka.cu/2",
     "host": { "name": "maka", "version": "0.9.3" },
     "hostPid": 8123,
     "imageDir": "/var/folders/…/maka-cu-images-8123",
@@ -122,7 +191,7 @@ message-redaction pass to get wrong.
 ```json
 {
   "ok": true,
-  "protocol": "maka.cu/1",
+  "protocol": "maka.cu/2",
   "executor": { "name": "maka-cu", "version": "0.4.0", "commit": "1747868" },
   "pid": 8140,
   "capabilities": {
@@ -159,7 +228,7 @@ executor implements, it MUST answer
 ```json
 { "jsonrpc": "2.0", "id": 1,
   "error": { "code": -32000, "message": "protocol_version_mismatch",
-             "data": { "supported": ["maka.cu/1"] } } }
+             "data": { "supported": ["maka.cu/2"] } } }
 ```
 
 then flush stdout and exit with status `78` (`EX_CONFIG`). The host MUST classify
@@ -167,6 +236,12 @@ this as `service_mismatch` and MUST NOT retry — `CuaDriverService.startWithBud
 already treats `service_mismatch` as non-retryable
 (`cua-driver-service.ts:200-203`). Silent degradation to a subset is forbidden in
 both directions.
+
+`supported` lists `maka.cu/2` and nothing else. `maka.cu/1` is withdrawn, not
+deprecated: the parts of it that moved are exactly the parts the two `maka.cu/1`
+implementations disagreed about, so a peer still speaking it is a peer whose
+behaviour on those points is unknown. Accepting it back would reintroduce every
+split this version closes.
 
 ---
 
@@ -304,10 +379,13 @@ make every edit past character 500 invisible to the check.
 Ancestor roles are capped at 8 levels root-ward. Sibling index is the element's
 position among its parent's traversed children.
 
-The digest is exposed to the host as `element.digest`, and the host MUST echo it
-in every element dispatch (§6.1). Echoing is not redundant with the executor's
-own record: it catches a host that has mixed up two elements from two snapshots,
-which the executor's record by construction cannot.
+The digest is exposed to the host as `element.digest` — written the one way §1.3
+declares, like every other hash here — and the host MUST echo it in every element
+dispatch (§6.1). Echoing is not redundant with the executor's own record: it
+catches a host that has mixed up two elements from two snapshots, which the
+executor's record by construction cannot. When the echo does not match, the
+executor answers `element_digest_mismatch`, which is a different diagnosis from
+both `element_unknown` and `element_changed` — see §6.2.
 
 Window digest = SHA-256 over the sorted set of every element's digest, plus the
 window bounds and title. Exposed as `snapshot.windowDigest` and echoed by point
@@ -335,8 +413,7 @@ than none.
    re-observe, not to tell the user the control vanished.
    `maka-cu` already carries Electron-specific click handling
    (`ComputerUseService.swift:372-413`), which is evidence that this app class is
-   the hard one — but the invalidation rate has not been measured. See open
-   questions.
+   the hard one — but the invalidation rate has not been measured. See §14.
 
 3. **Identity is not reachability.** All three checks pass on an element behind a
    sheet, in a hidden tab, or on another Space. Occlusion is a separate check
@@ -354,7 +431,61 @@ than none.
 
 ## 5. Observation
 
-### `observe`
+### 5.1 One namespace for naming an app
+
+There is exactly one string that names an app on this wire, and it is called
+`appId`.
+
+- `appId` is the bundle identifier when the process has one, otherwise
+  `pid:<n>`. That is the host's existing fallback (`cua-driver-backend.ts:1170`),
+  moved to the side that knows.
+- `apps.list`, `window.list`, `snapshot.target` and the `apps.launch` result all
+  carry it, spelled the same way, for the same process.
+- `{ "kind": "app", "app": … }` (§5.2) takes an `appId` and nothing else. The
+  executor resolves it by exact string match against `appId`. It MUST NOT match
+  against `appName`, against `snapshot.target.title`, or against any prefix or
+  case-folded form of either.
+- `appName` is a display string. It is untrusted application content (§1.2), it
+  is localised, two apps may share one, and it is never a key.
+- There is no `bundleId` field anywhere on this wire. It was a second spelling of
+  the same fact, and a second spelling is what this section exists to remove; a
+  caller that wants to know whether the process has a bundle id reads whether
+  `appId` starts with `pid:`. The host MUST NOT hand the model two app identifier
+  strings, because then the model has to guess which one to echo back.
+
+The single exception is `apps.launch`'s **request** `app`, which may be a bundle
+id or a human name, because an app that is not running has never appeared in
+`apps.list` and so has no `appId` the caller could have learned. The executor
+resolves it through LaunchServices and returns the resolved `appId`; every later
+call uses that. This is what deletes the host's `isBundleId` regex sniff
+(`cua-driver-backend.ts:1676-1682`), which guessed a namespace from the shape of
+a string.
+
+**Why the rule is stated this baldly.** In `maka.cu/1` `apps.list` returned
+bundle ids, `window.list` carried only `appName`, and nothing said which of the
+two a caller's `app` string was. The host built its `appId` as
+`bundleId ?? appName ?? pid:<n>` and then resolved a caller's `app` against
+`window.list`'s `appName` and `title` — so for every app that has a bundle id,
+the string the host handed out could never match the strings it matched against,
+and every `{app, windowId}` observation of such an app was refused. A reviewer
+reproduced it on the first try. `cua-driver` never had this bug because it used
+one namespace, the app *name*, in both places (`appIdForWindow` feeds both the
+`apps.list` key and the window match). One namespace is the fix; bundle id is the
+better one to standardise on, because a display name is neither unique nor stable
+across locales.
+
+Which side changes: both. The executor adds `appId` to `window.list` and
+`snapshot.target` and resolves `{kind: "app"}` on it. The host stops matching on
+`appName`/`title` and passes `appId` through unaltered.
+
+When the host is given both an app string and a window id, it resolves the window
+id — exact, numeric — and then requires that window's `appId` to equal the app
+string. Disagreement is `target_missing`, because no window satisfies the pair;
+honouring one input and discarding the other would be acting on a target the
+caller did not name. This is not the old over-strict rule, which required both to
+match when the caller had sent only one (§5.2).
+
+### 5.2 `observe`
 
 ```json
 { "method": "observe",
@@ -371,16 +502,20 @@ than none.
 `target` is a **tagged union**, never a bag of optional fields:
 
 ```json
-{ "kind": "app",    "app": "Notes" }
+{ "kind": "app",    "app": "com.apple.Notes" }
 { "kind": "window", "pid": 4711, "windowId": 90210 }
 ```
 
-`{ "kind": "app" }` resolves to the app's frontmost usable window and is
-ambiguous by design; `{ "kind": "window" }` is exact. Optional `app` *and*
-optional `windowId` in one object is how a real-machine failure happened: the
-contract said "app **or** window\_id" while the harness required both to match,
-so a compliant model could not pass. A tagged union cannot express that
-disagreement.
+`app` is an `appId` (§5.1). `{ "kind": "app" }` resolves to the app's frontmost
+usable window and is ambiguous by design; `{ "kind": "window" }` is exact.
+Optional `app` *and* optional `windowId` in one object is how a real-machine
+failure happened: the contract said "app **or** window\_id" while the harness
+required both to match, so a compliant model could not pass. A tagged union
+cannot express that disagreement.
+
+The **executor** resolves `{ "kind": "app" }`. It owns the window inventory and
+the z-order, and the host that tried to pre-resolve an app string against
+`window.list` is the host that invented title matching to make it work (§5.1).
 
 Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
 `limits`. A value above the limit is `-32602`, not a silent clamp.
@@ -396,7 +531,7 @@ Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
     "target": {
       "pid": 4711,
       "windowId": 90210,
-      "bundleId": "com.apple.Notes",
+      "appId": "com.apple.Notes",
       "appName": "Notes",
       "title": "Untitled",
       "bounds": { "x": 0, "y": 25, "width": 1200, "height": 800 },
@@ -413,7 +548,7 @@ Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
       "widthPx": 2400,
       "heightPx": 1600,
       "byteLength": 743210,
-      "sha256": "9d81…",
+      "sha256": "sha256:9d81…",
       "scale": 2.0
     },
     "displays": [
@@ -477,7 +612,12 @@ the window list is read.
   `maxTextChars`. An empty array is not omitted, so "was anything cut" is a
   field read, not a length comparison.
 
-**Coordinate spaces, declared once.**
+**Truncation is never silent.** `truncated.elements` is `true` when the tree hit
+`maxElements`, `truncated.depth` when it hit `maxDepth`. A truncated tree is
+still a valid snapshot with valid tokens; the host decides whether to re-observe
+with a higher bound.
+
+### 5.3 Coordinate spaces, declared once
 
 | field | space |
 | --- | --- |
@@ -493,18 +633,37 @@ driver's own `scale_factor` is unreliable. Declaring the measured value removes
 the host's derivation, and with it the class of bug where a click lands a quarter
 of the way into a control.
 
-The two frame conventions differ from what the host does today —
-`cua-frame-state.ts:177-190` converts *screen*-coordinate element frames through
-the window because the driver reports them in screen space. Under this protocol
-`element.frame` is window-local, which is what `maka-cu` already computes
-(`localFrame` / `windowRelativeFrame`), and that conversion block goes away.
+**`element.frame` stays window-local, and the host converts it exactly once.**
+The wire is window-local because that is what `maka-cu` already computes
+(`localFrame` / `windowRelativeFrame`) and because a window-local rectangle stays
+correct when the window moves between observe and read.
 
-**Truncation is never silent.** `truncated.elements` is `true` when the tree hit
-`maxElements`, `truncated.depth` when it hit `maxDepth`. A truncated tree is
-still a valid snapshot with valid tokens; the host decides whether to re-observe
-with a higher bound.
+The field it lands in on the host, `CuObservedElement.frame`, is **screen**
+logical points, for every backend. `validateSemanticElementVisibility` compares
+its centre against `window.bounds` and feeds it to `topWindowAtPoint`, both in
+screen space; `bindCuaSemanticActionToObservation` subtracts the window origin
+from it (`cua-frame-state.ts:171-190`); and the same rectangle is printed to the
+model beside `snapshot.target.bounds`, which is screen space. Two spaces in one
+field, chosen by whichever backend filled it, is the defect: the `cua-driver`
+backend passes screen frames straight through, and a host that also passes
+`maka.cu` window-local frames straight through makes every consumer wrong by the
+window's origin — an agent cursor drawn at the wrong place, and an occlusion
+check that refuses a visible control.
 
-### `window.list`
+So: the conversion is `screen = element.frame + snapshot.target.bounds.origin`,
+and it happens in the one function that turns a `snapshot` into a
+`CuObservation`, where both values are in hand. Nowhere else.
+
+**How the host knows which space it is holding: from the type, never from the
+call site.** A rectangle inside the protocol's own element type is window-local;
+a rectangle inside `CuObservedElement` is screen. No function may hold one and
+treat it as the other, and the conversion function is the only place both types
+appear. A comment claiming a space is not a mechanism — the `elementFrame`
+parameter in `cua-frame-state.ts` is documented as "window-local screenshot
+pixels" eight lines above the code that treats it as screen points, and both
+statements shipped.
+
+### 5.4 `window.list`
 
 ```json
 { "method": "window.list", "params": { "session": "s-01J…" } }
@@ -513,35 +672,38 @@ with a higher bound.
 ```json
 { "ok": true,
   "windows": [
-    { "pid": 4711, "windowId": 90210, "appName": "Notes", "title": "Untitled",
+    { "pid": 4711, "windowId": 90210, "appId": "com.apple.Notes",
+      "appName": "Notes", "title": "Untitled",
       "bounds": { "x": 0, "y": 25, "width": 1200, "height": 800 },
       "layer": 0, "zIndex": 3, "onScreen": true, "displayId": "69732928" }
   ] }
 ```
 
 Ordered front-to-back. `zIndex` is monotonically decreasing along the array; the
-executor MUST NOT emit ties. The host uses this for occlusion decisions and for
-resolving `{ "kind": "app" }` targets.
+executor MUST NOT emit ties. `appId` is required and is the same namespace
+`apps.list` returns (§5.1); its absence here is what made an app string
+unresolvable against this list. The host uses this list for occlusion decisions
+and for joining a window id to its pid — not for resolving `{ "kind": "app" }`,
+which the executor does (§5.2).
 
-### `apps.list`
+### 5.5 `apps.list`
 
 ```json
 { "ok": true,
   "apps": [
     { "appId": "com.apple.Notes", "pid": 4711, "name": "Notes",
-      "bundleId": "com.apple.Notes", "windowCount": 2, "running": true }
+      "windowCount": 2, "running": true }
   ] }
 ```
 
-Maps directly onto `CuAppSummary`. `appId` is the bundle id where one exists,
-otherwise `pid:<n>` — the host's existing fallback
-(`cua-driver-backend.ts:1170`), moved to the side that knows.
+Maps directly onto `CuAppSummary`. `appId` is defined once in §5.1; `name` is the
+display string and is never matched against.
 
 Note what is *not* here: `maka-cu`'s `listApps()` currently returns a rendered
 text catalogue (`ComputerUseService.swift:420-426`). Rendered text is model-facing
 prose. It goes.
 
-### `permissions.check`
+### 5.6 `permissions.check`
 
 ```json
 { "method": "permissions.check", "params": { "prompt": false } }
@@ -560,7 +722,7 @@ and has to guess which it got (`cua-driver-backend.ts:1898-1899`); this says.
 action start because a user can revoke at any time
 (`computer-use-types.ts:192-194`), and a prompt there would be a dialog storm.
 
-### `apps.launch`
+### 5.7 `apps.launch`
 
 ```json
 { "method": "apps.launch",
@@ -569,13 +731,16 @@ action start because a user can revoke at any time
 
 ```json
 { "ok": true,
-  "pid": 4711, "bundleId": "com.apple.Notes", "name": "Notes",
+  "pid": 4711, "appId": "com.apple.Notes", "name": "Notes",
   "foregroundTaken": false,
   "windows": [ { "windowId": 90210, "title": "Untitled" } ],
   "waited": { "ms": 3200, "reason": "window_appeared" }
 }
 ```
 
+- `params.app` is the one place a display name is legal (§5.1), because an app
+  that is not running has no `appId` the caller could have learned. The result's
+  `appId` is the resolved one, and every later call uses that.
 - `foregroundTaken` is declared, not inferred. `CuLaunchedApp.focusHeld` is
   currently absent when the driver simply did not check
   (`computer-use-types.ts:64-68`) — an absent boolean that means "unknown" is a
@@ -689,12 +854,20 @@ must be reported even though the frame after it could not be.
 ```json
 { "ok": false,
   "toolCallId": "call_1",
+  "outcome": "refused",
+  "tier": "ax",
+  "path": "none",
+  "effect": "unverifiable",
+  "verification": { "method": "none", "observedChange": false },
   "error": {
     "code": "element_changed",
     "message": "the element no longer matches the snapshot it was bound to",
     "detail": { "changed": ["value", "frame"] }
   } }
 ```
+
+The four declared fields are here for the reason §1.1 gives: a refusal is an
+outcome, and §6.5 requires them on every dispatch result, this arm included.
 
 `detail.changed` is a subset of the closed set
 `["role","subrole","axIdentifier","title","label","value","frame","actions","ancestors","siblingIndex"]`.
@@ -705,9 +878,10 @@ Codes, and what the host does with each:
 | code | meaning | host response |
 | --- | --- | --- |
 | `snapshot_unknown` / `_spent` / `_superseded` / `_expired` / `_evicted` | §4.1 | re-observe |
-| `element_unknown` | token is not in that snapshot | host bug; fail the turn |
+| `element_unknown` | the token is not in that snapshot at all | host bug; fail the turn |
+| `element_digest_mismatch` | the token is in that snapshot, but `expectElementDigest` is not the digest the snapshot recorded for it | host bug; discard the frame and re-observe, never re-send against it |
 | `element_released` | E1 failed — the AX reference is dead | re-observe (§4.4 item 2) |
-| `element_changed` | E3 failed | re-observe |
+| `element_changed` | E3 failed — the element's *current* digest differs from the recorded one | re-observe |
 | `process_replaced` | E2 failed — pid recycled | re-observe |
 | `element_not_actionable` | resolves, but does not expose the requested action | tell the model |
 | `element_disabled` | resolves and exposes it, but `enabled` is false | tell the model |
@@ -717,10 +891,45 @@ Codes, and what the host does with each:
 | `permission_missing` | Accessibility or Screen Recording revoked mid-session | surface to the user |
 | `screen_locked` | screen is locked | pause the session |
 | `physical_input_active` | the user is typing or moving the mouse | wait, re-observe |
-| `dispatch_refused` | attempted, the OS refused, nothing happened | tell the model |
+| `dispatch_refused` | attempted, the OS refused, nothing happened — or nothing was attempted because every path that could reach the target was forbidden (§6.3) | tell the model |
 | `outcome_unknown` | attempted, cannot tell whether it landed | spend the frame, re-observe |
 | `aborted` | cancelled before dispatch | none |
 | `not_implemented` | reserved method, this version | feature-detect |
+
+**Three situations, three codes, and why the third one is new.** The echoed
+digest (§4.3) exists to catch a host that mixed up two elements from two
+snapshots. `maka.cu/1` gave it nowhere to land: `element_unknown` was defined as
+"token is not in that snapshot", so the executor folded a *matching token with a
+mismatched echo* into it, and §7.1 sent both to `stale_frame`. The host then read
+"stale frame", re-observed, echoed the same wrong digest, and refused again —
+with no field anywhere in the exchange saying which of the two had happened. That
+is the collapse §4.1 refuses for snapshot states ("five distinct codes, not
+one"), applied one level down.
+
+Separated:
+
+- `element_unknown` — the host quoted a token this snapshot never minted.
+- `element_digest_mismatch` — the token is real, the echo is not the one recorded
+  for it. Almost always the host pairing a token from one snapshot with a digest
+  from another.
+- `element_changed` — both the token and the echo are right, and the element
+  itself moved on since observe. This is the only one of the three that describes
+  the world; the other two describe the host.
+
+The first two are host bookkeeping faults, so re-sending the same request against
+the same frame cannot help and the host MUST NOT do it. Both still map to
+`stale_frame` (§7.1) because that is the closest member of a closed set the
+executor does not get to extend, and because a fresh `observe` does clear a
+mixed-up pairing — but the host logs which code it received, since a repeated
+`element_digest_mismatch` is a bug in the host and a repeated `element_changed`
+is a busy screen. Which side changes: the executor, which today emits
+`element_unknown` for both.
+
+`dispatch_refused` covers both a path that was tried and an action that never
+left the executor, and the declared fields tell them apart without a second code:
+`path: "none"` with `detail.wouldRequirePath` means nothing was attempted, and a
+concrete `path` means it was attempted and the OS said no. That distinction only
+became expressible when refusals started carrying `path` (§1.1).
 
 ### 6.3 `dispatch.point`
 
@@ -809,11 +1018,92 @@ ported.
 ```
 
 `modifiers` is a closed set: `command`, `shift`, `option`, `control`, `fn`.
-`key` is a closed set of named keys plus single printable characters; the
-executor rejects anything else with `-32602` rather than guessing. `maka-cu`'s
-current key parsing goes through `KeyMapping.swift` from an xdotool-flavoured
-string; the closed set replaces it on the wire, whatever the internal mapping
-stays.
+`key` is one of the named keys below, or a single printable character in
+U+0021–U+007E. The executor rejects anything else with `-32602` rather than
+guessing.
+
+```
+Return  Tab  Space  Escape  Backspace  ForwardDelete
+Up  Down  Left  Right  Home  End  PageUp  PageDown
+F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12
+```
+
+Names are matched case-sensitively, exactly as spelled. The printable range
+starts at U+0021 and not U+0020 because `Space` is the only spelling of the space
+bar; two spellings of one key is the defect this whole section is about.
+
+Two names were dropped from the `maka.cu/1` executor's set
+(`hostNamedKeys`), each because it named a key ambiguously:
+
+- `Enter` — a second name for `Return` with no stated difference between them.
+- `Delete` — on a Mac keyboard the legend on the backspace key; in the
+  xdotool vocabulary the *forward* delete. One string, two destructive meanings,
+  no way to tell from the wire which the caller meant.
+
+`Backspace` and `ForwardDelete` are unambiguous and are the only way to say it.
+
+#### The host parses; the executor never sees a combination
+
+Maka's callers do not hold this closed set. `CuAction.key` is
+`{ type: 'key'; text: string }` and `CuSemanticAction.press_key` is
+`{ key: string }` — free-form, xdotool-flavoured, `"cmd+a"` and `"shift+Tab"`
+(`packages/core/src/computer-use.ts:161`,
+`packages/runtime/src/computer-use-types.ts:143-147`). The `maka.cu/1` host
+passed that string straight through as `key`, which the executor rejected with
+`-32602`: a JSON-RPC error, which per §1.1 never describes the world, arriving in
+answer to a request that described the world perfectly well.
+
+**The host parses, before it sends.** The reasons are all one reason: Maka's
+runtime owns every model-facing word (§13), so translating the model's dialect
+into the protocol's vocabulary is its job, and an executor that accepts free-form
+strings is an executor doing the loose parsing this protocol was written to
+delete.
+
+The grammar, exactly:
+
+```
+combo     := token ( "+" token )*
+token     := modifier | key
+modifier  := cmd | command | meta | super | ctrl | control
+           | alt | opt | option | shift | fn | function
+key       := named-key-alias | single character U+0021–U+007E
+```
+
+- Split on `"+"`. The **last** segment is the key; every earlier segment must be
+  a modifier. A string with no `"+"` is a bare key.
+- A trailing empty segment means the key is literally `"+"`: `"cmd++"` is
+  command-plus, `"+"` is plus. Any other empty segment is unparseable.
+- Modifier and alias matching is case-insensitive, and maps onto the wire's
+  closed sets: `cmd`/`command`/`meta`/`super` → `command`;
+  `ctrl`/`control` → `control`; `alt`/`opt`/`option` → `option`;
+  `shift` → `shift`; `fn`/`function` → `fn`.
+- Named-key aliases, also case-insensitive: `return`/`enter` → `Return`;
+  `esc` → `Escape`; `spc`/`space` → `Space`; `pgup` → `PageUp`;
+  `pgdn`/`pgdown` → `PageDown`; `up`/`arrowup` → `Up`, and the same for the other
+  three arrows; `f1`…`f12` → `F1`…`F12`; every other named key is its own alias.
+- A duplicated modifier is accepted once. Two non-modifier tokens is not a
+  chord this protocol can express, and is unparseable.
+
+**`delete` and `del` are deliberately unparseable.** They are the one alias a
+reasonable parser would add and the one that must not exist: `delete` reads as
+backspace to a Mac user and as forward-delete to xdotool, and picking either
+deletes the wrong character. The host refuses and tells the model to say
+`Backspace` or `ForwardDelete`.
+
+**What an unparseable string does.** The host fails the action with
+`unsupported_action` and a message naming the string it could not parse. It MUST
+NOT drop the modifiers and send the key alone, MUST NOT pick a nearest match, and
+MUST NOT send the raw string down and let the executor decide — a defaulted key
+press is an action the user did not ask for and cannot see. Nothing reaches
+`dispatch.key`.
+
+An unparseable `key` arriving at the executor is therefore a host bug, and
+`-32602` is the right answer to it.
+
+Which side changes: the host, which gains the parser and stops forwarding
+`action.key`/`action.text` verbatim. The executor drops `Enter` and `Delete` from
+its named set and otherwise stays as it is — `KeyMapping.swift`'s xdotool parsing
+remains an internal detail with no wire presence.
 
 **`focusToken` is required and verified.** The executor MUST confirm that the
 element currently focused in the target is the one named by `focusToken`, with a
@@ -828,7 +1118,8 @@ application, raise its window, or change the frontmost app.
 
 ### 6.5 Outcome, path, effect — the fields that used to be inferred
 
-Four required fields on every dispatch result, all closed sets, none optional:
+Four required fields on every dispatch result, all closed sets, none optional —
+on the `ok: true` arm and the `ok: false` arm alike (§1.1):
 
 | field | values |
 | --- | --- |
@@ -836,6 +1127,31 @@ Four required fields on every dispatch result, all closed sets, none optional:
 | `tier` | `ax`, `semantic-background`, `coordinate-background` |
 | `path` | table in §6.3 |
 | `effect` | `confirmed`, `unverifiable`, `suspected_noop` |
+
+`outcome` is what selects the arm, so the two can never disagree:
+
+| `outcome` | means | arm | `path` |
+| --- | --- | --- | --- |
+| `ok` | dispatched, and it completed | `ok: true` | the path used |
+| `refused` | nothing was dispatched; a precondition or a policy said no | `ok: false` | `none` |
+| `failed` | dispatched, the OS rejected it, nothing happened | `ok: false` | the path attempted |
+| `unknown` | dispatched, and we cannot prove whether it landed | `ok: false` | the path attempted |
+
+`ok: true` with any `outcome` other than `ok`, or `ok: false` with `outcome: ok`,
+is a protocol violation. Every `ok: false` arm also carries the `error` object
+whose code says which refusal it was (§6.2), and the pairing is fixed:
+`outcome_unknown` accompanies `unknown`; `dispatch_refused` accompanies `failed`
+when a path was attempted and `refused` when none was permitted; every other code
+accompanies `refused`.
+
+`tier` on a refusal is the tier the executor would have used, which is why
+`path: none` pairs with any tier — the §6.3 pairing table constrains only a path
+that was actually taken.
+
+`effect` on a refusal is `unverifiable` with `verification.method: "none"`:
+nothing was attempted, so nothing was checked, and §6.5's own distinction between
+*never checked* and *checked and inconclusive* has to hold here too. `failed` and
+`unknown` MUST NOT report `confirmed`.
 
 Plus `verification`, which is what makes `effect` readable:
 
@@ -884,7 +1200,7 @@ ended up deriving each from the other with three fallbacks.
 { "ok": true,
   "image": { "path": "…/cap_8812.png", "format": "png",
              "widthPx": 3024, "heightPx": 1964, "byteLength": 2_100_331,
-             "sha256": "…", "scale": 2.0 },
+             "sha256": "sha256:…", "scale": 2.0 },
   "displayId": "69732928",
   "capturedAt": 1753574400123 }
 ```
@@ -903,7 +1219,7 @@ The host maps mechanically. No inference, no message matching.
 
 | executor `code` | `ComputerUseErrorCode` |
 | --- | --- |
-| `snapshot_unknown`, `snapshot_expired`, `snapshot_evicted`, `element_unknown` | `stale_frame` |
+| `snapshot_unknown`, `snapshot_expired`, `snapshot_evicted`, `element_unknown`, `element_digest_mismatch` | `stale_frame` |
 | `snapshot_spent` | `duplicate_action` |
 | `snapshot_superseded` | `stale_epoch` |
 | `element_released`, `window_gone`, `process_replaced`, `app_not_found` | `target_missing` |
@@ -918,12 +1234,34 @@ The host maps mechanically. No inference, no message matching.
 | `outcome_unknown` | `outcome_unknown` |
 | `aborted` | `aborted` |
 | `timeout` | `timeout` |
-| `dispatch_refused` | **see open questions** |
+| `dispatch_refused` | `dispatch_refused` |
 
-`COMPUTER_USE_ERROR_CODES` has no member meaning *"the executor attempted the
-action and the OS refused it, and nothing happened"*. Today that collapses into
-`capture_failed` via `normalizeCuaDriverOutcome`'s default branch, which tells
-the model a screenshot failed when a button refused a press.
+**`COMPUTER_USE_ERROR_CODES` gains `dispatch_refused`.** This was the open
+question `maka.cu/1` flagged and left open; leaving it open is what produced two
+wrong answers. The set had no member meaning *"the executor attempted the action,
+the OS refused it, and nothing happened"*, so `normalizeCuaDriverOutcome`'s
+default branch sent it to `capture_failed` — telling the model a screenshot
+failed when a button refused a press — and the `maka.cu/1` host, reading the same
+table, chose `unsupported_action` instead.
+
+Neither is salvageable. `capture_failed` names the wrong subsystem.
+`unsupported_action` is already what `element_not_actionable` and
+`element_disabled` map to, and those are decided *before* anything is dispatched:
+collapsing them destroys the difference between "the element does not offer this"
+and "it offered it, we tried, the OS said no", which is the difference between
+"try something else" and "try again". That is the same collapse as §6.2, and it
+gets the same answer — a new member.
+
+What the host does with it:
+
+- Surfaces it to the model as an outcome, with the executor's `detail` (enums and
+  numbers only, §1.2) as evidence — including `wouldRequirePath` when nothing was
+  attempted (§6.3).
+- Does **not** re-observe automatically. A refused dispatch leaves the frame live
+  (§4.1), so the model may retry against the same frame with different arguments.
+- Does not treat it as a permission problem. `permission_missing` is a separate
+  code precisely so that "TCC is revoked" and "this control said no" do not get
+  the same recovery.
 
 ### 7.2 Cancellation
 
@@ -997,8 +1335,11 @@ Image file contract:
 - The executor writes into `imageDir` and nowhere else.
 - Filenames are executor-chosen and opaque. The host addresses them only by the
   `path` it was given.
-- `sha256` and `byteLength` are of the file's bytes as written. The host MAY
-  verify; a mismatch is a protocol violation.
+- `sha256` and `byteLength` are of the file's bytes as written, and `sha256` is
+  written the one way §1.3 declares — `"sha256:"` then lowercase hex. The host
+  MAY verify; a mismatch is a protocol violation, which is why the two sides
+  cannot be allowed to disagree about the spelling. They did, and every
+  screenshot mismatched.
 - **Lifetime is the snapshot's lifetime.** The executor deletes an image when its
   snapshot leaves the live set — spent, superseded, expired or evicted. The host
   must copy or consume before then; `limits.snapshotTtlMs` is therefore also the
@@ -1040,14 +1381,14 @@ finer and remains safe because the host's queue is still upstream of it.
 
 ---
 
-## 10. Capture stream (reserved, not implemented in v1)
+## 10. Capture stream (reserved, not implemented in `maka.cu/2`)
 
 Maka's picture-in-picture mirror repaints from the screenshot each action
 returns. A live mirror needs a stream, and this channel is request/response —
 so the stream is long-polling, the way Codex does it on its privileged channel
 (`AppStartCapture` then repeated `AppNextCaptureUpdate`).
 
-The method space is reserved now. In `maka.cu/1` all three return
+The method space is reserved now. In `maka.cu/2` all three return
 `{ "ok": false, "error": { "code": "not_implemented" } }` — a **domain** result,
 not `-32601`, so feature detection is a stable field read and the names can never
 be taken by something else.
@@ -1070,7 +1411,7 @@ be taken by something else.
 → { "ok": true, "released": { "frames": 30 } }
 ```
 
-What v1 already provides so this needs no protocol change:
+What `maka.cu/2` already provides so this needs no protocol change:
 
 - **Images are already references.** A 10 fps stream is path churn, not stdout
   churn.
@@ -1143,6 +1484,9 @@ Frame binding:
    had its label changed → `element_changed` with `detail.changed: ["label"]`.
 6. `expectElementDigest` from snapshot A used against a token from snapshot B →
    `element_unknown` (tokens are snapshot-scoped) — not a successful dispatch.
+   The sibling case, a token that *is* in the quoted snapshot carrying a digest
+   the snapshot did not record for it, is `element_digest_mismatch` — and the two
+   vectors must produce different codes, because `maka.cu/1` produced one.
 7. `strictness: "window"` refuses when an unrelated element in the window
    changed; `strictness: "element"` does not.
 8. A refused dispatch leaves the snapshot `live`; an `outcome_unknown` spends it.
@@ -1190,6 +1534,71 @@ Lifecycle:
 24. Killing the executor mid-dispatch produces `outcome_unknown` on the host, and
     `service_unavailable` for requests never written.
 
+Refusals carry the declared fields (§1.1, §6.5):
+
+25. Every `ok: false` dispatch result carries `outcome`, `tier`, `path`, `effect`
+    and `verification`; the executor emits them on the refusal path, and a
+    refusal missing any of them is rejected by the host as a protocol violation.
+    Asserted on a binding refusal (`element_changed`), a policy refusal
+    (`window_occluded`) and an attempted-and-rejected one (`dispatch_refused`).
+26. A refusal reports `outcome: "refused"`, `path: "none"`,
+    `effect: "unverifiable"` and `verification.method: "none"`; the host accepts
+    it, maps the error code, and does **not** tear the executor down. The
+    `maka.cu/1` host SIGKILLed on any non-`ok` outcome, so this vector fails
+    against it.
+27. `ok: true` with `outcome: "refused"`, and `ok: false` with `outcome: "ok"`,
+    are both protocol violations.
+
+Hashes (§1.3):
+
+28. `element.digest`, `snapshot.windowDigest` and `image.sha256` all match
+    `^sha256:[0-9a-f]{64}$` in the same response.
+29. A host verifying an image prefixes its own digest before comparing, and a
+    bare-hex `image.sha256` from the executor is a protocol violation rather than
+    a mismatch. This is the vector that fails on `maka.cu/1`: bare hex on one
+    side and prefixed on the other made every screenshot compare unequal, and the
+    host's response to an unequal image is teardown.
+
+Naming an app (§5.1):
+
+30. `apps.list`, `window.list`, `snapshot.target` and the `apps.launch` result
+    report the same `appId` for the same process.
+31. `observe` with `{ "kind": "app", "app": "<appId of a bundled app>" }`
+    resolves; the reviewer's reproduction — an `{app, windowId}` observation of a
+    bundle-identified app — succeeds instead of being refused.
+32. `observe` with an `app` that is a display name, not an `appId`, is
+    `app_not_found`; the executor does not fall back to matching `appName` or
+    `title`.
+33. `apps.launch` by display name returns the resolved `appId`, and a subsequent
+    `observe` with that `appId` resolves the launched window.
+
+Keys (§6.4):
+
+34. The host parses `"cmd+a"`, `"shift+Tab"`, `"Return"`, `"a"` and `"cmd++"`
+    into `{ key, modifiers }` on the closed sets; the raw string never reaches
+    the wire.
+35. `"delete"`, `"del"`, `"cmd+"` (empty final segment that is not a trailing
+    `"+"`), `"a+b"` and `"hyper+a"` fail the action with `unsupported_action`
+    before any request is sent — no defaulted key press, no dropped modifier.
+36. `dispatch.key` with `key: "cmd+a"` is `-32602` at the executor: the closed
+    set is closed, and a host that sent it has a bug.
+
+Coordinate space (§5.3):
+
+37. For a window whose `bounds.origin` is not `(0, 0)`, the host's
+    `CuObservedElement.frame` equals `element.frame + bounds.origin`. A snapshot
+    passed through unconverted fails this by exactly the window origin, which is
+    what the `maka.cu/1` host shipped.
+38. The occlusion check and the agent cursor read the same converted rectangle,
+    and an element at the far edge of a window at `x: 900` is not judged to be at
+    `x: 0` on the desktop.
+
+Refused, not unsupported (§7.1):
+
+39. A `dispatch_refused` result reaches the model as `dispatch_refused`, not as
+    `capture_failed` and not as `unsupported_action`, and the frame it quoted is
+    still live afterwards.
+
 ---
 
 ## 13. Deliberate exclusions
@@ -1212,3 +1621,22 @@ Lifecycle:
   `OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS` from the process environment. Every
   behavioural switch this protocol needs is a handshake parameter, so the wire
   says what the executor will do rather than the ambient environment.
+- **No `bundleId` alongside `appId`.** One namespace, §5.1.
+
+---
+
+## 14. Open questions
+
+`maka.cu/1` referred to this section from §4.4 and §7.1 and never contained it,
+which is how its one flagged question stayed open long enough for two
+implementations to answer it differently. What remains open is listed here and
+nowhere else.
+
+- **The Electron/Chromium `element_released` rate is unmeasured.** §4.4 item 2
+  states that tree-rebuilding applications can fail E1 on a control that is
+  visibly present, and that the correct host response is to re-observe. Nobody
+  has measured how often that happens per action in a real Electron window. Until
+  someone does, the host's retry budget for `element_released` is a guess, and
+  the protocol says nothing about what that budget should be.
+
+Closed since `maka.cu/1`: the `dispatch_refused` mapping, now §7.1.
