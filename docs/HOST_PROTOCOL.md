@@ -1431,11 +1431,20 @@ framing, the handshake, or the error space. `capabilities.captureStream` flips t
 
 ## 11. Process lifecycle
 
-**Start.** The host spawns the executor as a **direct child**. macOS attributes
-TCC grants through the responsibility chain, and a helper launched via
+**Start.** The host spawns the executor as a **direct child**, as
+`<executable> host` — the subcommand is not optional. macOS attributes TCC
+grants through the responsibility chain, and a helper launched via
 `open`/LaunchServices gets its own attribution and its own prompts. The host
 purges `imageDir`, spawns, sends `host.hello`, and treats any failure before a
 successful `session.begin` as a start failure.
+
+The subcommand is spelled out here because leaving it unsaid cost a debugging
+session: the same executable also serves `doctor`, `list-apps` and `snapshot`
+for a human at a terminal, and a bare invocation prints help and exits. Each
+side picked for itself, they disagreed, and the first live run reported an
+exhausted restart budget rather than a wrong argv. A host that spawns bare
+sees the child die before the handshake; that is a host bug, not a protocol
+negotiation, and there is nothing on the wire to catch it.
 
 **Death.** The host classifies in-flight requests by stage — already implemented
 in `cua-driver-service.ts:423-468`:
