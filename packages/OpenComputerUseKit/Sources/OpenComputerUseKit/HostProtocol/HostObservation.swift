@@ -159,6 +159,14 @@ public func hostWalkTree(
         "el_\(tokenPrefix)_\(index)"
     }
 
+    /// The live `AXParent` chain, or nil when the node has no element behind it
+    /// (fixtures and tests). Deliberately the same call the binding probe makes,
+    /// so the two can never be computed differently.
+    func liveAncestorRoles(_ node: HostAccessibilityNode) -> [String]? {
+        guard let element = node.axElement else { return nil }
+        return HostAX.ancestorRoles(of: element)
+    }
+
     func visit(
         _ node: HostAccessibilityNode,
         parentToken: String?,
@@ -206,7 +214,17 @@ public func hostWalkTree(
             untruncatedValue: node.value,
             frameInWindow: node.frameInWindow,
             actionNames: actions.map(\.rawValue),
-            ancestorRoles: ancestorRoles,
+            // Read the live parent chain, the same way `currentDigestInput`
+            // will read it at dispatch. The traversal's own chain is not the
+            // same thing: the walker elides wrapper nodes, and `AXParent` does
+            // not, so on any Chromium tree the two disagree and every dispatch
+            // is refused `element_changed` with `changed: ["ancestors"]` on an
+            // element nothing touched. Measured against Maka's own window,
+            // where it refused the first click of every run.
+            //
+            // `siblingIndex` two lines down already carries this lesson in its
+            // comment; ancestors were left on the other side of it.
+            ancestorRoles: liveAncestorRoles(node) ?? ancestorRoles,
             siblingIndex: siblingIndex
         )
 
