@@ -29,6 +29,10 @@ public func hostProcessStartTime(pid: pid_t) -> UInt64? {
 public struct HostWindowInfo: Equatable, Sendable {
     public let pid: pid_t
     public let windowId: CGWindowID
+    /// §5.1 — the one namespace. `appName` beside it is a display string and is
+    /// never matched against; its absence here is what made an app string
+    /// unresolvable against this list.
+    public let appId: String
     public let appName: String
     public let title: String?
     public let bounds: CGRect
@@ -62,6 +66,10 @@ public enum HostWindowInventory {
             return HostWindowInfo(
                 pid: pid,
                 windowId: CGWindowID(number.uint32Value),
+                appId: hostAppId(
+                    bundleIdentifier: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+                    pid: pid
+                ),
                 appName: info[kCGWindowOwnerName as String] as? String ?? "",
                 title: (title?.isEmpty ?? true) ? nil : title,
                 bounds: bounds,

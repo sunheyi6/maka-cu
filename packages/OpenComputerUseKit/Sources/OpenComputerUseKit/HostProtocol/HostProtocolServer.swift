@@ -125,6 +125,27 @@ struct HostCancelParams: Decodable {
     let id: Int
 }
 
+/// What the three dispatch methods have in common when they cannot be answered
+/// with a result: the id to echo, and the tier the executor would have used.
+/// §6.5 — `tier` on a refusal is that tier, which is why `path: none` pairs with
+/// any of them.
+protocol HostDispatchRequest {
+    var toolCallId: String { get }
+    var wouldUseTier: HostDispatchTier { get }
+}
+
+extension HostDispatchElementParams: HostDispatchRequest {
+    var wouldUseTier: HostDispatchTier { .ax }
+}
+
+extension HostDispatchPointParams: HostDispatchRequest {
+    var wouldUseTier: HostDispatchTier { .coordinateBackground }
+}
+
+extension HostDispatchKeyParams: HostDispatchRequest {
+    var wouldUseTier: HostDispatchTier { .coordinateBackground }
+}
+
 extension HostElementAction: Decodable {
     private enum Key: String, CodingKey {
         case kind
@@ -241,8 +262,14 @@ extension HostKeyAction: Decodable {
 }
 
 /// The named keys the executor will accept, plus single printable characters.
+///
+/// §6.4 — `Enter` and `Delete` are deliberately absent. `Enter` was a second name
+/// for `Return` with no stated difference; `Delete` is the legend on a Mac
+/// backspace key and the *forward* delete in the xdotool vocabulary, so one
+/// string named two destructive keys and the wire could not say which.
+/// `Backspace` and `ForwardDelete` are the only spellings.
 public let hostNamedKeys: Set<String> = [
-    "Return", "Enter", "Tab", "Space", "Escape", "Backspace", "Delete", "ForwardDelete",
+    "Return", "Tab", "Space", "Escape", "Backspace", "ForwardDelete",
     "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown",
     "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
 ]
@@ -256,7 +283,10 @@ public func hostKeyNameIsSupported(_ name: String) -> Bool {
         return false
     }
 
-    return scalar.value >= 0x20 && scalar.value < 0x7F
+    // §6.4 — the printable range starts at U+0021 and not U+0020 because `Space`
+    // is the only spelling of the space bar, and two spellings of one key is the
+    // defect that section exists to remove.
+    return scalar.value >= 0x21 && scalar.value <= 0x7E
 }
 
 // MARK: - Response payloads
@@ -289,6 +319,7 @@ struct HostWindowListResult: Encodable {
     struct Window: Encodable {
         let pid: Int32
         let windowId: UInt32
+        let appId: String
         let appName: String
         let title: String?
         let bounds: HostRect
@@ -306,7 +337,6 @@ struct HostAppsListResult: Encodable {
         let appId: String
         let pid: Int32
         let name: String
-        let bundleId: String?
         let windowCount: Int
         let running: Bool
     }
@@ -320,7 +350,10 @@ struct HostPermissionsResult: Encodable {
 
 struct HostAppsLaunchResult: Encodable {
     let pid: Int32
-    let bundleId: String?
+    /// §5.7 — the resolved `appId`. The request may name an app that is not
+    /// running, and a display name is legal there precisely because such an app
+    /// has no `appId` the caller could have learned; every later call uses this.
+    let appId: String
     let name: String
     let foregroundTaken: Bool
     let windows: [LaunchedWindow]
@@ -352,7 +385,10 @@ struct HostDispatchResult: Encodable {
     let verification: HostVerification
     let settle: HostSettleReport
     let snapshot: HostSnapshotPayload?
-    let postObservationError: HostDomainErrorCode?
+    /// §6.1 — an error *object*, the same shape as every other `error` on this
+    /// wire. A bare code string here made the one field that reports a failed
+    /// post-observation the only failure the host had to parse differently.
+    let postObservationError: HostDomainErrorPayload?
 }
 
 struct HostScreenCaptureResult: Encodable {
@@ -363,13 +399,16 @@ struct HostScreenCaptureResult: Encodable {
 
 // MARK: - Server
 
-/// The `maka.cu/1` executor. One reader, serial lanes, one response per request
+/// The `maka.cu/2` executor. One reader, serial lanes, one response per request
 /// id. Everything the host needs to reason about is a declared field; nothing is
 /// inferred from a message string on either side.
 public final class HostProtocolServer {
     let limits = HostLimits()
     private let capabilities = HostCapabilities()
     private let output: HostOutputWriter
+    /// Every read of the live machine goes through this, so the §4 binding rules
+    /// can be exercised without a desktop. See `HostSystemEnvironment`.
+    let environment: HostSystemEnvironment
     private let lanes = HostLaneScheduler()
     let cancellations = HostCancellationRegistry()
 
@@ -385,8 +424,12 @@ public final class HostProtocolServer {
     /// after a protocol mismatch, and the host must not retry that classification.
     public private(set) var exitStatus: Int32 = 0
 
-    public init(output: HostOutputWriter = HostOutputWriter()) {
+    public init(
+        output: HostOutputWriter = HostOutputWriter(),
+        environment: HostSystemEnvironment = HostLiveEnvironment()
+    ) {
         self.output = output
+        self.environment = environment
     }
 
     // MARK: Run loop
@@ -407,8 +450,22 @@ public final class HostProtocolServer {
             }
         }
 
+        beginShutdown()
         _ = lanes.waitForCompletion(timeout: .now() + .milliseconds(limits.shutdownGraceMs))
         shutdownSessions()
+    }
+
+    /// §11 — stop accepting work, and answer everything already queued rather
+    /// than letting the grace deadline swallow the response. A request the
+    /// executor has read owes exactly one response (§1), and one that is still
+    /// sitting on a lane when the host asks us to stop has not been dispatched,
+    /// so `aborted` is the truthful one.
+    func beginShutdown() {
+        stateLock.lock()
+        shuttingDown = true
+        stateLock.unlock()
+
+        lanes.beginShutdown()
     }
 
     /// Split from `run()` so the framing, handshake gate and routing can be
@@ -477,10 +534,14 @@ public final class HostProtocolServer {
         case "apps.list":
             lanes.enqueue(.control) { [weak self] in
                 self?.handleAppsList(id: id)
+            } ifShuttingDown: { [weak self] in
+                self?.emit(id: id, failure: HostDomainError(.aborted))
             }
         case "window.list":
             lanes.enqueue(.control) { [weak self] in
                 self?.handleWindowList(id: id)
+            } ifShuttingDown: { [weak self] in
+                self?.emit(id: id, failure: HostDomainError(.aborted))
             }
         case "observe":
             enqueueTargetLane(id: id, data: data, handler: handleObserve)
@@ -500,6 +561,8 @@ public final class HostProtocolServer {
             // by something else.
             lanes.enqueue(.control) { [weak self] in
                 self?.emit(id: id, failure: HostDomainError(.notImplemented))
+            } ifShuttingDown: { [weak self] in
+                self?.emit(id: id, failure: HostDomainError(.aborted))
             }
         default:
             emit(id: id, rpcError: HostRPCError(.unknownMethod))
@@ -519,6 +582,8 @@ public final class HostProtocolServer {
 
         lanes.enqueue(.control) {
             handler(id, params)
+        } ifShuttingDown: { [weak self] in
+            self?.emitAborted(id: id, params: params)
         }
     }
 
@@ -533,6 +598,8 @@ public final class HostProtocolServer {
 
         lanes.enqueue(.misc) {
             handler(id, params)
+        } ifShuttingDown: { [weak self] in
+            self?.emitAborted(id: id, params: params)
         }
     }
 
@@ -549,7 +616,25 @@ public final class HostProtocolServer {
 
         lanes.enqueue(targetLane(for: params)) {
             handler(id, params)
+        } ifShuttingDown: { [weak self] in
+            self?.emitAborted(id: id, params: params)
         }
+    }
+
+    /// §11 — queued-but-unstarted work is answered with `aborted`, and a dispatch
+    /// is answered on the arm §1.1 declares rather than as a bare error.
+    private func emitAborted<Params>(id: Int, params: Params) {
+        guard let dispatch = params as? HostDispatchRequest else {
+            emit(id: id, failure: HostDomainError(.aborted))
+            return
+        }
+
+        emit(
+            id: id,
+            toolCallId: dispatch.toolCallId,
+            dispatchFailure: HostDomainError(.aborted),
+            tier: dispatch.wouldUseTier
+        )
     }
 
     private func targetLane<Params>(for params: Params) -> HostLaneScheduler.Lane {
@@ -622,6 +707,38 @@ public final class HostProtocolServer {
 
     func emit(id: Int?, failure: HostDomainError, toolCallId: String? = nil) {
         guard let line = try? HostProtocolCodec.failureResponse(id: id, error: failure, toolCallId: toolCallId) else {
+            return
+        }
+        output.write(line)
+    }
+
+    /// §1.1 — the `ok: false` arm of a dispatch result carries `outcome`, `tier`,
+    /// `path`, `effect` and `verification` beside the error. §6.5 fixes the
+    /// pairing: `refused` means nothing was dispatched and takes `path: none`,
+    /// while `failed` and `unknown` name the path that was attempted.
+    func emit(
+        id: Int,
+        toolCallId: String,
+        dispatchFailure: HostDomainError,
+        outcome: HostDispatchOutcome = .refused,
+        tier: HostDispatchTier,
+        path: HostDispatchPath = .none,
+        verdict: HostEffectVerdict = HostEffectVerdict(
+            effect: .unverifiable,
+            verification: HostVerification(method: .none, observedChange: false)
+        )
+    ) {
+        let payload = HostDispatchFailureResult(
+            toolCallId: toolCallId,
+            outcome: outcome,
+            tier: tier,
+            path: path,
+            effect: verdict.effect,
+            verification: verdict.verification,
+            error: dispatchFailure
+        )
+
+        guard let line = try? HostProtocolCodec.dispatchFailureResponse(id: id, failure: payload) else {
             return
         }
         output.write(line)
@@ -722,10 +839,7 @@ public final class HostProtocolServer {
                 return
             }
 
-            self.stateLock.lock()
-            self.shuttingDown = true
-            self.stateLock.unlock()
-
+            self.beginShutdown()
             _ = self.lanes.waitForCompletion(timeout: .now() + .milliseconds(self.limits.shutdownGraceMs))
             self.shutdownSessions()
             exit(0)
@@ -805,7 +919,7 @@ public final class HostProtocolServer {
         // §5 — `prompt: false` MUST NOT raise a TCC dialog. The host calls this at
         // every action start because a user can revoke at any time, and a prompt
         // there would be a dialog storm.
-        let diagnostics = PermissionDiagnostics.current()
+        let diagnostics = environment.permissions()
         if params.prompt == true, !diagnostics.accessibilityTrusted {
             PermissionSupport.requestAccessibilityPrompt()
         }
@@ -831,10 +945,11 @@ public final class HostProtocolServer {
     }
 
     private func handleWindowList(id: Int) {
-        let windows = HostWindowInventory.onScreenWindows().map {
+        let windows = environment.onScreenWindows().map {
             HostWindowListResult.Window(
                 pid: $0.pid,
                 windowId: $0.windowId,
+                appId: $0.appId,
                 appName: $0.appName,
                 title: $0.title,
                 bounds: HostRect($0.bounds),
@@ -849,17 +964,14 @@ public final class HostProtocolServer {
     }
 
     private func handleAppsList(id: Int) {
-        let windows = HostWindowInventory.onScreenWindows()
-        let apps = AppDiscovery.runningApps().map { app in
+        let windows = environment.onScreenWindows()
+        let apps = environment.runningApps().map { app in
             HostAppsListResult.App(
-                // §5 — bundle id where one exists, otherwise `pid:<n>`. The
-                // host's existing fallback, moved to the side that knows.
-                appId: app.bundleIdentifier ?? "pid:\(app.pid)",
+                appId: app.appId,
                 pid: app.pid,
                 name: app.name,
-                bundleId: app.bundleIdentifier,
                 windowCount: windows.filter { $0.pid == app.pid && $0.layer == 0 }.count,
-                running: !app.runningApplication.isTerminated
+                running: app.running
             )
         }
 

@@ -52,19 +52,17 @@ struct HostEmptyPayload: Encodable {
 
 enum HostNoKey: CodingKey {}
 
-struct HostFailureResult: Encodable {
+/// §1.1 — the error object every `ok: false` arm carries, and the shape
+/// `postObservationError` takes too (§6.1). One encoder, so the two cannot drift
+/// into a bare string on one side and an object on the other.
+struct HostDomainErrorPayload: Encodable {
     let error: HostDomainError
-    /// Echoed on dispatch results only; §6 makes it the one concession to host
-    /// bookkeeping so a trace line joins to a tool call without a side table.
-    let toolCallId: String?
 
-    private enum Key: String, CodingKey {
-        case ok
-        case error
-        case toolCallId
+    init(_ error: HostDomainError) {
+        self.error = error
     }
 
-    private enum ErrorKey: String, CodingKey {
+    private enum Key: String, CodingKey {
         case code
         case message
         case detail
@@ -80,16 +78,10 @@ struct HostFailureResult: Encodable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: Key.self)
-        try container.encode(false, forKey: .ok)
-        if let toolCallId {
-            try container.encode(toolCallId, forKey: .toolCallId)
-        }
+        try container.encode(error.code, forKey: .code)
+        try container.encode(error.message, forKey: .message)
 
-        var errorContainer = container.nestedContainer(keyedBy: ErrorKey.self, forKey: .error)
-        try errorContainer.encode(error.code, forKey: .code)
-        try errorContainer.encode(error.message, forKey: .message)
-
-        var detail = errorContainer.nestedContainer(keyedBy: DetailKey.self, forKey: .detail)
+        var detail = container.nestedContainer(keyedBy: DetailKey.self, forKey: .detail)
         switch error.detail {
         case .none:
             break
@@ -103,6 +95,67 @@ struct HostFailureResult: Encodable {
         case .missingPermission(let permission):
             try detail.encode(permission, forKey: .permission)
         }
+    }
+}
+
+struct HostFailureResult: Encodable {
+    let error: HostDomainError
+    /// Echoed on dispatch results only; §6 makes it the one concession to host
+    /// bookkeeping so a trace line joins to a tool call without a side table.
+    let toolCallId: String?
+
+    private enum Key: String, CodingKey {
+        case ok
+        case error
+        case toolCallId
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        try container.encode(false, forKey: .ok)
+        if let toolCallId {
+            try container.encode(toolCallId, forKey: .toolCallId)
+        }
+
+        try container.encode(HostDomainErrorPayload(error), forKey: .error)
+    }
+}
+
+/// §1.1 — the `ok: false` arm of a dispatch result carries the declared dispatch
+/// fields too. `maka.cu/1` wrote this arm as `error` and nothing else, which put
+/// §6.5's "four required fields on every dispatch result" in direct contradiction
+/// with §1.1: `refused()` computed `path` and `tier` and then dropped them here,
+/// and a conformant host rejects every refusal that reaches it without them.
+struct HostDispatchFailureResult: Encodable {
+    let toolCallId: String
+    let outcome: HostDispatchOutcome
+    let tier: HostDispatchTier
+    let path: HostDispatchPath
+    let effect: HostDispatchEffect
+    let verification: HostVerification
+    let error: HostDomainError
+
+    private enum Key: String, CodingKey {
+        case ok
+        case toolCallId
+        case outcome
+        case tier
+        case path
+        case effect
+        case verification
+        case error
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        try container.encode(false, forKey: .ok)
+        try container.encode(toolCallId, forKey: .toolCallId)
+        try container.encode(outcome, forKey: .outcome)
+        try container.encode(tier, forKey: .tier)
+        try container.encode(path, forKey: .path)
+        try container.encode(effect, forKey: .effect)
+        try container.encode(verification, forKey: .verification)
+        try container.encode(HostDomainErrorPayload(error), forKey: .error)
     }
 }
 
@@ -195,6 +248,12 @@ enum HostProtocolCodec {
         )
     }
 
+    static func dispatchFailureResponse(id: Int?, failure: HostDispatchFailureResult) throws -> Data {
+        try encodeLine(
+            HostRPCResponse(id: id, result: HostAnyEncodable(failure), rpcError: nil)
+        )
+    }
+
     static func rpcErrorResponse(id: Int?, error: HostRPCError) throws -> Data {
         try encodeLine(HostRPCResponse(id: id, result: nil, rpcError: error))
     }
@@ -283,9 +342,35 @@ final class HostLaneScheduler {
     private var queues: [Lane: DispatchQueue] = [:]
     private let lock = NSLock()
     private let group = DispatchGroup()
+    private var shuttingDown = false
 
-    func enqueue(_ lane: Lane, _ work: @escaping () -> Void) {
-        queue(for: lane).async(group: group, execute: work)
+    /// §11 — on SIGTERM, work that was queued but has not started is answered
+    /// with `aborted` instead of being run. Without this the executor either runs
+    /// it anyway or, past the grace deadline, exits owing a response for an id it
+    /// has read, which breaks the one-response-per-id obligation §1 states.
+    func enqueue(_ lane: Lane, _ work: @escaping () -> Void, ifShuttingDown abort: @escaping () -> Void = {}) {
+        let gated: () -> Void = { [self] in
+            lock.lock()
+            let stopped = shuttingDown
+            lock.unlock()
+
+            guard !stopped else {
+                abort()
+                return
+            }
+
+            work()
+        }
+
+        queue(for: lane).async(group: group, execute: gated)
+    }
+
+    /// Called before waiting on the grace period, so anything still queued
+    /// answers rather than being dropped at the deadline.
+    func beginShutdown() {
+        lock.lock()
+        shuttingDown = true
+        lock.unlock()
     }
 
     /// Used by the SIGTERM path (§11) to let in-flight work finish inside the

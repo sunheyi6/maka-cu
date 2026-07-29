@@ -94,6 +94,10 @@ public final class HostSnapshotRegistry {
     private struct HostSessionRecord {
         let captureScope: HostCaptureScope
         var snapshots: [HostSnapshot] = []
+        /// §8 — `screen.capture` images belong to no snapshot, so nothing here
+        /// retires them. They are held with the time they were taken and expire
+        /// on the same clock a snapshot's image does.
+        var unattachedImages: [(path: String, capturedAt: Int64)] = []
     }
 
     public init(
@@ -148,6 +152,7 @@ public final class HostSnapshotRegistry {
         lock.lock()
         let record = sessions.removeValue(forKey: session)
         let snapshots = record?.snapshots ?? []
+        let unattached = record?.unattachedImages ?? []
         lock.unlock()
 
         var images = 0
@@ -158,11 +163,56 @@ public final class HostSnapshotRegistry {
             }
         }
 
+        // §3 — teardown deletes every image file the session produced, which
+        // includes the ones `screen.capture` wrote and never attached to
+        // anything.
+        for image in unattached {
+            deleteImage(image.path)
+            images += 1
+        }
+
         return HostSessionReleaseCounts(
             snapshots: snapshots.filter { $0.state == .live }.count,
             images: images,
             streams: 0
         )
+    }
+
+    // MARK: Unattached images
+
+    /// §8 — a `screen.capture` image has no snapshot to expire with, so the
+    /// session records it and the sweep below deletes it once it is older than
+    /// `limits.snapshotTtlMs`. Without this every capture leaked until the
+    /// executor died, and only `imageDirBudgetBytes` stood between a long session
+    /// and a full disk.
+    public func registerUnattachedImage(session: String, path: String, capturedAt: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        sessions[session]?.unattachedImages.append((path: path, capturedAt: capturedAt))
+    }
+
+    @discardableResult
+    public func sweepUnattachedImages(now: Int64) -> Int {
+        lock.lock()
+        var expired: [String] = []
+        for (session, record) in sessions {
+            var kept: [(path: String, capturedAt: Int64)] = []
+            for image in record.unattachedImages {
+                if now - image.capturedAt >= Int64(limits.snapshotTtlMs) {
+                    expired.append(image.path)
+                } else {
+                    kept.append(image)
+                }
+            }
+            sessions[session]?.unattachedImages = kept
+        }
+        lock.unlock()
+
+        for path in expired {
+            deleteImage(path)
+        }
+
+        return expired.count
     }
 
     // MARK: Snapshots

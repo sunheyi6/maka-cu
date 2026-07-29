@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 @testable import OpenComputerUseKit
 
-/// Conformance vectors for `maka.cu/1` (§12). Each test here fails without the
+/// Conformance vectors for `maka.cu/2` (§12). Each test here fails without the
 /// rule it names; the rules that need a live desktop (real Accessibility
 /// invalidation, real capture) are called out in the commit rather than faked.
 final class HostProtocolTests: XCTestCase {
@@ -12,7 +12,7 @@ final class HostProtocolTests: XCTestCase {
     func testDispatchQuotingASpentSnapshotFailsWithSnapshotSpent() {
         let registry = makeRegistry()
         try? registry.beginSession("s1", captureScope: .window)
-        let snapshot = makeSnapshot(registry: registry, session: "s1", windowId: 1)
+        let snapshot = hostTestSnapshot(registry: registry, session: "s1")
         registry.register(snapshot)
 
         registry.spend(snapshot)
@@ -25,12 +25,12 @@ final class HostProtocolTests: XCTestCase {
         let registry = makeRegistry()
         try? registry.beginSession("s1", captureScope: .window)
 
-        let windowA = makeSnapshot(registry: registry, session: "s1", windowId: 1)
-        let windowB = makeSnapshot(registry: registry, session: "s1", windowId: 2)
+        let windowA = hostTestSnapshot(registry: registry, session: "s1")
+        let windowB = hostTestSnapshot(registry: registry, session: "s1", window: hostTestWindow(windowId: 2))
         registry.register(windowA)
         registry.register(windowB)
 
-        let laterA = makeSnapshot(registry: registry, session: "s1", windowId: 1)
+        let laterA = hostTestSnapshot(registry: registry, session: "s1")
         registry.register(laterA)
 
         XCTAssertEqual(
@@ -44,7 +44,7 @@ final class HostProtocolTests: XCTestCase {
     func testSnapshotOlderThanItsTimeToLiveFailsWithSnapshotExpired() {
         let registry = makeRegistry()
         try? registry.beginSession("s1", captureScope: .window)
-        let snapshot = makeSnapshot(registry: registry, session: "s1", windowId: 1, capturedAt: 0)
+        let snapshot = hostTestSnapshot(registry: registry, session: "s1", capturedAt: 0)
         registry.register(snapshot)
 
         let result = registry.resolve(session: "s1", snapshotId: snapshot.id, now: Int64(HostLimits().snapshotTtlMs))
@@ -58,7 +58,7 @@ final class HostProtocolTests: XCTestCase {
 
         var snapshots: [HostSnapshot] = []
         for index in 0...limits.snapshotsPerSession {
-            let snapshot = makeSnapshot(registry: registry, session: "s1", windowId: CGWindowID(index + 1))
+            let snapshot = hostTestSnapshot(registry: registry, session: "s1", window: hostTestWindow(windowId: CGWindowID(index + 1)))
             registry.register(snapshot)
             snapshots.append(snapshot)
         }
@@ -78,7 +78,7 @@ final class HostProtocolTests: XCTestCase {
     func testRefusedDispatchLeavesTheSnapshotLiveAndOutcomeUnknownSpendsIt() {
         let registry = makeRegistry()
         try? registry.beginSession("s1", captureScope: .window)
-        let snapshot = makeSnapshot(registry: registry, session: "s1", windowId: 1)
+        let snapshot = hostTestSnapshot(registry: registry, session: "s1")
         registry.register(snapshot)
 
         // A refusal never reaches `spend`, so the host may fix the argument and
@@ -103,8 +103,8 @@ final class HostProtocolTests: XCTestCase {
         let registry = HostSnapshotRegistry(limits: HostLimits(), processNonce: "nonce-a") { deleted.append($0) }
         try? registry.beginSession("s1", captureScope: .window)
 
-        registry.register(makeSnapshot(registry: registry, session: "s1", windowId: 1, imagePath: "/tmp/a.png"))
-        registry.register(makeSnapshot(registry: registry, session: "s1", windowId: 2, imagePath: "/tmp/b.png"))
+        registry.register(hostTestSnapshot(registry: registry, session: "s1", imagePath: "/tmp/a.png"))
+        registry.register(hostTestSnapshot(registry: registry, session: "s1", window: hostTestWindow(windowId: 2), imagePath: "/tmp/b.png"))
 
         let released = registry.endSession("s1")
         XCTAssertEqual(released.snapshots, 2)
@@ -125,8 +125,8 @@ final class HostProtocolTests: XCTestCase {
         let registry = HostSnapshotRegistry(limits: HostLimits(), processNonce: "nonce-b") { deleted.append($0) }
         try? registry.beginSession("s1", captureScope: .window)
 
-        registry.register(makeSnapshot(registry: registry, session: "s1", windowId: 7, imagePath: "/tmp/old.png"))
-        registry.register(makeSnapshot(registry: registry, session: "s1", windowId: 7, imagePath: "/tmp/new.png"))
+        registry.register(hostTestSnapshot(registry: registry, session: "s1", window: hostTestWindow(windowId: 7), imagePath: "/tmp/old.png"))
+        registry.register(hostTestSnapshot(registry: registry, session: "s1", window: hostTestWindow(windowId: 7), imagePath: "/tmp/new.png"))
 
         // §8 — the image's lifetime is the snapshot's lifetime, so a stale path
         // fails rather than handing back a previous frame's pixels.
@@ -146,8 +146,8 @@ final class HostProtocolTests: XCTestCase {
     func testTokensAreLookedUpByExactStringWithinTheirOwnSnapshot() {
         let registry = makeRegistry()
         try? registry.beginSession("s1", captureScope: .window)
-        let first = makeSnapshot(registry: registry, session: "s1", windowId: 1)
-        let second = makeSnapshot(registry: registry, session: "s1", windowId: 2)
+        let first = hostTestSnapshot(registry: registry, session: "s1")
+        let second = hostTestSnapshot(registry: registry, session: "s1", window: hostTestWindow(windowId: 2))
 
         let tokenFromFirst = first.payload.elements[0].token
         XCTAssertNotNil(first.binding(for: tokenFromFirst))
@@ -186,22 +186,22 @@ final class HostProtocolTests: XCTestCase {
     }
 
     func testBindingVerificationDistinguishesReleasedReplacedAndChanged() {
-        let binding = makeBinding(token: "el_x", digestInput: HostElementDigestInput(role: "AXButton", label: "Send"))
+        let binding = hostTestBinding(token: "el_x", digestInput: HostElementDigestInput(role: "AXButton", label: "Send"))
 
-        var probe = FakeBindingProbe(digestInput: binding.digestInput)
+        var probe = FakeBindingProbe()
         probe.alive = false
         XCTAssertEqual(hostVerifyBinding(binding, probe: probe)?.code, .elementReleased)
 
-        probe = FakeBindingProbe(digestInput: binding.digestInput)
+        probe = FakeBindingProbe()
         probe.startTime = binding.processStartTime + 1
         XCTAssertEqual(hostVerifyBinding(binding, probe: probe)?.code, .processReplaced)
 
-        probe = FakeBindingProbe(digestInput: HostElementDigestInput(role: "AXButton", label: "Sent"))
+        probe = FakeBindingProbe(override: HostElementDigestInput(role: "AXButton", label: "Sent"))
         let failure = hostVerifyBinding(binding, probe: probe)
         XCTAssertEqual(failure?.code, .elementChanged)
         XCTAssertEqual(failure?.detail, .changed([.label]))
 
-        probe = FakeBindingProbe(digestInput: binding.digestInput)
+        probe = FakeBindingProbe()
         XCTAssertNil(hostVerifyBinding(binding, probe: probe))
     }
 
@@ -237,12 +237,12 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual(walk.bindings.count, 4)
     }
 
-    func testTreeOverTheDepthBudgetDeclaresDepthTruncation() {
+    func testTreeWalkEmitsExactlyTheNumberOfLevelsTheDepthBoundNames() {
         let leaf = FakeNode(role: "AXStaticText")
         let middle = FakeNode(role: "AXGroup", children: [leaf])
         let root = FakeNode(role: "AXWindow", children: [middle])
 
-        let walk = hostWalkTree(
+        let oneLevel = hostWalkTree(
             root: root,
             pid: 42,
             processStartTime: 7,
@@ -250,8 +250,32 @@ final class HostProtocolTests: XCTestCase {
             bounds: HostTreeWalkBounds(maxElements: 100, maxDepth: 1, maxTextChars: 500)
         )
 
-        XCTAssertEqual(walk.elements.count, 2)
-        XCTAssertTrue(walk.truncated.depth)
+        // A budget of 1 admits the root and nothing under it. Returning at
+        // `depth == maxDepth` admitted one level more than the bound named, and
+        // the host had no way to see that from the wire.
+        XCTAssertEqual(oneLevel.elements.count, 1)
+        XCTAssertEqual(oneLevel.elements.map(\.depth), [0])
+        XCTAssertTrue(oneLevel.truncated.depth)
+
+        let twoLevels = hostWalkTree(
+            root: root,
+            pid: 42,
+            processStartTime: 7,
+            tokenPrefix: "snap_test",
+            bounds: HostTreeWalkBounds(maxElements: 100, maxDepth: 2, maxTextChars: 500)
+        )
+        XCTAssertEqual(twoLevels.elements.map(\.depth), [0, 1])
+        XCTAssertTrue(twoLevels.truncated.depth)
+
+        let whole = hostWalkTree(
+            root: root,
+            pid: 42,
+            processStartTime: 7,
+            tokenPrefix: "snap_test",
+            bounds: HostTreeWalkBounds(maxElements: 100, maxDepth: 3, maxTextChars: 500)
+        )
+        XCTAssertEqual(whole.elements.map(\.depth), [0, 1, 2])
+        XCTAssertFalse(whole.truncated.depth)
     }
 
     func testElementTextTruncationIsReportedPerFieldAndNeverOmitted() {
@@ -586,14 +610,16 @@ final class HostProtocolTests: XCTestCase {
 
     func testUnknownProtocolVersionIsFatalAndNamesWhatIsSupported() throws {
         let harness = ServerHarness()
-        harness.sendHello(protocolVersion: "maka.cu/2")
+        // §2 — `maka.cu/1` is withdrawn, not deprecated: the parts of it that
+        // moved are exactly the parts its two implementations disagreed about.
+        harness.sendHello(protocolVersion: "maka.cu/1")
 
         let response = try harness.awaitResponse()
         let error = try XCTUnwrap(response["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? Int, -32000)
         XCTAssertEqual(error["message"] as? String, "protocol_version_mismatch")
         let data = try XCTUnwrap(error["data"] as? [String: Any])
-        XCTAssertEqual(data["supported"] as? [String], ["maka.cu/1"])
+        XCTAssertEqual(data["supported"] as? [String], ["maka.cu/2"])
 
         // §2 — `EX_CONFIG`, so the host classifies the start as `service_mismatch`
         // and does not retry.
@@ -606,7 +632,7 @@ final class HostProtocolTests: XCTestCase {
 
         let result = try XCTUnwrap(try harness.awaitResponse()["result"] as? [String: Any])
         XCTAssertEqual(result["ok"] as? Bool, true)
-        XCTAssertEqual(result["protocol"] as? String, "maka.cu/1")
+        XCTAssertEqual(result["protocol"] as? String, "maka.cu/2")
 
         let limits = try XCTUnwrap(result["limits"] as? [String: Any])
         for key in [
@@ -732,9 +758,38 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertTrue(hostKeyNameIsSupported("Return"))
         XCTAssertTrue(hostKeyNameIsSupported("F12"))
         XCTAssertTrue(hostKeyNameIsSupported("a"))
+        XCTAssertTrue(hostKeyNameIsSupported("~"))
         XCTAssertFalse(hostKeyNameIsSupported("super+shift+q"))
         XCTAssertFalse(hostKeyNameIsSupported("Eject"))
         XCTAssertFalse(hostKeyNameIsSupported(""))
+    }
+
+    func testTheTwoAmbiguousKeyNamesAreNotInTheSet() {
+        // §6.4 — `Enter` was a second name for `Return`, and `Delete` is the
+        // backspace legend on a Mac and the forward delete in xdotool: one
+        // string, two destructive meanings, no way to tell which was meant.
+        XCTAssertFalse(hostKeyNameIsSupported("Enter"))
+        XCTAssertFalse(hostKeyNameIsSupported("Delete"))
+        XCTAssertTrue(hostKeyNameIsSupported("Backspace"))
+        XCTAssertTrue(hostKeyNameIsSupported("ForwardDelete"))
+
+        // The printable range starts at U+0021: `Space` is the only spelling of
+        // the space bar.
+        XCTAssertFalse(hostKeyNameIsSupported(" "))
+        XCTAssertTrue(hostKeyNameIsSupported("Space"))
+    }
+
+    func testACombinationReachingTheExecutorIsInvalidParamsNotAGuess() throws {
+        // §6.4 vector 36 — the host parses; the closed set stays closed, and a
+        // host that sent a combination has a bug worth seeing.
+        let harness = ServerHarness()
+        try harness.begin()
+
+        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"dispatch.key","params":{"session":"s1","snapshotId":"snap_x","toolCallId":"call_1","focusToken":"el_1","expectElementDigest":"sha256:aa","action":{"kind":"key","key":"cmd+a"}}}"#)
+
+        let error = try XCTUnwrap(try harness.awaitResponse()["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? Int, -32602)
+        XCTAssertEqual((error["data"] as? [String: Any])?["field"] as? String, "key")
     }
 
     func testKeySpecificationDropsFnBecauseItHasNoKeyCodeToHold() {
@@ -759,218 +814,4 @@ final class HostProtocolTests: XCTestCase {
     private func jsonObject(_ data: Data) throws -> [String: Any] {
         try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
-
-    private func makeBinding(token: String, digestInput: HostElementDigestInput) -> HostElementBinding {
-        HostElementBinding(
-            token: token,
-            parentToken: nil,
-            depth: 1,
-            pid: 4711,
-            processStartTime: 1_234_567,
-            digestInput: digestInput,
-            element: nil,
-            observed: HostObservedElement(
-                token: token,
-                parentToken: nil,
-                depth: 1,
-                role: digestInput.role,
-                subrole: nil,
-                axIdentifier: nil,
-                label: digestInput.label,
-                value: nil,
-                placeholder: nil,
-                enabled: true,
-                focused: false,
-                selected: nil,
-                frame: nil,
-                actions: [.press],
-                digest: hostElementDigest(digestInput),
-                truncated: []
-            )
-        )
-    }
-
-    private func makeSnapshot(
-        registry: HostSnapshotRegistry,
-        session: String,
-        windowId: CGWindowID,
-        capturedAt: Int64 = hostNowMs(),
-        imagePath: String? = nil
-    ) -> HostSnapshot {
-        let id = registry.nextSnapshotId()
-        let binding = makeBinding(
-            token: "el_\(id)_0",
-            digestInput: HostElementDigestInput(role: "AXButton", label: "Send")
-        )
-
-        let payload = HostSnapshotPayload(
-            snapshotId: id,
-            capturedAt: capturedAt,
-            target: HostWindowTarget(
-                pid: 4711,
-                windowId: windowId,
-                bundleId: "com.apple.Notes",
-                appName: "Notes",
-                title: "Untitled",
-                bounds: HostRect(x: 0, y: 0, width: 100, height: 100),
-                layer: 0,
-                zIndex: 3,
-                displayId: "1"
-            ),
-            windowDigest: hostWindowDigest(
-                elementDigests: [binding.digest],
-                bounds: CGRect(x: 0, y: 0, width: 100, height: 100),
-                title: "Untitled"
-            ),
-            focusedElementToken: nil,
-            selectedText: nil,
-            image: nil,
-            displays: [],
-            obscuringRects: [],
-            elements: [binding.observed],
-            truncated: HostSnapshotTruncation(elements: false, depth: false)
-        )
-
-        return HostSnapshot(
-            id: id,
-            session: session,
-            pid: 4711,
-            windowId: windowId,
-            capturedAt: capturedAt,
-            windowDigest: payload.windowDigest,
-            payload: payload,
-            bindings: [binding],
-            imagePath: imagePath
-        )
-    }
 }
-
-// MARK: - Test doubles
-
-private final class FakeNode: HostAccessibilityNode {
-    let role: String
-    let subrole: String?
-    let axIdentifier: String?
-    let title: String?
-    let label: String?
-    let value: String?
-    let placeholder: String?
-    let enabled: Bool
-    let focused: Bool
-    let selected: Bool?
-    let frameInWindow: CGRect?
-    let rawActionNames: [String]
-    private let childNodes: [FakeNode]
-
-    var axElement: AXUIElement? { nil }
-    var children: [HostAccessibilityNode] { childNodes }
-
-    init(
-        role: String,
-        subrole: String? = nil,
-        axIdentifier: String? = nil,
-        title: String? = nil,
-        label: String? = nil,
-        value: String? = nil,
-        placeholder: String? = nil,
-        enabled: Bool = true,
-        focused: Bool = false,
-        selected: Bool? = nil,
-        frameInWindow: CGRect? = nil,
-        rawActionNames: [String] = [],
-        children: [FakeNode] = []
-    ) {
-        self.role = role
-        self.subrole = subrole
-        self.axIdentifier = axIdentifier
-        self.title = title
-        self.label = label
-        self.value = value
-        self.placeholder = placeholder
-        self.enabled = enabled
-        self.focused = focused
-        self.selected = selected
-        self.frameInWindow = frameInWindow
-        self.rawActionNames = rawActionNames
-        self.childNodes = children
-    }
-}
-
-private struct FakeBindingProbe: HostElementBindingProbe {
-    var alive = true
-    var startTime: UInt64 = 1_234_567
-    var digestInput: HostElementDigestInput
-
-    init(digestInput: HostElementDigestInput) {
-        self.digestInput = digestInput
-    }
-
-    func isReferenceAlive(_ binding: HostElementBinding) -> Bool { alive }
-    func processStartTime(pid: pid_t) -> UInt64? { startTime }
-    func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? { digestInput }
-}
-
-/// Drives `HostProtocolServer.handle(line:)` and collects whole response lines.
-/// The lanes are real serial queues, so responses are awaited rather than read.
-private final class ServerHarness {
-    let server: HostProtocolServer
-    private let inbox: LineInbox
-    private let imageDirectory: URL
-
-    private final class LineInbox {
-        private let lock = NSLock()
-        private var lines: [Data] = []
-
-        func append(_ data: Data) {
-            lock.lock()
-            lines.append(data)
-            lock.unlock()
-        }
-
-        func take() -> Data? {
-            lock.lock()
-            defer { lock.unlock() }
-            return lines.isEmpty ? nil : lines.removeFirst()
-        }
-    }
-
-    init() {
-        imageDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maka-cu-tests-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
-
-        let inbox = LineInbox()
-        self.inbox = inbox
-        server = HostProtocolServer(output: HostOutputWriter { inbox.append($0) })
-    }
-
-    deinit {
-        try? FileManager.default.removeItem(at: imageDirectory)
-    }
-
-    func send(_ line: String) {
-        server.handle(line: line)
-    }
-
-    func sendHello(protocolVersion: String = "maka.cu/1", imageDir: String? = nil) {
-        let directory = imageDir ?? imageDirectory.path
-        send("""
-        {"jsonrpc":"2.0","id":1,"method":"host.hello","params":{"protocol":"\(protocolVersion)","hostPid":\(ProcessInfo.processInfo.processIdentifier),"imageDir":"\(directory)","allowGlobalPointer":false}}
-        """)
-    }
-
-    func awaitResponse(timeout: TimeInterval = 2) throws -> [String: Any] {
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while Date() < deadline {
-            if let next = inbox.take() {
-                return try XCTUnwrap(try JSONSerialization.jsonObject(with: next) as? [String: Any])
-            }
-
-            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
-        }
-
-        throw HostHarnessTimeout()
-    }
-}
-
-private struct HostHarnessTimeout: Error {}

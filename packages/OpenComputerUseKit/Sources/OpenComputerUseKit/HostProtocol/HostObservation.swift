@@ -61,7 +61,11 @@ public struct HostDisplayInfo: Codable, Equatable, Sendable {
 public struct HostWindowTarget: Codable, Equatable, Sendable {
     public let pid: Int32
     public let windowId: UInt32
-    public let bundleId: String?
+    /// §5.1 — the one namespace, spelled the same way `apps.list`, `window.list`
+    /// and the `apps.launch` result spell it for the same process. There is no
+    /// `bundleId` beside it: a caller that wants to know whether the process has
+    /// a bundle id reads whether this starts with `pid:`.
+    public let appId: String
     public let appName: String
     public let title: String?
     public let bounds: HostRect
@@ -244,7 +248,11 @@ public func hostWalkTree(
         }
 
         let children = node.children
-        if !children.isEmpty, depth == bounds.maxDepth {
+        // `maxDepth` is a count of levels, so the deepest element a walk may emit
+        // sits at `maxDepth - 1`. Returning at `depth == maxDepth` emitted one
+        // level more than the bound names — 65 levels for a budget of 64 — and
+        // the host has no way to see that from the wire.
+        if !children.isEmpty, depth + 1 >= bounds.maxDepth {
             hitDepthBound = true
             return
         }

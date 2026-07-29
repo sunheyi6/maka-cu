@@ -127,6 +127,19 @@ public final class HostImageStore {
     }
 }
 
+/// `captureScope: "desktop"` captures through a whole-display filter, which puts
+/// the image's origin at the display's while `image.scale` and the `image_px`
+/// space both anchor at the window's. This is the crop that reconciles them: the
+/// window's rectangle expressed relative to the display it sits on.
+public func hostDesktopSourceRect(windowFrame: CGRect, displayFrame: CGRect) -> CGRect {
+    CGRect(
+        x: windowFrame.origin.x - displayFrame.origin.x,
+        y: windowFrame.origin.y - displayFrame.origin.y,
+        width: windowFrame.width,
+        height: windowFrame.height
+    )
+}
+
 public enum HostCapture {
     static let timeout: TimeInterval = 5
 
@@ -161,6 +174,17 @@ public enum HostCapture {
                         return CGImage?.none
                     }
                     filter = SCContentFilter(display: display, excludingWindows: [])
+                    // §5.3 / §6.3 — `image.scale` is measured against the target
+                    // window and `dispatch.point` reads `image_px` from the
+                    // window's origin, so a desktop-scope image has to be the
+                    // window's rectangle *as composited* — everything stacked on
+                    // top included. Handing back a display-origin crop the size of
+                    // the window kept both fields but moved the pixels, and every
+                    // point dispatch under this scope landed somewhere else.
+                    configuration.sourceRect = hostDesktopSourceRect(
+                        windowFrame: window.frame,
+                        displayFrame: display.frame
+                    )
                 }
 
                 return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)

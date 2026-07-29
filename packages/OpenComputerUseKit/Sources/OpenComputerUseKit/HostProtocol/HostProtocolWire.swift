@@ -1,13 +1,13 @@
 import Foundation
 
-/// Wire vocabulary for `maka.cu/1`, the protocol spoken between the Maka Electron
-/// host and this executor. See `docs/maka-cu-host-protocol.md` in the Maka repo.
+/// Wire vocabulary for `maka.cu/2`, the protocol spoken between the Maka Electron
+/// host and this executor. See `docs/HOST_PROTOCOL.md`.
 ///
 /// Every enum here is a closed set on purpose. The protocol exists because the
 /// previous surface answered with free-form prose that the host had to pattern
 /// match; nothing in this file may grow an "other" case.
 
-public let makaCuProtocolVersion = "maka.cu/1"
+public let makaCuProtocolVersion = "maka.cu/2"
 
 /// `EX_CONFIG`. §2 requires this exact status after a version mismatch so the
 /// host can classify the start as `service_mismatch` and refuse to retry.
@@ -82,6 +82,7 @@ public enum HostDomainErrorCode: String, Codable, Sendable, CaseIterable {
     case snapshotExpired = "snapshot_expired"
     case snapshotEvicted = "snapshot_evicted"
     case elementUnknown = "element_unknown"
+    case elementDigestMismatch = "element_digest_mismatch"
     case elementReleased = "element_released"
     case elementChanged = "element_changed"
     case processReplaced = "process_replaced"
@@ -122,6 +123,8 @@ public enum HostDomainErrorCode: String, Codable, Sendable, CaseIterable {
             return "the snapshot was evicted because the session holds too many"
         case .elementUnknown:
             return "the element token is not part of the quoted snapshot"
+        case .elementDigestMismatch:
+            return "the echoed digest is not the one this snapshot recorded for that token"
         case .elementReleased:
             return "the accessibility reference behind the element is no longer valid"
         case .elementChanged:
@@ -213,6 +216,20 @@ public enum HostElementDigestField: String, Codable, Sendable, CaseIterable {
     case actions
     case ancestors
     case siblingIndex
+}
+
+// MARK: - Naming an app
+
+/// §5.1 — there is exactly one string that names an app on this wire: the bundle
+/// identifier when the process has one, otherwise `pid:<n>`. Every producer goes
+/// through this function so `apps.list`, `window.list`, `snapshot.target` and the
+/// `apps.launch` result cannot spell the same process two ways.
+public func hostAppId(bundleIdentifier: String?, pid: pid_t) -> String {
+    guard let bundleIdentifier, !bundleIdentifier.isEmpty else {
+        return "pid:\(pid)"
+    }
+
+    return bundleIdentifier
 }
 
 // MARK: - Dispatch vocabulary

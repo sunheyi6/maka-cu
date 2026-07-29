@@ -87,16 +87,16 @@ extension HostProtocolServer {
         maxDepth: Int,
         maxTextChars: Int
     ) -> Result<HostSnapshot, HostDomainError> {
-        if hostScreenIsLocked() {
+        if environment.screenIsLocked() {
             return .failure(HostDomainError(.screenLocked))
         }
 
-        let diagnostics = PermissionDiagnostics.current()
+        let diagnostics = environment.permissions()
         guard diagnostics.accessibilityTrusted else {
             return .failure(HostDomainError(.permissionMissing, detail: .missingPermission(.accessibility)))
         }
 
-        let windows = HostWindowInventory.onScreenWindows()
+        let windows = environment.onScreenWindows()
         let resolved: HostWindowInfo
         switch target {
         case .window(let pid, let windowId):
@@ -104,19 +104,32 @@ extension HostProtocolServer {
                 return .failure(HostDomainError(.windowGone))
             }
             resolved = match
-        case .app(let query):
-            guard let app = try? AppDiscovery.resolve(query) else {
-                return .failure(HostDomainError(.appNotFound))
+        case .app(let appId):
+            // §5.2 — the executor resolves `{ "kind": "app" }`, and it resolves it
+            // by exact `appId` against what is *already running*. `observe` is a
+            // read: it never launches and never activates.
+            let app: HostRunningApp
+            switch hostResolveAppTarget(appId: appId, in: environment.runningApps()) {
+            case .success(let match):
+                app = match
+            case .failure(let error):
+                return .failure(error)
             }
+
             // `{ "kind": "app" }` resolves to the app's frontmost usable window
-            // and is ambiguous by design; `{ "kind": "window" }` is exact.
+            // and is ambiguous by design; `{ "kind": "window" }` is exact. The
+            // window list is front-to-back, so the first match is the frontmost.
             guard let match = windows.first(where: { $0.pid == app.pid && $0.layer == 0 }) else {
                 return .failure(HostDomainError(.windowGone))
             }
             resolved = match
         }
 
-        guard let windowElement = HostAX.window(pid: resolved.pid, windowId: resolved.windowId, bounds: resolved.bounds) else {
+        guard let windowElement = environment.windowElement(
+            pid: resolved.pid,
+            windowId: resolved.windowId,
+            bounds: resolved.bounds
+        ) else {
             return .failure(HostDomainError(.windowGone))
         }
 
@@ -145,7 +158,7 @@ extension HostProtocolServer {
         }
 
         let snapshotId = currentRegistry().nextSnapshotId()
-        let focusedElement = HostAX.focusedElement(pid: resolved.pid)
+        let focusedElement = environment.focusedElement(pid: resolved.pid)
         let capturedAt = hostNowMs()
 
         let walk = { (elementBudget: Int) -> HostTreeWalkResult in
@@ -193,7 +206,7 @@ extension HostProtocolServer {
                 target: HostWindowTarget(
                     pid: resolved.pid,
                     windowId: resolved.windowId,
-                    bundleId: NSRunningApplication(processIdentifier: resolved.pid)?.bundleIdentifier,
+                    appId: resolved.appId,
                     appName: resolved.appName,
                     title: resolved.title,
                     bounds: HostRect(resolved.bounds),
@@ -246,40 +259,52 @@ extension HostProtocolServer {
             return
         }
 
+        // §6.5 — the tier a refusal reports is the tier the executor would have
+        // used, which for an element dispatch is always `ax`.
+        func refuse(_ error: HostDomainError) {
+            emit(id: id, toolCallId: params.toolCallId, dispatchFailure: error, tier: .ax)
+        }
+
         let registry = currentRegistry()
         let snapshot: HostSnapshot
         switch registry.resolve(session: params.session, snapshotId: params.snapshotId, now: hostNowMs()) {
         case .success(let resolved):
             snapshot = resolved
         case .failure(let error):
-            emit(id: id, failure: error, toolCallId: params.toolCallId)
+            refuse(error)
             return
         }
 
-        guard let binding = snapshot.binding(for: params.elementToken),
-              binding.digest == params.expectElementDigest
-        else {
-            // Tokens are snapshot-scoped, and the echoed digest catches a host
-            // that mixed up two elements from two snapshots — which the
-            // executor's own record cannot see by construction.
-            emit(id: id, failure: HostDomainError(.elementUnknown), toolCallId: params.toolCallId)
+        // §6.2 — three situations, three codes. A token this snapshot never
+        // minted is the host quoting the wrong frame; a token it did mint,
+        // carrying an echo it never recorded, is the host pairing a token from
+        // one snapshot with a digest from another. Folding the second into
+        // `element_unknown` told the host "stale frame" and it re-observed, then
+        // echoed the same wrong digest again.
+        guard let binding = snapshot.binding(for: params.elementToken) else {
+            refuse(HostDomainError(.elementUnknown))
+            return
+        }
+
+        guard binding.digest == params.expectElementDigest else {
+            refuse(HostDomainError(.elementDigestMismatch))
             return
         }
 
         if cancellations.isCancelledBeforeDispatch(id: id) {
-            emit(id: id, failure: HostDomainError(.aborted), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.aborted))
             return
         }
 
-        let windows = HostWindowInventory.onScreenWindows()
+        let windows = environment.onScreenWindows()
         guard let window = windows.first(where: { $0.pid == snapshot.pid && $0.windowId == snapshot.windowId }) else {
-            emit(id: id, failure: HostDomainError(.windowGone), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.windowGone))
             return
         }
 
-        let probe = HostAXBindingProbe(windowBounds: window.bounds)
+        let probe = environment.bindingProbe(windowBounds: window.bounds)
         if let failure = hostVerifyBinding(binding, probe: probe) {
-            emit(id: id, failure: failure, toolCallId: params.toolCallId)
+            refuse(failure)
             return
         }
 
@@ -288,7 +313,7 @@ extension HostProtocolServer {
         if params.strictness == .window {
             let current = recomputeWindowDigest(snapshot: snapshot, window: window, probe: probe)
             guard current == snapshot.windowDigest else {
-                emit(id: id, failure: HostDomainError(.windowChanged), toolCallId: params.toolCallId)
+                refuse(HostDomainError(.windowChanged))
                 return
             }
         }
@@ -309,18 +334,18 @@ extension HostProtocolServer {
                 targetPoint: center,
                 obscuringWindows: obscuring
             ) {
-                emit(id: id, failure: HostDomainError(.windowOccluded), toolCallId: params.toolCallId)
+                refuse(HostDomainError(.windowOccluded))
                 return
             }
         }
 
         guard binding.observed.enabled else {
-            emit(id: id, failure: HostDomainError(.elementDisabled), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.elementDisabled))
             return
         }
 
         guard let element = binding.element else {
-            emit(id: id, failure: HostDomainError(.elementReleased), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.elementReleased))
             return
         }
 
@@ -333,18 +358,23 @@ extension HostProtocolServer {
             settle: settleMode
         )
 
-        // §4.1 — a refused dispatch does not spend its snapshot; the host may fix
-        // the argument and retry against the same frame.
-        if performed.outcome == .refused, let failure = performed.failure {
-            emit(id: id, failure: failure, toolCallId: params.toolCallId)
-            return
-        }
+        if performed.outcome != .ok, let failure = performed.failure {
+            // §4.1 — a refused dispatch does not spend its snapshot; the host may
+            // fix the argument and retry against the same frame. `outcome_unknown`
+            // does spend it, because we cannot prove the action did not land.
+            if performed.outcome == .unknown {
+                currentRegistry().spend(snapshot)
+            }
 
-        // `outcome_unknown` does spend it, because we cannot prove the action did
-        // not land.
-        if performed.outcome == .unknown, let failure = performed.failure {
-            currentRegistry().spend(snapshot)
-            emit(id: id, failure: failure, toolCallId: params.toolCallId)
+            emit(
+                id: id,
+                toolCallId: params.toolCallId,
+                dispatchFailure: failure,
+                outcome: performed.outcome,
+                tier: performed.tier,
+                path: performed.path,
+                verdict: performed.verdict
+            )
             return
         }
 
@@ -367,7 +397,7 @@ extension HostProtocolServer {
     private func recomputeWindowDigest(
         snapshot: HostSnapshot,
         window: HostWindowInfo,
-        probe: HostAXBindingProbe
+        probe: any HostElementBindingProbe
     ) -> String {
         let digests = snapshot.payload.elements.compactMap { observed -> String? in
             guard let binding = snapshot.binding(for: observed.token) else {
@@ -441,7 +471,7 @@ extension HostProtocolServer {
             let previous = HostAX.stringLikeValue(element, kAXValueAttribute)
             let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
             guard result == .success else {
-                return refused(.dispatchRefused, path: .axAttribute)
+                return failed(.dispatchRefused, path: .axAttribute)
             }
 
             let readback = HostAX.stringLikeValue(element, kAXValueAttribute)
@@ -465,12 +495,14 @@ extension HostProtocolServer {
                 length: text.count
             )
             guard let axRange = AXValueCreate(.cfRange, &cfRange) else {
-                return refused(.dispatchRefused, path: .axAttribute)
+                // Nothing was posted: the range could not even be expressed, so
+                // this is "the executor cannot say this", not "the OS said no".
+                return refused(.unsupportedAction)
             }
 
             let result = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, axRange)
             guard result == .success else {
-                return refused(.dispatchRefused, path: .axAttribute)
+                return failed(.dispatchRefused, path: .axAttribute)
             }
 
             return PerformedAction(
@@ -497,26 +529,26 @@ extension HostProtocolServer {
             return refused(.elementNotActionable)
         }
 
+        var delivered = 0
         for _ in 0..<max(repeatCount, 1) {
             let result = AXUIElementPerformAction(element, name.rawAXAction as CFString)
             switch result {
             case .success:
+                delivered += 1
                 continue
-            case .invalidUIElement:
+            case .invalidUIElement where delivered == 0:
                 return refused(.elementReleased)
-            case .cannotComplete:
-                // The app accepted neither the message nor a refusal. We cannot
-                // prove the action did not land, and §4.1 spends the frame for
-                // exactly this case.
-                return PerformedAction(
-                    outcome: .unknown,
-                    path: .axAction,
-                    tier: .ax,
-                    verdict: hostEffectFromActionResult(),
-                    failure: HostDomainError(.outcomeUnknown)
-                )
+            case .cannotComplete, .invalidUIElement:
+                // The app accepted neither the message nor a refusal, or a repeat
+                // failed after an earlier one landed. Either way we cannot prove
+                // the action did not land, and §4.1 spends the frame for exactly
+                // this case.
+                return unknownOutcome()
             default:
-                return refused(.dispatchRefused, path: .axAction)
+                // A failure part-way through a double or triple click means the
+                // earlier presses did happen, so "nothing happened" would be a
+                // lie; only a first-press failure is `failed`.
+                return delivered == 0 ? failed(.dispatchRefused, path: .axAction) : unknownOutcome()
             }
         }
 
@@ -536,16 +568,46 @@ extension HostProtocolServer {
         )
     }
 
-    private func refused(_ code: HostDomainErrorCode, path: HostDispatchPath = .none) -> PerformedAction {
+    /// §6.5 — `refused` means nothing was dispatched, so it always reports
+    /// `path: none`; the tier travels anyway, because it is the tier the executor
+    /// would have used.
+    private func refused(_ code: HostDomainErrorCode) -> PerformedAction {
         PerformedAction(
             outcome: .refused,
-            path: path,
-            tier: path.tier ?? .ax,
+            path: .none,
+            tier: .ax,
             verdict: HostEffectVerdict(
                 effect: .unverifiable,
                 verification: HostVerification(method: .none, observedChange: false)
             ),
             failure: HostDomainError(code)
+        )
+    }
+
+    /// §6.5 — `failed` means the path named here was attempted and the OS
+    /// rejected it. Reporting that as `refused` erased the difference between
+    /// "we never tried" and "we tried and it said no", which is the difference
+    /// between "try something else" and "try again".
+    private func failed(_ code: HostDomainErrorCode, path: HostDispatchPath) -> PerformedAction {
+        PerformedAction(
+            outcome: .failed,
+            path: path,
+            tier: path.tier ?? .ax,
+            verdict: HostEffectVerdict(
+                effect: .unverifiable,
+                verification: HostVerification(method: .actionResult, observedChange: false)
+            ),
+            failure: HostDomainError(code)
+        )
+    }
+
+    private func unknownOutcome() -> PerformedAction {
+        PerformedAction(
+            outcome: .unknown,
+            path: .axAction,
+            tier: .ax,
+            verdict: hostEffectFromActionResult(),
+            failure: HostDomainError(.outcomeUnknown)
         )
     }
 
@@ -581,7 +643,7 @@ extension HostProtocolServer {
             : fallbackVerdict
 
         var post: HostSnapshotPayload?
-        var postError: HostDomainErrorCode?
+        var postError: HostDomainErrorPayload?
 
         if let observeAfter {
             switch buildSnapshot(
@@ -598,7 +660,7 @@ extension HostProtocolServer {
             case .failure(let error):
                 // §6.1 — the action happened and must be reported even though the
                 // frame after it could not be.
-                postError = error.code
+                postError = HostDomainErrorPayload(error)
             }
         }
 
@@ -626,7 +688,7 @@ extension HostProtocolServer {
         window: HostWindowInfo
     ) -> (report: HostSettleReport, digest: String?) {
         let started = Date()
-        let probe = HostAXBindingProbe(windowBounds: window.bounds)
+        let probe = environment.bindingProbe(windowBounds: window.bounds)
         var previous: String?
 
         while Date().timeIntervalSince(started) * 1000 < Double(limits.settleCeilingMs) {
@@ -673,37 +735,59 @@ extension HostProtocolServer {
             return
         }
 
+        // §6.5 — a point dispatch would have used a coordinate path, so that is
+        // the tier a refusal reports even though nothing was dispatched.
+        func refuse(_ error: HostDomainError) {
+            emit(id: id, toolCallId: params.toolCallId, dispatchFailure: error, tier: .coordinateBackground)
+        }
+
         let registry = currentRegistry()
         let snapshot: HostSnapshot
         switch registry.resolve(session: params.session, snapshotId: params.snapshotId, now: hostNowMs()) {
         case .success(let resolved):
             snapshot = resolved
         case .failure(let error):
-            emit(id: id, failure: error, toolCallId: params.toolCallId)
+            refuse(error)
             return
         }
 
-        // A point has no element to anchor to, so the whole window is the anchor.
+        // The echo is host bookkeeping, not evidence about the world: a digest
+        // that is not the one this snapshot recorded means the host paired a
+        // window digest with the wrong `snapshotId`. Reporting `window_changed`
+        // for it sent the host round the re-observe loop with the same wrong
+        // pairing, which is the collapse §6.2 separates one level down.
         guard params.expectWindowDigest == snapshot.windowDigest else {
-            emit(id: id, failure: HostDomainError(.windowChanged), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.elementDigestMismatch))
             return
         }
 
         if cancellations.isCancelledBeforeDispatch(id: id) {
-            emit(id: id, failure: HostDomainError(.aborted), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.aborted))
             return
         }
 
-        let windows = HostWindowInventory.onScreenWindows()
+        let windows = environment.onScreenWindows()
         guard let window = windows.first(where: { $0.pid == snapshot.pid && $0.windowId == snapshot.windowId }) else {
-            emit(id: id, failure: HostDomainError(.windowGone), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.windowGone))
+            return
+        }
+
+        // §6.3 — a point has no element to anchor to, so the whole window is the
+        // anchor, and an anchor is only an anchor if it is recomputed. Comparing
+        // the echo against the recorded digest and stopping there checked the
+        // host against itself: inside the TTL the click went to whatever the
+        // window had become, and because the screen point is derived from the
+        // *current* bounds a resize rescaled it silently.
+        let probe = environment.bindingProbe(windowBounds: window.bounds)
+        guard recomputeWindowDigest(snapshot: snapshot, window: window, probe: probe) == snapshot.windowDigest else {
+            refuse(HostDomainError(.windowChanged))
             return
         }
 
         // `image_px` is only meaningful against the image the quoted snapshot
         // carried, and its measured scale is the only conversion we trust.
         guard let scale = snapshot.payload.image?.scale, scale > 0 else {
-            emit(id: id, failure: HostDomainError(.invalidPoint), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.invalidPoint))
             return
         }
 
@@ -729,7 +813,7 @@ extension HostProtocolServer {
         case .success(let selected):
             path = selected
         case .failure(let error):
-            emit(id: id, failure: error, toolCallId: params.toolCallId)
+            refuse(error)
             return
         }
 
@@ -746,7 +830,7 @@ extension HostProtocolServer {
             targetPoint: screenPoint,
             obscuringWindows: obscuring
         ) {
-            emit(id: id, failure: HostDomainError(.windowOccluded), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.windowOccluded))
             return
         }
 
@@ -754,18 +838,29 @@ extension HostProtocolServer {
         cancellations.markDispatched(id: id)
 
         do {
-            try postPointEvent(
+            try environment.postPointEvent(
                 params.action,
                 at: screenPoint,
                 from: screenStart,
                 pid: snapshot.pid,
                 path: path
             )
-        } catch let error as HostDomainError {
-            emit(id: id, failure: error, toolCallId: params.toolCallId)
+        } catch let error as HostDomainError where error.code != .dispatchRefused {
+            // The event was never built, so nothing was attempted.
+            refuse(error)
             return
         } catch {
-            emit(id: id, failure: HostDomainError(.dispatchRefused), toolCallId: params.toolCallId)
+            // §6.5 — the path was taken and the OS rejected it: `failed`, naming
+            // the path attempted, not `refused` with `path: none`.
+            emit(
+                id: id,
+                toolCallId: params.toolCallId,
+                dispatchFailure: HostDomainError(.dispatchRefused),
+                outcome: .failed,
+                tier: path.tier ?? .coordinateBackground,
+                path: path,
+                verdict: hostEffectFromActionResult()
+            )
             return
         }
 
@@ -783,65 +878,17 @@ extension HostProtocolServer {
         )
     }
 
-    private func postPointEvent(
-        _ action: HostPointAction,
-        at point: CGPoint,
-        from start: CGPoint?,
-        pid: pid_t,
-        path: HostDispatchPath
-    ) throws {
-        // Only the pid-bound paths are reachable when `allowGlobalPointer` is
-        // false, and `hostPointDispatchPath` has already refused anything else.
-        switch action {
-        case .move:
-            try InputSimulation.moveGlobally(to: point)
-        case .leftClick(let count):
-            try postClick(at: point, button: .left, count: count, pid: pid, path: path)
-        case .rightClick(let count):
-            try postClick(at: point, button: .right, count: count, pid: pid, path: path)
-        case .middleClick(let count):
-            try postClick(at: point, button: .middle, count: count, pid: pid, path: path)
-        case .mouseDown, .mouseUp:
-            // A half click has no target-bound form that survives the executor's
-            // own event source going away between the two halves.
-            throw HostDomainError(.unsupportedAction)
-        case .drag:
-            guard let start else {
-                throw HostDomainError(.invalidPoint)
-            }
-            if path == .cgEventGlobal {
-                try InputSimulation.dragGlobally(from: start, to: point)
-            } else {
-                try InputSimulation.dragTargeted(from: start, to: point, pid: pid)
-            }
-        case .scroll(let direction, let pages):
-            if path == .cgEventGlobal {
-                try InputSimulation.scrollGlobally(at: point, direction: direction.rawValue, pages: pages)
-            } else {
-                try InputSimulation.scrollTargeted(at: point, direction: direction.rawValue, pages: pages, pid: pid)
-            }
-        }
-    }
-
-    private func postClick(
-        at point: CGPoint,
-        button: MouseButtonKind,
-        count: Int,
-        pid: pid_t,
-        path: HostDispatchPath
-    ) throws {
-        if path == .cgEventGlobal {
-            try InputSimulation.clickGlobally(at: point, button: button, clickCount: count)
-        } else {
-            try InputSimulation.clickTargeted(at: point, button: button, clickCount: count, pid: pid)
-        }
-    }
-
     // MARK: dispatch.key
 
     func handleDispatchKey(id: Int, params: HostDispatchKeyParams) {
         guard requireSession(id: id, session: params.session) else {
             return
+        }
+
+        // Keys are posted to the target pid, so a refusal names the coordinate
+        // tier it would have used (§6.5).
+        func refuse(_ error: HostDomainError) {
+            emit(id: id, toolCallId: params.toolCallId, dispatchFailure: error, tier: .coordinateBackground)
         }
 
         let registry = currentRegistry()
@@ -850,30 +897,35 @@ extension HostProtocolServer {
         case .success(let resolved):
             snapshot = resolved
         case .failure(let error):
-            emit(id: id, failure: error, toolCallId: params.toolCallId)
+            refuse(error)
             return
         }
 
-        guard let binding = snapshot.binding(for: params.focusToken),
-              binding.digest == params.expectElementDigest
-        else {
-            emit(id: id, failure: HostDomainError(.elementUnknown), toolCallId: params.toolCallId)
+        // §6.2 — the same three-way split as `dispatch.element`: an unminted
+        // token is one fault, an echo the snapshot never recorded is another.
+        guard let binding = snapshot.binding(for: params.focusToken) else {
+            refuse(HostDomainError(.elementUnknown))
+            return
+        }
+
+        guard binding.digest == params.expectElementDigest else {
+            refuse(HostDomainError(.elementDigestMismatch))
             return
         }
 
         if cancellations.isCancelledBeforeDispatch(id: id) {
-            emit(id: id, failure: HostDomainError(.aborted), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.aborted))
             return
         }
 
-        let windows = HostWindowInventory.onScreenWindows()
+        let windows = environment.onScreenWindows()
         guard let window = windows.first(where: { $0.pid == snapshot.pid && $0.windowId == snapshot.windowId }) else {
-            emit(id: id, failure: HostDomainError(.windowGone), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.windowGone))
             return
         }
 
-        if let failure = hostVerifyBinding(binding, probe: HostAXBindingProbe(windowBounds: window.bounds)) {
-            emit(id: id, failure: failure, toolCallId: params.toolCallId)
+        if let failure = hostVerifyBinding(binding, probe: environment.bindingProbe(windowBounds: window.bounds)) {
+            refuse(failure)
             return
         }
 
@@ -881,10 +933,10 @@ extension HostProtocolServer {
         // `focusedElement` has become since the snapshot is the same class of
         // defect as re-resolving an index.
         guard let element = binding.element,
-              let focused = HostAX.focusedElement(pid: snapshot.pid),
+              let focused = environment.focusedElement(pid: snapshot.pid),
               CFEqual(focused, element)
         else {
-            emit(id: id, failure: HostDomainError(.focusChanged), toolCallId: params.toolCallId)
+            refuse(HostDomainError(.focusChanged))
             return
         }
 
@@ -907,7 +959,17 @@ extension HostProtocolServer {
                 )
             }
         } catch {
-            emit(id: id, failure: HostDomainError(.dispatchRefused), toolCallId: params.toolCallId)
+            // §6.5 — the events were posted to the pid and rejected: `failed`,
+            // naming the path that was attempted.
+            emit(
+                id: id,
+                toolCallId: params.toolCallId,
+                dispatchFailure: HostDomainError(.dispatchRefused),
+                outcome: .failed,
+                tier: .coordinateBackground,
+                path: .cgEventPid,
+                verdict: hostEffectFromActionResult()
+            )
             return
         }
 
@@ -966,7 +1028,7 @@ extension HostProtocolServer {
         if let waitMs = params.waitForWindowMs, waitMs > 0 {
             reason = .timeout
             while Date().timeIntervalSince(started) * 1000 < Double(waitMs) {
-                let found = HostWindowInventory.onScreenWindows()
+                let found = environment.onScreenWindows()
                     .filter { $0.pid == app.pid && $0.layer == 0 }
                 if !found.isEmpty {
                     windows = found.map {
@@ -979,7 +1041,7 @@ extension HostProtocolServer {
                 Thread.sleep(forTimeInterval: 0.1)
             }
         } else {
-            windows = HostWindowInventory.onScreenWindows()
+            windows = environment.onScreenWindows()
                 .filter { $0.pid == app.pid && $0.layer == 0 }
                 .map { HostAppsLaunchResult.LaunchedWindow(windowId: $0.windowId, title: $0.title) }
         }
@@ -990,7 +1052,10 @@ extension HostProtocolServer {
             id: id,
             payload: HostAppsLaunchResult(
                 pid: app.pid,
-                bundleId: app.bundleIdentifier,
+                // §5.7 — the request may be a display name because a not-running
+                // app has no `appId` yet; the answer is always in the one
+                // namespace, and every later call uses it.
+                appId: hostAppId(bundleIdentifier: app.bundleIdentifier, pid: app.pid),
                 name: app.name,
                 // §5 — declared, not inferred. An absent boolean that means
                 // "unknown" is a three-valued field pretending to be two, and a
@@ -1026,12 +1091,23 @@ extension HostProtocolServer {
             case .failure(let error):
                 emit(id: id, failure: error)
             case .success(let reference):
+                let capturedAt = hostNowMs()
+                // §8 — this image is attached to no snapshot, so nothing else
+                // would ever delete it. The session records it, expires it on the
+                // snapshot TTL, and releases whatever is left at `session.end`.
+                currentRegistry().registerUnattachedImage(
+                    session: params.session,
+                    path: reference.path,
+                    capturedAt: capturedAt
+                )
+                currentRegistry().sweepUnattachedImages(now: capturedAt)
+
                 emit(
                     id: id,
                     payload: HostScreenCaptureResult(
                         image: reference,
                         displayId: params.displayId,
-                        capturedAt: hostNowMs()
+                        capturedAt: capturedAt
                     )
                 )
             }
