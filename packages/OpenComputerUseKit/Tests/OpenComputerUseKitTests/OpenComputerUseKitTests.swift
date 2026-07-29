@@ -15,41 +15,7 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["help", "snapshot"]), .help(command: "snapshot"))
         XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["snapshot", "--help"]), .help(command: "snapshot"))
         XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["doctor", "-h"]), .help(command: "doctor"))
-        XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["call", "--help"]), .help(command: "call"))
-    }
-
-    func testCLIRecognizesSingleToolCallCommand() throws {
-        XCTAssertEqual(
-            try parseOpenComputerUseCLI(arguments: ["call", "list_apps"]),
-            .call(.single(toolName: "list_apps", argumentsJSON: nil, argumentsFile: nil))
-        )
-
-        XCTAssertEqual(
-            try parseOpenComputerUseCLI(arguments: ["call", "get_app_state", "--args", #"{"app":"TextEdit"}"#]),
-            .call(.single(toolName: "get_app_state", argumentsJSON: #"{"app":"TextEdit"}"#, argumentsFile: nil))
-        )
-    }
-
-    func testCLIRecognizesJSONSequenceCallCommand() throws {
-        let calls = #"[{"tool":"get_app_state","args":{"app":"TextEdit"}},{"tool":"press_key","args":{"app":"TextEdit","key":"Return"}}]"#
-
-        XCTAssertEqual(
-            try parseOpenComputerUseCLI(arguments: ["call", "--calls", calls]),
-            .call(.sequence(
-                callsJSON: calls,
-                callsFile: nil,
-                interCallDelay: openComputerUseDefaultInterCallDelay
-            ))
-        )
-    }
-
-    func testCLIRecognizesJSONSequenceCallCommandWithCustomSleep() throws {
-        let calls = #"[{"tool":"get_app_state","args":{"app":"TextEdit"}},{"tool":"press_key","args":{"app":"TextEdit","key":"Return"}}]"#
-
-        XCTAssertEqual(
-            try parseOpenComputerUseCLI(arguments: ["call", "--calls", calls, "--sleep", "0.5"]),
-            .call(.sequence(callsJSON: calls, callsFile: nil, interCallDelay: 0.5))
-        )
+        XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["host", "--help"]), .help(command: "host"))
     }
 
     func testCLIRecognizesTurnEndedNotifyPayload() throws {
@@ -151,42 +117,6 @@ final class OpenComputerUseKitTests: XCTestCase {
         }
     }
 
-    func testCLIRejectsMixedCallSequenceInputs() {
-        XCTAssertThrowsError(try parseOpenComputerUseCLI(arguments: ["call", "list_apps", "--calls", "[]"])) { error in
-            XCTAssertEqual(
-                error as? OpenComputerUseCLIError,
-                OpenComputerUseCLIError(
-                    message: "call sequence does not accept a tool name, --args, or --args-file",
-                    helpCommand: "call"
-                )
-            )
-        }
-    }
-
-    func testCLIRejectsSleepForSingleToolCall() {
-        XCTAssertThrowsError(try parseOpenComputerUseCLI(arguments: ["call", "list_apps", "--sleep", "0.5"])) { error in
-            XCTAssertEqual(
-                error as? OpenComputerUseCLIError,
-                OpenComputerUseCLIError(
-                    message: "--sleep is only supported with --calls or --calls-file",
-                    helpCommand: "call"
-                )
-            )
-        }
-    }
-
-    func testCLIRejectsInvalidSequenceSleepValue() {
-        XCTAssertThrowsError(try parseOpenComputerUseCLI(arguments: ["call", "--calls", "[]", "--sleep", "-1"])) { error in
-            XCTAssertEqual(
-                error as? OpenComputerUseCLIError,
-                OpenComputerUseCLIError(
-                    message: "--sleep requires a non-negative number of seconds",
-                    helpCommand: "call"
-                )
-            )
-        }
-    }
-
     func testCLIRejectsUnknownOption() {
         XCTAssertThrowsError(try parseOpenComputerUseCLI(arguments: ["--verbose"])) { error in
             XCTAssertEqual(
@@ -204,7 +134,8 @@ final class OpenComputerUseKitTests: XCTestCase {
 
         XCTAssertTrue(help.contains("open-computer-use [command] [options]"))
         XCTAssertTrue(help.contains("snapshot <app>"))
-        XCTAssertTrue(help.contains("call <tool>"))
+        XCTAssertTrue(help.contains("host "))
+        XCTAssertFalse(help.contains("mcp"), "the MCP surface is gone; the host protocol replaced it")
         XCTAssertTrue(help.contains("-h, --help"))
         XCTAssertTrue(help.contains("-v, --version"))
     }
@@ -234,160 +165,6 @@ final class OpenComputerUseKitTests: XCTestCase {
 
         XCTAssertEqual(size.width, 32)
         XCTAssertEqual(size.height, 24)
-    }
-
-    func testToolDefinitionCount() {
-        XCTAssertEqual(ToolDefinitions.all.count, 9)
-    }
-
-    func testReadToolArgumentsAcceptsJSONObject() throws {
-        let arguments = try readOpenComputerUseToolArguments(
-            json: #"{"app":"TextEdit","pages":2}"#,
-            file: nil
-        )
-
-        XCTAssertEqual(arguments["app"] as? String, "TextEdit")
-        XCTAssertEqual((arguments["pages"] as? NSNumber)?.intValue, 2)
-    }
-
-    func testElementIndexAcceptsNumericToolArgument() throws {
-        let arguments = try readOpenComputerUseToolArguments(
-            json: #"{"app":"TextEdit","element_index":0}"#,
-            file: nil
-        )
-
-        XCTAssertEqual(normalizedElementIndexArgument(arguments["element_index"]), "0")
-    }
-
-    func testElementIndexAcceptsNumericCallSequenceArgument() throws {
-        let calls = try readOpenComputerUseCallSequence(
-            json: #"[{"tool":"click","args":{"app":"TextEdit","element_index":0}}]"#,
-            file: nil
-        )
-
-        XCTAssertEqual(normalizedElementIndexArgument(calls[0].arguments["element_index"]), "0")
-    }
-
-    func testElementIndexRejectsMissingEmptyAndFractionalArguments() {
-        XCTAssertNil(normalizedElementIndexArgument(nil))
-        XCTAssertNil(normalizedElementIndexArgument(""))
-        XCTAssertNil(normalizedElementIndexArgument(1.5))
-    }
-
-    func testReadToolArgumentsRejectsNonObject() {
-        XCTAssertThrowsError(try readOpenComputerUseToolArguments(json: #"["TextEdit"]"#, file: nil)) { error in
-            XCTAssertEqual(
-                error as? OpenComputerUseCLIError,
-                OpenComputerUseCLIError(message: "--args must be a JSON object", helpCommand: "call")
-            )
-        }
-    }
-
-    func testReadCallSequenceAcceptsJSONArrays() throws {
-        let calls = try readOpenComputerUseCallSequence(
-            json: #"[{"tool":"get_app_state","args":{"app":"TextEdit"}},{"name":"press_key","arguments":{"app":"TextEdit","key":"Return"}}]"#,
-            file: nil
-        )
-
-        XCTAssertEqual(calls.count, 2)
-        XCTAssertEqual(calls[0].tool, "get_app_state")
-        XCTAssertEqual(calls[0].arguments["app"] as? String, "TextEdit")
-        XCTAssertEqual(calls[1].tool, "press_key")
-        XCTAssertEqual(calls[1].arguments["key"] as? String, "Return")
-    }
-
-    func testRunCallSequenceStopsAfterFirstToolError() throws {
-        let output = try runOpenComputerUseCall(
-            .sequence(
-                callsJSON: #"[{"tool":"not_a_tool"},{"tool":"list_apps"}]"#,
-                callsFile: nil,
-                interCallDelay: openComputerUseDefaultInterCallDelay
-            )
-        )
-
-        let outputs = try XCTUnwrap(output.jsonObject as? [[String: Any]])
-        XCTAssertEqual(outputs.count, 1)
-        XCTAssertTrue(output.hasToolError)
-    }
-
-    func testRunCallSequenceSleepsBetweenSuccessfulOperations() throws {
-        var recordedSleeps: [TimeInterval] = []
-
-        let output = try runOpenComputerUseCall(
-            .sequence(
-                callsJSON: #"[{"tool":"list_apps"},{"tool":"list_apps"},{"tool":"list_apps"}]"#,
-                callsFile: nil,
-                interCallDelay: openComputerUseDefaultInterCallDelay
-            ),
-            sleepHandler: { recordedSleeps.append($0) }
-        )
-
-        let outputs = try XCTUnwrap(output.jsonObject as? [[String: Any]])
-        XCTAssertEqual(outputs.count, 3)
-        XCTAssertEqual(recordedSleeps, [openComputerUseDefaultInterCallDelay, openComputerUseDefaultInterCallDelay])
-        XCTAssertFalse(output.hasToolError)
-    }
-
-    func testMacOSAppAgentProxyDecisionRoutesAutomationCommandsThroughAppBundle() {
-        for command in [
-            OpenComputerUseCLICommand.mcp,
-            .doctor,
-            .listApps,
-            .snapshot(app: "TextEdit"),
-            .call(.single(toolName: "list_apps", argumentsJSON: nil, argumentsFile: nil)),
-        ] {
-            XCTAssertTrue(shouldUseMacOSAppAgentProxy(
-                command: command,
-                proxyDisabled: false,
-                appBundleAvailable: true,
-                runningFromLaunchServicesAppInstance: false
-            ))
-        }
-    }
-
-    func testMacOSAppAgentProxyDecisionKeepsNonAutomationCommandsLocal() {
-        for command in [
-            OpenComputerUseCLICommand.turnEnded(payload: nil),
-            .help(command: nil),
-            .version,
-        ] {
-            XCTAssertFalse(shouldUseMacOSAppAgentProxy(
-                command: command,
-                proxyDisabled: false,
-                appBundleAvailable: true,
-                runningFromLaunchServicesAppInstance: false
-            ))
-        }
-    }
-
-    func testMacOSAppAgentProxyDecisionDoesNotProxyLaunchServicesAppOpen() {
-        XCTAssertTrue(shouldUseMacOSAppAgentProxy(
-            command: .launchOnboarding,
-            proxyDisabled: false,
-            appBundleAvailable: true,
-            runningFromLaunchServicesAppInstance: false
-        ))
-        XCTAssertFalse(shouldUseMacOSAppAgentProxy(
-            command: .launchOnboarding,
-            proxyDisabled: false,
-            appBundleAvailable: true,
-            runningFromLaunchServicesAppInstance: true
-        ))
-    }
-
-    func testMacOSAppAgentProxyDecisionHonorsDisableAndMissingBundle() {
-        XCTAssertFalse(shouldUseMacOSAppAgentProxy(
-            command: .doctor,
-            proxyDisabled: true,
-            appBundleAvailable: true,
-            runningFromLaunchServicesAppInstance: false
-        ))
-        XCTAssertFalse(shouldUseMacOSAppAgentProxy(
-            command: .doctor,
-            proxyDisabled: false,
-            appBundleAvailable: false,
-            runningFromLaunchServicesAppInstance: false
-        ))
     }
 
     func testPermissionDiagnosticsListsMissingPermissionsInCanonicalOrder() {
@@ -566,34 +343,6 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(try KeyPressParser.parse("F12").displayValue, "f12")
     }
 
-    func testInitializeResponseContainsToolsCapability() throws {
-        let server = StdioMCPServer(service: ComputerUseService())
-        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.3.0"},"capabilities":{}}}"#)
-        XCTAssertNotNil(response)
-        XCTAssertTrue(response!.contains(#""name":"open-computer-use""#))
-        XCTAssertTrue(response!.contains(#""tools":{"listChanged":false}"#))
-    }
-
-    func testInitializeResponseContainsComputerUseInstructions() throws {
-        let server = StdioMCPServer(service: ComputerUseService())
-        let response = try XCTUnwrap(
-            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.3.0"},"capabilities":{}}}"#)
-        )
-        let data = try XCTUnwrap(response.data(using: .utf8))
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let result = try XCTUnwrap(json["result"] as? [String: Any])
-        let instructions = try XCTUnwrap(result["instructions"] as? String)
-
-        XCTAssertEqual(instructions, computerUseServerInstructions)
-    }
-
-    func testMCPAcceptsTurnEndedNotificationWithoutResponse() {
-        let server = StdioMCPServer(service: ComputerUseService())
-        let response = server.handle(line: #"{"jsonrpc":"2.0","method":"notifications/turn-ended","params":{"type":"agent-turn-complete"}}"#)
-
-        XCTAssertNil(response)
-    }
-
     func testWindowRelativeFrameUsesSharedGlobalCoordinates() {
         let window = CGRect(x: 1486, y: 556, width: 919, height: 644)
         let child = CGRect(x: 1486, y: 556, width: 919, height: 644)
@@ -602,66 +351,6 @@ final class OpenComputerUseKitTests: XCTestCase {
 
         XCTAssertEqual(windowRelativeFrame(elementFrame: child, windowBounds: window), CGRect(x: 0, y: 0, width: 919, height: 644))
         XCTAssertEqual(windowRelativeFrame(elementFrame: textFieldGlobal, windowBounds: window), textField)
-    }
-
-    func testToolDescriptionsMatchOfficialComputerUseSurface() {
-        let tools = Dictionary(uniqueKeysWithValues: ToolDefinitions.all.map { ($0.name, $0) })
-
-        XCTAssertEqual(
-            tools["get_app_state"]?.description,
-            "Start an app use session if needed, then get the state of the app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`."
-        )
-        XCTAssertTrue(tools["press_key"]?.description.contains("xdotool") == true)
-        XCTAssertEqual(
-            tools["click"]?.annotations["destructiveHint"] as? Bool,
-            false
-        )
-        XCTAssertEqual(
-            tools["get_app_state"]?.annotations["readOnlyHint"] as? Bool,
-            true
-        )
-        XCTAssertEqual(
-            tools["click"]?.inputSchema["additionalProperties"] as? Bool,
-            false
-        )
-        XCTAssertEqual(
-            ((tools["click"]?.inputSchema["properties"] as? [String: [String: Any]])?["mouse_button"]?["enum"] as? [String]) ?? [],
-            ["left", "right", "middle"]
-        )
-        XCTAssertEqual(
-            ((tools["click"]?.inputSchema["properties"] as? [String: [String: Any]])?["click_method"]?["enum"] as? [String]) ?? [],
-            ["auto", "accessibility", "app_post", "sky_click", "global"]
-        )
-        let getAppStateSchema = tools["get_app_state"]?.inputSchema
-        let getAppStateProperties = getAppStateSchema?["properties"] as? [String: [String: Any]]
-        XCTAssertNil(getAppStateProperties?["show_full_text"])
-        let textLimitAnyOf = getAppStateProperties?["text_limit"]?["anyOf"] as? [[String: Any]]
-        XCTAssertEqual(textLimitAnyOf?[0]["type"] as? String, "integer")
-        XCTAssertEqual(textLimitAnyOf?[0]["minimum"] as? Int, 1)
-        XCTAssertEqual(textLimitAnyOf?[1]["type"] as? String, "string")
-        XCTAssertEqual(textLimitAnyOf?[1]["enum"] as? [String], ["max"])
-        XCTAssertEqual(getAppStateProperties?["max_tree_nodes"]?["type"] as? String, "integer")
-        XCTAssertEqual(getAppStateProperties?["max_tree_nodes"]?["minimum"] as? Int, 1)
-        XCTAssertEqual(getAppStateProperties?["max_tree_depth"]?["type"] as? String, "integer")
-        XCTAssertEqual(getAppStateProperties?["max_tree_depth"]?["minimum"] as? Int, 1)
-        XCTAssertEqual(getAppStateSchema?["required"] as? [String], ["app"])
-        let scrollPages = (tools["scroll"]?.inputSchema["properties"] as? [String: [String: Any]])?["pages"]
-        XCTAssertEqual(scrollPages?["type"] as? String, "number")
-        XCTAssertEqual(
-            scrollPages?["description"] as? String,
-            "Number of pages to scroll. Fractional values are supported. Defaults to 1"
-        )
-    }
-
-    func testDispatcherMissingArgumentsMatchOfficialToolText() {
-        let dispatcher = ComputerUseToolDispatcher()
-        let result = dispatcher.callToolAsResult(name: "type_text", arguments: ["app": "Sublime Text"])
-        let emptyResult = dispatcher.callToolAsResult(name: "type_text", arguments: ["app": "Sublime Text", "text": ""])
-
-        XCTAssertTrue(result.isError)
-        XCTAssertEqual(result.primaryText, "Missing required argument: text")
-        XCTAssertTrue(emptyResult.isError)
-        XCTAssertEqual(emptyResult.primaryText, "Missing required argument: text")
     }
 
     func testTypeTextUnicodeChunksPreserveGraphemeClusters() {
@@ -683,28 +372,6 @@ final class OpenComputerUseKitTests: XCTestCase {
                 1
             )
         }
-    }
-
-    func testScrollRejectsInvalidDirectionWithOfficialMessage() {
-        let dispatcher = ComputerUseToolDispatcher()
-        let result = dispatcher.callToolAsResult(
-            name: "scroll",
-            arguments: ["app": "Sublime Text", "element_index": "14", "direction": "sideways", "pages": 1]
-        )
-
-        XCTAssertTrue(result.isError)
-        XCTAssertEqual(result.primaryText, "Invalid scroll direction: sideways")
-    }
-
-    func testScrollRejectsNonPositivePagesWithOfficialMessage() {
-        let dispatcher = ComputerUseToolDispatcher()
-        let result = dispatcher.callToolAsResult(
-            name: "scroll",
-            arguments: ["app": "Sublime Text", "element_index": "14", "direction": "down", "pages": 0.0]
-        )
-
-        XCTAssertTrue(result.isError)
-        XCTAssertEqual(result.primaryText, "pages must be > 0")
     }
 
     func testSecondaryActionInvalidMessageMatchesOfficialShape() {

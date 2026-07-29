@@ -3,7 +3,7 @@ SLUG ?=
 AGENTS ?= claude,codex
 SCENARIO ?= list-apps
 
-.PHONY: init build app test smoke stress agent-smoke check-docs check-repo ci release-package npm-build npm-publish new-history new-plan
+.PHONY: init build app test conformance agent-smoke check-docs check-repo ci release-package npm-build npm-publish new-history new-plan
 
 init:
 	@if [ -z "$(PROJECT)" ]; then echo "用法: make init PROJECT=项目名"; exit 1; fi
@@ -18,11 +18,8 @@ app:
 test:
 	swift test
 
-smoke:
-	./scripts/run-tool-smoke-tests.sh
-
-stress:
-	./scripts/run-tool-stress-tests.sh
+conformance:
+	swift test --filter HostProtocolTests
 
 agent-smoke:
 	node ./scripts/run-agent-smoke-tests.mjs --agents=$(AGENTS) --scenario=$(SCENARIO)

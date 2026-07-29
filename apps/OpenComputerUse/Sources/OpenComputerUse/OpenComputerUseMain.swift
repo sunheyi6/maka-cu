@@ -24,29 +24,19 @@ enum OpenComputerUseMain {
 
     @MainActor
     private static func run() throws {
+        // §11 — the host spawns the executor as a direct child, because macOS
+        // attributes TCC grants through the responsibility chain and a helper
+        // relaunched through LaunchServices gets its own attribution and its own
+        // prompts. Nothing here re-launches the process.
         let arguments = Array(CommandLine.arguments.dropFirst())
-
-        if MacOSAppAgentProxy.isAgentInvocation(arguments: arguments) {
-            try MacOSAppAgentProxy.runAgent(arguments: arguments)
-            return
-        }
-
         let command = try parseOpenComputerUseCLI(arguments: arguments)
 
-        if MacOSAppAgentProxy.shouldProxy(command: command) {
-            exit(try MacOSAppAgentProxy.runProxy(command: command, arguments: arguments))
-        }
-
         switch command {
-        case .mcp:
-            let service = ComputerUseService()
-            let server = StdioMCPServer(service: service)
-            if VisualCursorSupport.isEnabled {
-                try MainActor.assumeIsolated {
-                    try MCPAppRuntime.run(server: server)
-                }
-            } else {
-                try server.run()
+        case .host:
+            let server = HostProtocolServer()
+            server.run()
+            if server.exitStatus != 0 {
+                exit(server.exitStatus)
             }
         case .doctor:
             let permissions = PermissionDiagnostics.current()
@@ -56,19 +46,10 @@ enum OpenComputerUseMain {
             }
         case .listApps:
             let service = ComputerUseService()
-            print(service.listApps().primaryText ?? "")
+            print(service.listApps())
         case let .snapshot(app, textLimit, treeLimits):
             let service = ComputerUseService()
-            print(try service.getAppState(app: app, textLimit: textLimit, treeLimits: treeLimits).primaryText ?? "")
-        case let .call(invocation):
-            if VisualCursorSupport.isEnabled {
-                _ = NSApplication.shared.setActivationPolicy(.accessory)
-            }
-            let output = try runOpenComputerUseCall(invocation)
-            print(try output.jsonText())
-            if output.hasToolError {
-                exit(EXIT_FAILURE)
-            }
+            print(try service.getAppState(app: app, textLimit: textLimit, treeLimits: treeLimits).renderedText)
         case .turnEnded:
             postOpenComputerUseTurnEndedNotification()
             print("turn-ended acknowledged")

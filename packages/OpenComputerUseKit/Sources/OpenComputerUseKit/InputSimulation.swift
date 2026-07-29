@@ -67,6 +67,14 @@ enum InputSimulation {
         }
     }
 
+    static func moveGlobally(to point: CGPoint) throws {
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
+            throw ComputerUseError.message("Failed to create HID event source.")
+        }
+
+        try postMouseEvent(type: .mouseMoved, source: source, point: point, button: .left, clickState: 0)
+    }
+
     static func clickTargeted(at point: CGPoint, button: MouseButtonKind, clickCount: Int, pid: pid_t) throws {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             throw ComputerUseError.message("Failed to create app-post event source.")
@@ -204,9 +212,12 @@ enum InputSimulation {
         return chunks
     }
 
-    static func pressKey(_ specification: String, pid: pid_t) throws {
+    /// `extraFlags` carries modifiers that have no key code to hold down. `fn` is
+    /// the only one today: the `maka.cu/1` wire declares it a modifier, and a
+    /// flag is the only way to deliver it.
+    static func pressKey(_ specification: String, pid: pid_t, extraFlags: CGEventFlags = []) throws {
         let parsed = try KeyPressParser.parse(specification)
-        var activeFlags: CGEventFlags = []
+        var activeFlags: CGEventFlags = extraFlags
 
         for modifier in parsed.modifiers {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: modifier.keyCode, keyDown: true) else {

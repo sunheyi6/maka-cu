@@ -21,10 +21,6 @@ let package = Package(
             targets: ["OpenComputerUseFixture"]
         ),
         .executable(
-            name: "OpenComputerUseSmokeSuite",
-            targets: ["OpenComputerUseSmokeSuite"]
-        ),
-        .executable(
             name: "CursorMotion",
             targets: ["CursorMotion"]
         ),
@@ -47,11 +43,6 @@ let package = Package(
             name: "OpenComputerUseFixture",
             dependencies: ["OpenComputerUseKit"],
             path: "apps/OpenComputerUseFixture/Sources/OpenComputerUseFixture"
-        ),
-        .executableTarget(
-            name: "OpenComputerUseSmokeSuite",
-            dependencies: ["OpenComputerUseKit"],
-            path: "apps/OpenComputerUseSmokeSuite/Sources/OpenComputerUseSmokeSuite"
         ),
         .executableTarget(
             name: "CursorMotion",
