@@ -213,7 +213,7 @@ enum InputSimulation {
     }
 
     /// `extraFlags` carries modifiers that have no key code to hold down. `fn` is
-    /// the only one today: the `maka.cu/1` wire declares it a modifier, and a
+    /// the only one today: the `maka.cu/2` wire declares it a modifier, and a
     /// flag is the only way to deliver it.
     static func pressKey(_ specification: String, pid: pid_t, extraFlags: CGEventFlags = []) throws {
         let parsed = try KeyPressParser.parse(specification)

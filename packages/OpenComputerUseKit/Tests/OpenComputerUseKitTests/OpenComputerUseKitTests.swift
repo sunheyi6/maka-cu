@@ -1474,11 +1474,15 @@ final class OpenComputerUseKitTests: XCTestCase {
     }
 
     func testSoftwareCursorGlyphLoadsCursorMotionReferenceImage() throws {
-        let image = try XCTUnwrap(loadReferenceCursorWindowImage())
-        let bitmap = try XCTUnwrap(image.representations.first)
-
-        XCTAssertEqual(bitmap.pixelsWide, 252)
-        XCTAssertEqual(bitmap.pixelsHigh, 252)
+        // The reference image was a frame extracted from Codex's shipped bundle,
+        // which this fork removed rather than redistribute along with the bundle
+        // itself. The test's premise is gone, not merely failing.
+        //
+        // It is skipped rather than deleted because the assertion it makes —
+        // that the glyph artwork is 252×252 — still describes the cursor code,
+        // and that code is slated for removal in favour of Maka's own engine.
+        // Whoever removes the cursor removes this with it.
+        throw XCTSkip("reference artwork removed with the archived Codex bundles")
     }
 
     func testSoftwareCursorGlyphArtworkNeutralHeadingMatchesCursorMotionBaseline() {
