@@ -365,12 +365,30 @@ enum HostAX {
 
     static func window(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? {
         let application = AXUIElementCreateApplication(pid)
-        // Chromium and Electron withhold parts of their tree until manual
-        // accessibility is enabled; both attributes fail harmlessly elsewhere.
-        _ = AXUIElementSetAttributeValue(application, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        _ = AXUIElementSetAttributeValue(application, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
 
-        let windows = array(application, kAXWindowsAttribute)
+        // Ask first; only reach for the switches if the app really is holding
+        // its tree back.
+        //
+        // `AXEnhancedUserInterface` is the flag VoiceOver sets. Setting it puts
+        // an app into a different accessibility mode, it is process-wide, and
+        // there is no way to put it back — AppKit apps have shipped bugs under
+        // it for years, from slow window resizing to windows that stop
+        // reporting at all. This used to be set on *every* app on *every*
+        // observation, including the great majority that expose their tree
+        // without being asked, which means a read quietly and permanently
+        // changed the thing it was reading.
+        //
+        // Chromium and Electron genuinely need it: they withhold the tree until
+        // something asks. So the rule is ask-then-set, not set-then-ask, and an
+        // app that already answers is left exactly as it was found.
+        var windows = array(application, kAXWindowsAttribute)
+        if windows.isEmpty {
+            _ = AXUIElementSetAttributeValue(
+                application, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(
+                application, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            windows = array(application, kAXWindowsAttribute)
+        }
 
         // There is no public AX attribute carrying a CGWindowID, so the window is
         // matched by its frame against the one the window list reported. Bounds
