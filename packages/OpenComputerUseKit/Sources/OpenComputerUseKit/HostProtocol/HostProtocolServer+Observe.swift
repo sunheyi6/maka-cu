@@ -320,7 +320,7 @@ extension HostProtocolServer {
         // §6.1 `strictness: "window"` — the only defence against recycled row
         // views, at the cost of refusing on any change anywhere in the window.
         if params.strictness == .window {
-            let current = recomputeWindowDigest(snapshot: snapshot, window: window, probe: probe)
+            let current = hostRecomputeWindowDigest(snapshot: snapshot, window: window, probe: probe)
             guard current == snapshot.windowDigest else {
                 refuse(HostDomainError(.windowChanged))
                 return
@@ -399,26 +399,6 @@ extension HostProtocolServer {
             observeAfter: params.observeAfter,
             window: window
         )
-    }
-
-    /// Recomputes the window digest from the snapshot's own bindings, so the
-    /// comparison is over the same element set the host was shown.
-    private func recomputeWindowDigest(
-        snapshot: HostSnapshot,
-        window: HostWindowInfo,
-        probe: any HostElementBindingProbe
-    ) -> String {
-        let digests = snapshot.payload.elements.compactMap { observed -> String? in
-            guard let binding = snapshot.binding(for: observed.token) else {
-                return nil
-            }
-            guard let current = probe.currentDigestInput(binding) else {
-                return nil
-            }
-            return hostElementDigest(current)
-        }
-
-        return hostWindowDigest(elementDigests: digests, bounds: window.bounds, title: window.title)
     }
 
     private struct PerformedAction {
@@ -692,41 +672,148 @@ extension HostProtocolServer {
     }
 
     /// §6.1 — polls the AX tree without an image until two consecutive window
-    /// digests match, or `limits.settleCeilingMs` elapses. The executor owns
-    /// settling because it can watch the tree without a round trip.
+    /// digests match, or the budget can no longer pay for another look. The
+    /// executor owns settling because it can watch the tree without a round trip.
+    ///
+    /// Everything about *when to stop* is in `hostSettle`, which is handed a
+    /// clock; this only supplies the machine.
     private func quiesce(
         snapshot: HostSnapshot,
         window: HostWindowInfo
-    ) -> (report: HostSettleReport, digest: String?) {
-        let started = Date()
+    ) -> (report: HostSettleReport, digest: String) {
         let probe = environment.bindingProbe(windowBounds: window.bounds)
-        var previous: String?
+        return hostSettle(
+            ceilingMs: limits.settleCeilingMs,
+            pollMs: hostSettlePollMs,
+            sample: { hostRecomputeWindowDigest(snapshot: snapshot, window: window, probe: probe) }
+        )
+    }
+}
 
-        while Date().timeIntervalSince(started) * 1000 < Double(limits.settleCeilingMs) {
-            let current = recomputeWindowDigest(snapshot: snapshot, window: window, probe: probe)
-            if current == previous {
-                return (
-                    HostSettleReport(
-                        waitedMs: Int(Date().timeIntervalSince(started) * 1000),
-                        quiesced: true,
-                        reason: .quiesced
-                    ),
-                    current
-                )
-            }
+// MARK: - Settling (§6.1)
 
-            previous = current
-            Thread.sleep(forTimeInterval: 0.05)
+/// Recomputes the window digest from the snapshot's own bindings, so the
+/// comparison is over the same element set the host was shown.
+///
+/// A free function rather than a method because it is also what settling costs:
+/// one call is one Accessibility round trip per recorded element, and the live
+/// half of §12 vector 55 measures it against real windows without standing a
+/// dispatch up to do so.
+func hostRecomputeWindowDigest(
+    snapshot: HostSnapshot,
+    window: HostWindowInfo,
+    probe: any HostElementBindingProbe
+) -> String {
+    let digests = snapshot.payload.elements.compactMap { observed -> String? in
+        guard let binding = snapshot.binding(for: observed.token) else {
+            return nil
+        }
+        guard let current = probe.currentDigestInput(binding) else {
+            return nil
+        }
+        return hostElementDigest(current)
+    }
+
+    return hostWindowDigest(elementDigests: digests, bounds: window.bounds, title: window.title)
+}
+
+/// How long the executor waits between two looks at the same window. Not a
+/// `limits` field: the host neither enforces it nor reasons about it, and §2's
+/// rule is about bounds the host would otherwise hardcode.
+let hostSettlePollMs = 50
+
+/// §6.1 — the whole of "wait for this window to stop changing", with the machine
+/// behind three closures.
+///
+/// `sample` returns the window digest as it is *now*. One call is a round trip
+/// through Accessibility for every element the quoted snapshot recorded, and its
+/// cost is set by the observed application, not by us: measured on macOS 26.5,
+/// TextEdit's 13 elements recompute in 32–49 ms and Calculator's 65 in
+/// 106–304 ms, while System Settings' 337 take 2.18–2.22 s and a Finder window's
+/// 1114–1225 take 3.16–3.62 s. Two looks at that Finder window — the minimum
+/// quiescence can be proven in — is over 6 s against a 2.5 s budget.
+///
+/// Three things this function is answering for, all of which the previous loop
+/// got wrong:
+///
+/// 1. **`waitedMs` is measured, on every arm.** The old timeout arm reported
+///    `limits.settleCeilingMs` as a constant, so a settle that really took 3.7 s
+///    told the host 2500 — and `waitedMs` is the field the host traces
+///    specifically to see overruns. A fabricated one does not merely lose a
+///    measurement, it hides the two defects below from the only instrument
+///    pointed at them.
+///
+/// 2. **The budget is checked before a look, not only after the wait.** The old
+///    loop tested the clock at the top of the iteration, so a look beginning at
+///    2499 ms ran to completion: the real ceiling was "the budget plus one whole
+///    recomputation", and a recomputation is unbounded.
+///
+/// 3. **A window too expensive to look at twice says so.** Proving quiescence
+///    needs two looks that agree, so a window whose single look costs more than
+///    the budget has left can never be proven quiet — the old loop spent two
+///    looks anyway and reported the timeout it was always going to report. This
+///    one stops after the first look and says `window_too_slow`, which is a
+///    different fact from `ceiling`: `ceiling` means it was compared and was
+///    still moving, `window_too_slow` means it was never comparable here.
+///
+/// The first look is unconditional. There is no way to estimate what a window
+/// costs without paying for one, and the digest it produces is what §6.5 judges
+/// the dispatch by — an executor that skipped it to save time would report
+/// `effect` from nothing at all. So the worst case is one look over budget,
+/// where it used to be two.
+///
+/// The estimate is the costliest look so far rather than the last or the mean,
+/// deliberately. Under-estimating starts a look that overruns the budget;
+/// over-estimating ends the settle one look early and says so on the wire. Only
+/// one of those two is honest.
+func hostSettle(
+    ceilingMs: Int,
+    pollMs: Int,
+    sample: () -> String,
+    now: () -> Date = Date.init,
+    sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+) -> (report: HostSettleReport, digest: String) {
+    let started = now()
+    let budget = Double(ceilingMs) / 1000
+    let poll = Double(pollMs) / 1000
+
+    func waited() -> TimeInterval {
+        now().timeIntervalSince(started)
+    }
+
+    // The one place `waitedMs` is produced, so no arm can answer it with
+    // anything but the clock. Rounded rather than truncated: this is a duration
+    // in milliseconds, and truncation would answer a 2.1499999 s wait — which is
+    // what adding the same two intervals repeatedly produces in binary floating
+    // point — with 2149.
+    func report(_ reason: HostSettleReason, quiesced: Bool) -> HostSettleReport {
+        HostSettleReport(waitedMs: Int((waited() * 1000).rounded()), quiesced: quiesced, reason: reason)
+    }
+
+    var previous: String?
+    var costliestSample: TimeInterval = 0
+    var samples = 0
+
+    while true {
+        let sampleStarted = waited()
+        let current = sample()
+        samples += 1
+        costliestSample = max(costliestSample, waited() - sampleStarted)
+
+        if current == previous {
+            return (report(.quiesced, quiesced: true), current)
         }
 
-        return (
-            HostSettleReport(
-                waitedMs: limits.settleCeilingMs,
-                quiesced: false,
-                reason: .ceiling
-            ),
-            previous
-        )
+        previous = current
+
+        if budget - waited() < costliestSample + poll {
+            // `samples` is the whole difference between the two answers: one
+            // look means nothing was ever compared, two or more means the
+            // comparison was made and the window had moved.
+            return (report(samples > 1 ? .ceiling : .windowTooSlow, quiesced: false), current)
+        }
+
+        sleep(poll)
     }
 }
 
@@ -790,7 +877,7 @@ extension HostProtocolServer {
         // window had become, and because the screen point is derived from the
         // *current* bounds a resize rescaled it silently.
         let probe = environment.bindingProbe(windowBounds: window.bounds)
-        guard recomputeWindowDigest(snapshot: snapshot, window: window, probe: probe) == snapshot.windowDigest else {
+        guard hostRecomputeWindowDigest(snapshot: snapshot, window: window, probe: probe) == snapshot.windowDigest else {
             refuse(HostDomainError(.windowChanged))
             return
         }

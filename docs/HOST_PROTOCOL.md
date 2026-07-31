@@ -931,11 +931,63 @@ call without a side table.
 - `"any"` — refuse when any layer-0 window covers it.
 - `"none"` — do not check.
 
-`observeAfter.settle` ∈ `"none" | "quiesce"`. `"quiesce"` polls the AX tree
-without an image until two consecutive window digests match, or
-`limits.settleCeilingMs` elapses. The executor owns settling because it can watch
-the tree without a round trip; the host currently does it with one
-`get_window_state` call per poll.
+`observeAfter.settle` ∈ `"none" | "quiesce"`. `"quiesce"` looks at the window
+repeatedly, without an image, until two consecutive window digests match. The
+executor owns settling because it can watch the tree without a round trip; the
+host currently does it with one `get_window_state` call per poll.
+
+**`settle.waitedMs` is the time the settle really spent.** It is measured from
+the clock on every arm, and it MUST NOT be answered with `limits.settleCeilingMs`
+or any other constant. It may exceed the ceiling — see below — and that is the
+case it exists to report: it is the field the host traces to see overruns, so an
+executor that answers it with the ceiling deletes the only evidence that anything
+overran.
+
+**`settle.reason` says why the executor stopped looking**, and the three ways it
+can stop are three different facts:
+
+| `reason` | `quiesced` | what is known |
+| --- | --- | --- |
+| `quiesced` | `true` | two consecutive looks agreed; the window had stopped |
+| `ceiling` | `false` | two or more looks were compared, they differed, and the budget ran out — the window was still moving |
+| `window_too_slow` | `false` | one look at this window costs more than the budget had left, so the second look that is the only way to prove quiescence was never affordable. Nothing is known about whether it settled, and waiting longer under this budget cannot change that |
+
+`window_too_slow` is not a slower `ceiling`. Proving a window quiet takes two
+looks, and a look costs one Accessibility round trip per element the quoted
+snapshot recorded — a cost set by the observed application and by how much of it
+was recorded, not by the executor. Measured on macOS 26.5, one look at:
+
+| window | elements | one look |
+| --- | --- | --- |
+| TextEdit, a document | 13 | 32–49 ms |
+| iTerm2 | 33 | 17–19 ms |
+| Preview, an image | 25 | 79–90 ms |
+| Calculator | 65 | 106–304 ms |
+| System Settings, Accessibility pane | 337 | 2180–2219 ms |
+| Finder, Applications | 1114–1225 | 3158–3619 ms |
+
+Two runs, minutes apart, on a machine doing other work — the spread is what a
+budget has to survive, not noise to average away.
+
+Two looks at the Finder window is over 6 s against a 2.5 s budget, so that window
+can never be reported `quiesced` — and the executor that shipped spent 3.67 s
+against a 2.5 s budget rediscovering that on every dispatch, then reported
+`ceiling` and `2500`. `ceiling` was a false claim there as well as a late one: it
+says the window was compared and had moved, and nothing had been compared.
+System Settings is the sibling case, where one look fits the budget and two do
+not: the old loop began a second look at 2270 ms because it only tested the
+clock at the top of the round, returned at 4310 ms, and reported `2500`.
+
+The ceiling is therefore checked **before a look is begun**, against what the
+costliest look so far cost, and not only after the wait between looks. The first
+look is unconditional — there is no way to estimate what a window costs without
+paying for one, and its digest is what §6.5 judges the dispatch by — so a settle
+may overrun `limits.settleCeilingMs` by at most one look, and says by how much in
+`waitedMs`.
+
+Raising `settleCeilingMs` is not the answer to `window_too_slow`. The cost is
+per look and it is the application's, so a higher ceiling moves the line without
+removing the class, and it makes every ordinary dispatch slower to do it.
 
 **Result**
 
@@ -1688,6 +1740,11 @@ to fit: an `observe` that captures an image (up to 5 s) and then walks a tree (u
 to `treeWalkCeilingMs`) is 11 s of the host's 20, and a `dispatch` that settles
 (2.5 s) before doing both is 13.5 s.
 
+A ceiling only bounds what it is checked against. Settling's is checked before
+each look rather than only between them, so its overrun is one look rather than
+one look per round (§6.1); `waitedMs` reports the overrun rather than hiding it
+under the ceiling.
+
 ### 7.4 Bounds
 
 Everything bounded says so on the wire:
@@ -1699,7 +1756,7 @@ Everything bounded says so on the wire:
 | tree walk time | `snapshot.truncated.elements` (§5.2 — the field cannot say which bound fired) |
 | element text | `element.truncated: ["value", …]` |
 | selected text | `snapshot.selectedText.truncated` |
-| settle time | `settle.reason: "ceiling"` |
+| settle time | `settle.reason: "ceiling"` / `"window_too_slow"`, with the real duration in `settle.waitedMs` |
 | launch wait | `waited.reason: "timeout"` |
 | capture stream frames | `capture.next` → `dropped: n` |
 
@@ -2201,9 +2258,49 @@ Posting a key that the application can act on (§6.4):
     delivery is the thing it measures. An executor cannot satisfy both by
     choosing one behaviour for all keys, which is the point.
 
----
+Settling a window that is expensive to look at (§6.1):
 
-## 13. Deliberate exclusions
+55. `settle.waitedMs` is the time the settle spent, on every arm, and a window
+    that cannot be looked at twice inside the budget is reported as
+    `window_too_slow` rather than as a settle that ran the budget out.
+
+    The vector that fails against the executor that shipped, and it fails it on
+    the honesty field first. That loop answered its timeout arm with
+    `limits.settleCeilingMs` — a constant — so a settle that really spent 4.3 s
+    reported 2500, and `waitedMs` is the field the host traces to see overruns.
+    Measured against the real loop: System Settings costs 2.2 s a look, which
+    fits the budget, so a second look began at 2270 ms and the call returned at
+    4310 ms reporting `2500`; a 1225-element Finder window costs 3.6 s a look, so
+    the second look — the minimum quiescence can be proven in — never happened at
+    all, and it too reported `ceiling` and `2500` for a 3674 ms call. `ceiling`
+    was false on the second one in a second way: it says the window was compared
+    and had moved, and nothing had been compared. The three defects are one
+    finding, because the fabricated duration is what kept the other two off every
+    instrument.
+
+    Its unit half drives the loop through a hand-moved clock, which is the only
+    way to land the boundary exactly: four looks of 500 ms end at 2150 ms, and an
+    executor answering with the constant says 2500. It asserts the ordinary
+    window too — 0.23 s per look still quiesces on the second, at 510 ms — because
+    a fix that refuses to begin an unaffordable look must not refuse the
+    affordable one.
+
+    Its wire half drives a binding probe that costs 2.6 s of **real** time per
+    look, because a fabricated `waitedMs` is invisible to any test with a fake
+    clock in it: there, the constant and the clock agree by construction. It
+    asserts `waitedMs` against the wall-clock time of the call itself.
+
+    Its live half settles against every ordinary window on the screen, System
+    Settings included, and asserts the same thing with nothing faked at all. It
+    is a read — settling presses nothing — so it can be pointed at the user's own
+    windows. It also asserts the shape of the answer against the count of looks
+    that were actually paid for: `quiesced` and `ceiling` both claim a comparison
+    was made and so require two, and `window_too_slow` claims none was affordable
+    and so requires exactly one. An executor that renamed the timeout without
+    changing when it stops passes the unit half and fails this one, and the old
+    loop fails it three ways on two windows: `waitedMs 2500` against 4310 ms,
+    `waitedMs 2500` against 3674 ms, and `ceiling` on a window it had looked at
+    once.
 
 - **No tool schemas, no descriptions, no instructions.** `ToolDefinitions.swift`
   and `computerUseServerInstructions` do not survive. Maka's runtime owns every

@@ -1543,6 +1543,126 @@ final class HostProtocolTests: XCTestCase {
         )
     }
 
+    // MARK: - Settling a window that is expensive to look at (§6.1, §12 vector 55)
+
+    func testASettleStoppedByTheBudgetReportsTheTimeItReallySpent() {
+        // Vector 55 — `waitedMs` is measured on every arm. The loop that shipped
+        // answered its timeout arm with `limits.settleCeilingMs`, a constant, so
+        // a settle that really took 3.7 s told the host 2500 — and `waitedMs` is
+        // the field the host traces to see overruns, so the fabricated value hid
+        // the overrun from the only instrument pointed at it.
+        //
+        // Four looks at 500 ms with a 50 ms wait between them: the fourth ends at
+        // 2150 ms and there is not enough budget left for a fifth, so 2150 is the
+        // answer. Not 2500, and not 2500 by coincidence either.
+        let settled = drivenSettle(costPerLook: 0.5, stable: false)
+
+        XCTAssertEqual(settled.report.reason, .ceiling)
+        XCTAssertFalse(settled.report.quiesced)
+        XCTAssertEqual(settled.looks, 4)
+        XCTAssertEqual(settled.report.waitedMs, 2150)
+        XCTAssertNotEqual(
+            settled.report.waitedMs,
+            HostLimits().settleCeilingMs,
+            "a settle that reports the ceiling as its duration is reporting the constant, not the clock"
+        )
+    }
+
+    func testAWindowTooExpensiveToLookAtTwiceSaysSoRatherThanSpendingTheBudget() {
+        // Vector 55 — proving a window quiet takes two looks that agree, so a
+        // window whose one look costs more than the budget has left cannot be
+        // proven quiet at all. Measured: one look at System Settings' 337
+        // elements takes 2.2 s and one at a 1225-element Finder window takes
+        // 3.6 s, against a 2.5 s budget.
+        //
+        // The window here is genuinely still — the digest never changes — which
+        // is the case the old loop got least honest about: it began a second look
+        // at 1850 ms because it only tested the clock at the top of the round,
+        // ran 1100 ms past the budget, and reported `quiesced: true` for a wait it
+        // was never entitled to make.
+        let settled = drivenSettle(costPerLook: 1.8, stable: true)
+
+        XCTAssertEqual(settled.report.reason, .windowTooSlow)
+        XCTAssertFalse(settled.report.quiesced)
+        XCTAssertEqual(settled.looks, 1, "the second look was not affordable and was not taken")
+        XCTAssertEqual(settled.report.waitedMs, 1800)
+        XCTAssertFalse(
+            settled.digest.isEmpty,
+            "the one look is still evidence: §6.5 judges the dispatch by this digest"
+        )
+        XCTAssertEqual(HostSettleReason.windowTooSlow.rawValue, "window_too_slow")
+    }
+
+    func testAnOrdinaryWindowStillQuiescesOnTheSecondLook() {
+        // Vector 55, the guard on the fix rather than on the defect. Refusing to
+        // begin a look the budget cannot pay for must not refuse the ordinary
+        // one: a 230 ms look — the cost of a few hundred elements in a window
+        // that draws its own — lands the second at 510 ms with 2 s to spare, and
+        // the answer is `quiesced`.
+        let settled = drivenSettle(costPerLook: 0.23, stable: true)
+
+        XCTAssertEqual(settled.report.reason, .quiesced)
+        XCTAssertTrue(settled.report.quiesced)
+        XCTAssertEqual(settled.looks, 2)
+        // Within a millisecond rather than to it: this vector is about the
+        // ordinary window still settling, not about how the duration rounds.
+        XCTAssertLessThanOrEqual(abs(settled.report.waitedMs - 510), 1)
+    }
+
+    func testTheWireCarriesTheTimeTheSettleReallySpentAndNamesWhyItStopped() throws {
+        // Vector 55 on the wire, driven by a probe that costs real time, because
+        // a fabricated `waitedMs` is invisible to any test with a fake clock in
+        // it — the constant and the clock agree by construction there.
+        //
+        // One look at this window costs 3.2 s against a 2.5 s budget, which is
+        // what a 1114-element Finder window really costs. The executor that
+        // shipped reported `reason: "ceiling"` and `waitedMs: 2500` for it while
+        // the call really took 3.25 s.
+        let element = hostTestElement()
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.focused = element
+        let probe = SettleCostProbe(log: environment.keyEvents, costPerLook: 3.2)
+        environment.probe = probe
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        harness.install(snapshot)
+
+        let started = Date()
+        harness.send(
+            dispatchKey(
+                snapshot: snapshot,
+                action: #"{"kind":"key","key":"p","modifiers":["command"]}"#,
+                settle: "quiesce"
+            )
+        )
+        let result = try harness.awaitResult(timeout: 30)
+        let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+
+        let settle = try XCTUnwrap(result["settle"] as? [String: Any])
+        let waitedMs = try XCTUnwrap(settle["waitedMs"] as? Int)
+
+        XCTAssertEqual(settle["reason"] as? String, "window_too_slow")
+        XCTAssertEqual(settle["quiesced"] as? Bool, false)
+        XCTAssertEqual(probe.looksTaken, 1)
+        XCTAssertLessThanOrEqual(
+            abs(waitedMs - elapsedMs),
+            400,
+            "waitedMs (\(waitedMs)) must be the time this call spent (\(elapsedMs)), not a constant"
+        )
+        XCTAssertGreaterThan(
+            waitedMs,
+            HostLimits().settleCeilingMs,
+            "this settle overran the budget by one look and the wire has to say so"
+        )
+    }
+
     // MARK: - Launching an app (§5.7)
 
     func testAppsLaunchResolvesWithinTheBudgetTheCallerDeclared() throws {
@@ -1919,6 +2039,31 @@ final class HostProtocolTests: XCTestCase {
         "focusToken":"\(element.token)","expectElementDigest":"\(element.digest)"\(policy),\
         "action":\(action)\(observeAfter)}}
         """
+    }
+
+    /// One settle against a window that costs `costPerLook` to look at, on a
+    /// clock that moves only when this test says a look or a wait happened. The
+    /// production loop is the thing under test; only the machine is fake.
+    private func drivenSettle(
+        costPerLook: TimeInterval,
+        stable: Bool,
+        ceilingMs: Int = HostLimits().settleCeilingMs
+    ) -> (report: HostSettleReport, digest: String, looks: Int) {
+        let clock = ManualClock()
+        var looks = 0
+        let settled = hostSettle(
+            ceilingMs: ceilingMs,
+            pollMs: hostSettlePollMs,
+            sample: {
+                looks += 1
+                clock.advance(costPerLook)
+                return stable ? "sha256:still" : "sha256:frame-\(looks)"
+            },
+            now: clock.read,
+            sleep: clock.advance
+        )
+
+        return (settled.report, settled.digest, looks)
     }
 
     private func errorCode(_ result: [String: Any]) throws -> String {

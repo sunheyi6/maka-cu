@@ -410,9 +410,26 @@ public enum HostSettleMode: String, Codable, Sendable {
     case quiesce
 }
 
+/// §6.1 — why the executor stopped waiting for the window to stop changing.
+///
+/// The three failing-to-quiesce arms are different facts about the window and the
+/// host acts on them differently, which is why `ceiling` was split rather than
+/// left to cover both:
+///
+/// - `ceiling` — two or more looks were compared, they differed, and the budget
+///   ran out. The window was still moving when the executor gave up.
+/// - `window_too_slow` — one look at this window costs more than the budget had
+///   left, so the second look that is the only way to prove it stopped was never
+///   affordable. Nothing is known about whether it settled, and waiting longer
+///   under this budget cannot change that. Measured on macOS 26.5: one look at
+///   System Settings' 337-element digest takes 2.18–2.22 s and one at a
+///   1114–1225-element Finder window takes 3.16–3.62 s, against a 2.5 s budget —
+///   so two looks at the Finder window, which is the minimum quiescence can be
+///   proven in, is over 6 s.
 public enum HostSettleReason: String, Codable, Sendable {
     case quiesced
     case ceiling
+    case windowTooSlow = "window_too_slow"
     case notRequested = "not_requested"
 }
 

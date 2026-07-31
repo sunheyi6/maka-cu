@@ -401,6 +401,83 @@ final class SteppingClock: @unchecked Sendable {
     }
 }
 
+/// A clock the test moves by hand, so a settle that would take seconds of real
+/// time takes none and lands on an exact millisecond.
+///
+/// Hand-moved rather than stepping: `hostSettle` reads the clock several times
+/// per round, and a clock that advanced on every read would make the number
+/// under test a function of how many times the implementation happened to look
+/// at it. Here the test says what each look at the window cost and what each
+/// wait cost, and nothing else moves time at all.
+final class ManualClock: @unchecked Sendable {
+    /// Fixed rather than `Date()`, so a failure reads the same on every machine.
+    private var instant = Date(timeIntervalSince1970: 1_700_000_000)
+    private let lock = NSLock()
+
+    func read() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return instant
+    }
+
+    func advance(_ seconds: TimeInterval) {
+        lock.lock()
+        instant += seconds
+        lock.unlock()
+    }
+}
+
+/// A binding probe that costs real time to read and, by default, answers
+/// differently every time — a window that is expensive to look at and never
+/// stops moving.
+///
+/// It is quiet until a key has been posted, exactly as `KeyReactiveProbe` is, so
+/// the §4.3 binding checks ahead of the dispatch pass at no cost and the price is
+/// paid only where settling pays it.
+///
+/// Real sleeping is the point rather than an accident: this double exists for the
+/// vector that asserts `waitedMs` against the wall clock, and a fake clock cannot
+/// fail an executor that answers that field with a constant.
+final class SettleCostProbe: HostElementBindingProbe {
+    private let log: KeyEventLog
+    private let costPerLook: TimeInterval
+    private let stabilises: Bool
+    private let lock = NSLock()
+    private var looks = 0
+
+    /// How many times settling paid to look at the window.
+    var looksTaken: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return looks
+    }
+
+    init(log: KeyEventLog, costPerLook: TimeInterval, stabilises: Bool = false) {
+        self.log = log
+        self.costPerLook = costPerLook
+        self.stabilises = stabilises
+    }
+
+    func isReferenceAlive(_ binding: HostElementBinding) -> Bool { true }
+    func processStartTime(pid: pid_t) -> UInt64? { hostTestProcessStartTime }
+
+    func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
+        guard !log.posted.isEmpty else {
+            return binding.digestInput
+        }
+
+        Thread.sleep(forTimeInterval: costPerLook)
+        lock.lock()
+        looks += 1
+        let index = looks
+        lock.unlock()
+
+        return stabilises
+            ? HostElementDigestInput(role: "AXButton", label: "Settled")
+            : HostElementDigestInput(role: "AXButton", label: "Frame \(index)")
+    }
+}
+
 // MARK: - Fixture values
 
 let hostTestPid: pid_t = 4711
