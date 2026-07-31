@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import XCTest
@@ -1095,6 +1096,57 @@ final class HostProtocolTests: XCTestCase {
             hostAppLaunchFailure(NSError(domain: NSCocoaErrorDomain, code: 260)).code,
             .dispatchRefused
         )
+    }
+
+    func testALaunchIsAskedForWithoutActivationAndWithoutTouchingRecentItems() throws {
+        // §5.7 vector 50 — the request half. `NSWorkspace.OpenConfiguration` is
+        // `activates = true` out of the box, so the executor that built one and
+        // passed it unmodified asked for the user's foreground on every launch
+        // and got it: a cold Preview was frontmost before the call returned.
+        //
+        // Asserted on the configuration rather than on its effect because the
+        // effect needs a cold application on a desktop nobody else is touching;
+        // that is `HostLaunchLiveTests`. Here the question is only whether the
+        // executor asked, and the answer used to be no.
+        let configuration = AppDiscovery.backgroundLaunchConfiguration()
+
+        XCTAssertFalse(configuration.activates, "apps.launch must not ask for the foreground")
+        XCTAssertFalse(
+            configuration.addsToRecentItems,
+            "a launch the model made is not something the user opened"
+        )
+
+        // The default is the thing being overridden, so a change of default is
+        // not allowed to make this test vacuous.
+        let untouched = NSWorkspace.OpenConfiguration()
+        XCTAssertTrue(
+            untouched.activates,
+            "the default still activates, which is why the override has to exist"
+        )
+    }
+
+    func testAnAppThatActivatesItselfIsStillReportedAsTakingTheForeground() throws {
+        // §5.7 vector 50, the honesty half. The executor asks for a background
+        // launch, and an application that calls `activateIgnoringOtherApps` on
+        // its way up takes the foreground regardless. `foregroundTaken` is the
+        // difference between two reads of the window server, never a restatement
+        // of what the executor requested — an executor that answered `false`
+        // because it had asked politely would report its own intent as an
+        // observation, and the user's stolen focus would be invisible.
+        XCTAssertFalse(AppDiscovery.backgroundLaunchConfiguration().activates)
+
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.frontmost.sequence = [1679, hostTestPid]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"apps.launch","params":{"session":"s1","app":"Preview","waitForWindowMs":8000}}"#)
+
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["ok"] as? Bool, true, "it happened; hiding it does not un-happen it")
+        XCTAssertEqual(result["foregroundTaken"] as? Bool, true)
+        XCTAssertEqual(harness.environment.frontmost.reads, 2, "before and after, not once")
     }
 
     // MARK: - Seeing the machine change (§5.5, §5.7)

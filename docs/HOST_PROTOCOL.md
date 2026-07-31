@@ -761,6 +761,22 @@ action start because a user can revoke at any time
 - `params.app` is the one place a display name is legal (§5.1), because an app
   that is not running has no `appId` the caller could have learned. The result's
   `appId` is the resolved one, and every later call uses that.
+- The executor MUST ask for a launch that does not activate. On macOS that is
+  `NSWorkspace.OpenConfiguration.activates = false`, and it is not the default:
+  the configuration is `activates = true` out of the box, so an executor that
+  builds one and passes it unmodified has asked for the foreground on every
+  launch. Measured — a cold Preview launched that way was frontmost before the
+  call returned, and the same cold Preview launched with `activates = false`
+  never owned the front layer-0 window at all. The executor also asks not to be
+  recorded in Recent Items: a launch the model made is not something the user
+  opened, and `apps.list` ranks its recent half on usage records of that kind.
+- `foregroundTaken` remains an observation, and asking for a background launch
+  does not turn it into a prediction. An application may call
+  `activateIgnoringOtherApps` on its own way up; the executor cannot stop it and
+  MUST NOT report the request it made in place of the two reads it took. An
+  executor that answered `foregroundTaken: false` because it had asked for a
+  background launch would be reporting its own intent as an observation of the
+  machine, which is the whole failure this field exists to make impossible.
 - `foregroundTaken` is declared, not inferred. `CuLaunchedApp.focusHeld` is
   currently absent when the driver simply did not check
   (`computer-use-types.ts:64-68`) — an absent boolean that means "unknown" is a
@@ -1816,6 +1832,20 @@ Capture geometry (§6.6, §6.7):
     a pair — an executor that satisfies 48 by defaulting whenever the lookup
     fails passes 48 and fails 49, and it fails it by returning a picture of the
     main display under the display id the caller asked for.
+
+Launching without taking the foreground (§5.7):
+
+50. The configuration `apps.launch` opens an application with does not activate
+    it, and does not record it in Recent Items. The vector that fails against an
+    executor which builds an `NSWorkspace.OpenConfiguration` and passes it
+    unmodified, because the default is `activates: true` — it never asked for a
+    background launch, and a cold Preview took the user's foreground while
+    `focusHeld` was being asserted false. Its live half starts an application
+    that is not running and watches the front layer-0 window owner for the whole
+    launch, because a request is only evidence of what was asked for. Its pair is
+    the honesty half: an app whose pid holds the foreground after a launch that
+    asked not to activate is still `foregroundTaken: true`, and an executor that
+    answers from its own request rather than from the two reads fails it.
 
 ---
 

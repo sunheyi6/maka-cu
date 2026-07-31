@@ -395,8 +395,48 @@ enum AppDiscovery {
         return nil
     }
 
-    private static func openApplication(at appURL: URL) throws {
+    /// §5.7 — the configuration every launch is asked for.
+    ///
+    /// `NSWorkspace.OpenConfiguration()` is `activates = true` and
+    /// `addsToRecentItems = true` out of the box, measured on macOS 26.5, and
+    /// this executor never touched either field. So a method whose whole point is
+    /// that the user keeps their focus was asking LaunchServices for the
+    /// foreground on every call, and getting it: a cold Preview came up frontmost
+    /// (`frontmost 1679 → 93513`), while the same cold Preview opened with
+    /// `activates = false` never once owned the front layer-0 window across
+    /// twelve seconds of 50 ms sampling.
+    ///
+    /// `addsToRecentItems` is off for the same reason one level down. A
+    /// background launch is meant to leave the session as it found it — the
+    /// executor already declines to move the pointer, raise a window or change
+    /// the frontmost app — and Recent Items is the one place LaunchServices
+    /// writes the user's history on a plain launch. Measured against
+    /// `com.apple.LSSharedFileList.RecentApplications.sfl4`: Chess opened with
+    /// the flag on appeared in the list within seconds; Preview and TextEdit
+    /// opened with it off did not appear at all. `apps.list` then ranks the
+    /// not-running half of its catalogue on usage records of the same kind
+    /// (`kMDItemLastUsedDate_Ranking`, `kMDItemUseCount`), so an executor whose
+    /// own launches count as use is reading its own history back as evidence of
+    /// what the user reaches for.
+    ///
+    /// Asking is not getting, and the two must not be confused: an application
+    /// that calls `activateIgnoringOtherApps` on its own way up takes the
+    /// foreground anyway, and §5.7 requires `apps.launch` to report that it did.
+    /// This function is the request; `foregroundTaken` is the observation, and it
+    /// is still a difference between two live reads of the window server.
+    ///
+    /// It is not private so a test can assert what is requested. The alternative
+    /// — proving the request from its effect — needs a cold application on a
+    /// desktop nobody else is touching, which is the live vector, not this one.
+    static func backgroundLaunchConfiguration() -> NSWorkspace.OpenConfiguration {
         let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.addsToRecentItems = false
+        return configuration
+    }
+
+    private static func openApplication(at appURL: URL) throws {
+        let configuration = backgroundLaunchConfiguration()
         let semaphore = DispatchSemaphore(value: 0)
         let errorBox = LaunchErrorBox()
 
