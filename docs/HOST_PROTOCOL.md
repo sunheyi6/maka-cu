@@ -631,7 +631,9 @@ from the image it actually captured — not from `NSScreen.backingScaleFactor`.
 (`ComputerUseService.swift:188-207`), and the host carries a comment that the
 driver's own `scale_factor` is unreliable. Declaring the measured value removes
 the host's derivation, and with it the class of bug where a click lands a quarter
-of the way into a control.
+of the way into a control. Measuring it is only half of the guarantee: the
+bitmap it is measured against must be drawn edge to edge, and §6.7 says why that
+is a rule and not an obvious consequence.
 
 **`element.frame` stays window-local, and the host converts it exactly once.**
 The wire is window-local because that is what `maka-cu` already computes
@@ -1296,6 +1298,40 @@ Whole-display capture, no snapshot, no binding, no state change. It exists
 because `CuAction` has a `screenshot` member and the model may ask for one
 without a target.
 
+The image is the display at the display's own pixel density, which is what the
+example above shows: a Retina screen comes back at its full pixel count with
+`scale: 2.0`, not at its point count with `scale: 1.0`. `SCDisplay`'s `width`
+and `height` are points, and feeding them to a capture's pixel-sized output made
+the compositor downscale to fit. Nothing about that frame is inconsistent — it
+fills, and `1.0` describes it correctly — it is simply half the detail the
+machine can give, for a method whose entire output is what the model can see.
+
+### 6.7 Every image fills the size it declares
+
+`image.widthPx` / `heightPx` describe the whole bitmap and every pixel of it is
+content. An executor may not return a bitmap larger than the region it drew, and
+`image.scale` must be the scaling the content actually has — not the scaling the
+executor meant to apply, and not a display's `backingScaleFactor`.
+
+This is a stated rule rather than an obvious consequence because the failure is
+silent at every layer that could otherwise catch it. macOS takes the capture's
+output size in pixels and the region it renders in points; hand it a buffer
+larger than the content it is about to draw and it anchors that content at the
+top-left and leaves the rest transparent instead of objecting. The PNG is
+well-formed, its IHDR matches the declared `widthPx` / `heightPx`, and `sha256`
+verifies. What reaches the model is a window shrunk into one corner of a mostly
+empty image at half the resolution its `scale` claims, and a host that mirrors
+the frame renders the empty part as a black margin — which is how this was
+found, two layers away from the cause.
+
+Every pixel statement in the protocol rests on this. `image_px` in §6.3 is read
+from the image's origin, so a frame whose content is drawn at a different scale
+than it declares puts every point dispatch off by the ratio between the two.
+
+The executor therefore sizes the output buffer from the same source it renders
+from, so the two cannot disagree, and measures `scale` from the bitmap it got
+back (§5.3). Neither number is chosen twice.
+
 ---
 
 ## 7. Errors, mapping and bounds
@@ -1735,6 +1771,19 @@ Launching an app (§5.7):
     which are frozen at process start on any thread but the main one (§5.5) — and
     it only fails from a lane, so a check that runs on the main thread, or parks
     on anything that spins the main run loop, passes against the broken executor.
+
+Capture geometry (§6.7):
+
+47. A window capture is drawn over the whole of the size it declares: the
+    bounding box of the image's non-transparent pixels is the entire bitmap,
+    under both capture scopes. The vector that fails against an executor which
+    sizes the output buffer from `NSScreen.backingScaleFactor` instead of from
+    the filter it renders through — a 674 × 408 pt window came back 1348 × 816
+    px with the window in the top-left quarter, three quarters transparent, and
+    `scale: 2.0` declared over content rendered at 1.0. It can only fail on a
+    machine whose displays do not all share one backing scale, because where the
+    guess happens to be right there is nothing to catch; that is why it is a
+    live vector and why it sweeps every window on screen rather than one.
 
 ---
 

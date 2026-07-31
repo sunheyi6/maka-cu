@@ -143,6 +143,32 @@ public func hostDesktopSourceRect(windowFrame: CGRect, displayFrame: CGRect) -> 
 public enum HostCapture {
     static let timeout: TimeInterval = 5
 
+    /// The one place an output buffer is sized, because there is only one way to
+    /// size it correctly. `SCStreamConfiguration.width` / `.height` are **pixels**;
+    /// the region ScreenCaptureKit draws into them is **points**. The conversion
+    /// between the two spaces is `SCContentFilter.pointPixelScale`, and it has to
+    /// be the filter's own, because that is the number the compositor will use
+    /// when it renders.
+    ///
+    /// Deriving it from `NSScreen` instead is what produced a quarter-drawn
+    /// window: `NSScreen.frame` is AppKit's y-up space and `SCWindow.frame` is
+    /// CoreGraphics' y-down space, so `intersects` never matched for a window on
+    /// a display above the main one and the code fell back to
+    /// `NSScreen.main.backingScaleFactor`. A 674 × 408 pt window on a 1x external
+    /// display was given a 1348 × 816 px buffer; ScreenCaptureKit does not
+    /// stretch content to fill an oversized buffer, it anchors it at the top-left
+    /// and leaves the rest transparent. 25% of the image was the window,
+    /// declaring `scale: 2.0` over content rendered at 1.0.
+    private static func sizeToContent(
+        _ configuration: SCStreamConfiguration,
+        filter: SCContentFilter,
+        regionPoints: CGSize
+    ) {
+        let scale = CGFloat(filter.pointPixelScale)
+        configuration.width = max(1, Int((regionPoints.width * scale).rounded()))
+        configuration.height = max(1, Int((regionPoints.height * scale).rounded()))
+    }
+
     /// Window capture through ScreenCaptureKit. `capture_failed` and `timeout` are
     /// separate results because a timed-out capture means the compositor is busy
     /// and a retry is reasonable, while a failed one usually means the window went
@@ -156,12 +182,12 @@ public enum HostCapture {
                 }
 
                 let configuration = SCStreamConfiguration()
-                let scale = NSScreen.screens
-                    .first(where: { $0.frame.intersects(window.frame) })?
-                    .backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
-                configuration.width = max(1, Int((window.frame.width * scale).rounded()))
-                configuration.height = max(1, Int((window.frame.height * scale).rounded()))
                 configuration.showsCursor = false
+                // Kept off deliberately. With the buffer sized off the filter the
+                // two can no longer disagree, and if some future change makes
+                // them disagree again, a transparent margin is a defect anyone
+                // can see, while a stretch is an invented `scale` that reads as
+                // correct on the wire.
                 configuration.scalesToFit = false
                 configuration.ignoreShadowsSingleWindow = true
 
@@ -169,6 +195,7 @@ public enum HostCapture {
                 switch scope {
                 case .window:
                     filter = SCContentFilter(desktopIndependentWindow: window)
+                    sizeToContent(configuration, filter: filter, regionPoints: filter.contentRect.size)
                 case .desktop:
                     guard let display = content.displays.first(where: { $0.frame.intersects(window.frame) }) ?? content.displays.first else {
                         return CGImage?.none
@@ -181,10 +208,14 @@ public enum HostCapture {
                     // top included. Handing back a display-origin crop the size of
                     // the window kept both fields but moved the pixels, and every
                     // point dispatch under this scope landed somewhere else.
-                    configuration.sourceRect = hostDesktopSourceRect(
+                    let sourceRect = hostDesktopSourceRect(
                         windowFrame: window.frame,
                         displayFrame: display.frame
                     )
+                    configuration.sourceRect = sourceRect
+                    // The cropped region, not the whole display: the buffer holds
+                    // the window's rectangle and nothing else.
+                    sizeToContent(configuration, filter: filter, regionPoints: sourceRect.size)
                 }
 
                 return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
@@ -209,12 +240,17 @@ public enum HostCapture {
                 }
 
                 let configuration = SCStreamConfiguration()
-                configuration.width = display.width
-                configuration.height = display.height
                 configuration.showsCursor = false
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                // `SCDisplay.width` / `.height` are points, and they were being
+                // assigned to a field that is pixels. The compositor absorbed it
+                // by downscaling — the image filled, so nothing looked broken —
+                // but a Retina display came back at half its resolution
+                // declaring `scale: 1.0`, which is not the frame §6.6 documents.
+                sizeToContent(configuration, filter: filter, regionPoints: filter.contentRect.size)
 
                 return try await SCScreenshotManager.captureImage(
-                    contentFilter: SCContentFilter(display: display, excludingWindows: []),
+                    contentFilter: filter,
                     configuration: configuration
                 )
             }
