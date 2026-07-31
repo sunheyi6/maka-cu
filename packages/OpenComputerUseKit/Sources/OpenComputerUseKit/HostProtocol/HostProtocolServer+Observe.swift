@@ -585,10 +585,7 @@ extension HostProtocolServer {
             outcome: .refused,
             path: .none,
             tier: .ax,
-            verdict: HostEffectVerdict(
-                effect: .unverifiable,
-                verification: HostVerification(method: .none, observedChange: false)
-            ),
+            verdict: hostEffectNotChecked(),
             failure: HostDomainError(code)
         )
     }
@@ -648,7 +645,12 @@ extension HostProtocolServer {
         }
 
         let verdict = verificationIsTreeDelta
-            ? hostEffectFromTreeDelta(settle: settleMode, digestBefore: digestBefore, digestAfter: digestAfter)
+            ? hostEffectFromTreeDelta(
+                settle: settleMode,
+                digestBefore: digestBefore,
+                digestAfter: digestAfter,
+                withoutDelta: fallbackVerdict
+            )
             : fallbackVerdict
 
         var post: HostSnapshotPayload?
@@ -975,7 +977,15 @@ extension HostProtocolServer {
             return
         }
 
-        let previousValue = HostAX.stringLikeValue(element, kAXValueAttribute)
+        // §6.5 — which observation may judge this action is decided by what the
+        // action does, not by what is cheapest to read. The focused element's
+        // value is read only when it is the thing the action changes; for a key
+        // it is not, and reading it anyway is how every shortcut came back
+        // `suspected_noop`.
+        let evidence = hostKeyEvidence(for: params.action)
+        let previousValue = evidence == .focusedElementValue
+            ? HostAX.stringLikeValue(element, kAXValueAttribute)
+            : nil
         let settleMode = params.observeAfter?.settle ?? HostSettleMode.none
         cancellations.markDispatched(id: id)
 
@@ -996,20 +1006,28 @@ extension HostProtocolServer {
             return
         }
 
-        let readback = HostAX.stringLikeValue(element, kAXValueAttribute)
         let verdict: HostEffectVerdict
-        if previousValue == nil, readback == nil {
-            // Nothing to read back means nothing was checked, and §6.5 makes that
-            // distinguishable from "checked and inconclusive".
-            verdict = HostEffectVerdict(
-                effect: .unverifiable,
-                verification: HostVerification(method: .none, observedChange: false)
-            )
-        } else {
-            verdict = HostEffectVerdict(
-                effect: readback == previousValue ? .suspectedNoop : .confirmed,
-                verification: HostVerification(method: .valueReadback, observedChange: readback != previousValue)
-            )
+        switch evidence {
+        case .focusedElementValue:
+            let readback = HostAX.stringLikeValue(element, kAXValueAttribute)
+            if previousValue == nil, readback == nil {
+                // Nothing to read back means nothing was checked, and §6.5 makes
+                // that distinguishable from "checked and inconclusive".
+                verdict = hostEffectNotChecked()
+            } else {
+                verdict = HostEffectVerdict(
+                    effect: readback == previousValue ? .suspectedNoop : .confirmed,
+                    verification: HostVerification(method: .valueReadback, observedChange: readback != previousValue)
+                )
+            }
+
+        case .windowDelta:
+            // The verdict is decided in `finishDispatch`, after settling: this is
+            // what is left when no settle was asked for and there is therefore no
+            // delta to read. A key posted to a pid has no return value, so there
+            // is no `action_result` to name here either — `method: "none"` is the
+            // whole of what the executor can honestly say.
+            verdict = hostEffectNotChecked()
         }
 
         finishDispatch(
@@ -1018,7 +1036,7 @@ extension HostProtocolServer {
             snapshot: snapshot,
             outcome: .ok,
             path: .cgEventPid,
-            verificationIsTreeDelta: false,
+            verificationIsTreeDelta: evidence == .windowDelta,
             fallbackVerdict: verdict,
             settleMode: settleMode,
             observeAfter: params.observeAfter,

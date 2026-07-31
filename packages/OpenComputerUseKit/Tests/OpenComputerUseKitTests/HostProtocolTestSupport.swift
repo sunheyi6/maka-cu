@@ -208,6 +208,37 @@ final class KeyEventLog {
     }
 }
 
+/// A probe whose answer changes once a key has been posted, so a test can put a
+/// real window delta on the other side of a dispatch.
+///
+/// `FakeBindingProbe` answers from the record and therefore recomputes the same
+/// window digest for ever; no test built on it can tell an executor that judges
+/// a key by the window from one that judges it by the focused element's value.
+/// The element it answers for is unchanged until the key lands, so the binding
+/// check ahead of the dispatch passes exactly as it does in production.
+final class KeyReactiveProbe: HostElementBindingProbe {
+    private let log: KeyEventLog
+    /// What the element looks like after the key landed. `nil` is the window that
+    /// does not change at all — the honest majority case, where the effect went
+    /// to a sheet, another window, the menu bar or the file system.
+    private let after: HostElementDigestInput?
+
+    init(log: KeyEventLog, after: HostElementDigestInput? = nil) {
+        self.log = log
+        self.after = after
+    }
+
+    func isReferenceAlive(_ binding: HostElementBinding) -> Bool { true }
+    func processStartTime(pid: pid_t) -> UInt64? { hostTestProcessStartTime }
+
+    func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
+        guard let after, !log.posted.isEmpty else {
+            return binding.digestInput
+        }
+        return after
+    }
+}
+
 /// Records what `apps.launch` asked the resolver for, so a test can tell the
 /// caller's declared budget from the executor's own default — the two were
 /// indistinguishable while the handler resolved on a hardcoded five seconds.

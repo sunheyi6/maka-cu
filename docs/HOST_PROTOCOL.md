@@ -1240,6 +1240,11 @@ re-resolving an index. Focus mismatch is `focus_changed`, and it maps to
 Key events are posted to the target pid. The executor MUST NOT activate the
 application, raise its window, or change the frontmost app.
 
+The two `kind`s are also verified differently, and §6.5 says why: `type` writes
+into the element this section spends its length establishing the identity of, so
+that element's value is what answers for it; a `key` is a command, and the value
+of whatever holds focus answers for nothing it does.
+
 #### `focusPolicy` — verify focus, or take it
 
 ```json
@@ -1349,6 +1354,88 @@ Rules the executor MUST follow:
   appear, so absence of change is not evidence.
 - `secondary_action` gets `action_result` only. There is nothing generic to read
   back.
+- `dispatch.key` with `kind: "type"` MUST read the focused element's value back
+  → `value_readback`, with the same three outcomes as `set_value`.
+- `dispatch.key` with `kind: "key"` MUST NOT be judged by that value. It is
+  judged the way a click is — `tree_delta` under `settle: "quiesce"`, and
+  `unverifiable` / `none` without one — and it MUST NOT report `suspected_noop`.
+
+#### A method that does not apply is not a verification
+
+`suspected_noop` is a sentence about a specific observation: *I looked at the
+thing this action changes, and it did not change.* Only a method whose subject
+**is** the thing the action changes may produce it. Every other method can
+confirm and can never refute, because the absence of a change it was never going
+to see is not evidence of anything.
+
+That is the whole of the split between the two `dispatch.key` action kinds, and
+it is not a split on modifiers. `type` writes text into the element the request
+named and verified, so that element's `AXValue` is the subject of the action: a
+value that did not move is a noop, stated. A `key` is a command the application
+interprets. `cmd+p` opens a print sheet, `cmd+s` writes a file, `ctrl+f2` goes to
+the menu bar, `cmd+w` closes the window, `Tab` moves focus off the element
+altogether — the value of whatever held focus is identical either side of all of
+them, whether the key landed or not.
+
+An executor that read it anyway is the defect this section was rewritten for.
+Measured on a real run: a model asked to export a document found the menu bar
+unreachable in the observation and reached for the shortcut, which is the correct
+move. It got
+
+```
+computer.press_key ok via coordinate-background (verified=false);
+  dispatch path=cg_event_pid, effect=suspected_noop, reason=dispatch.key:value_readback
+```
+
+seven times for `cmd+p`, then twice more after switching spellings; a second
+model got it four times for `ctrl+f2`. The model's own account was that it must
+be sending the wrong arguments, because the arguments were the only thing left it
+could see to change — a false noop does not read as a bad verdict, it reads as a
+bad request.
+
+Whether those two keys landed is a separate question the executor never answered,
+and one this section is deliberately not decided by. The verdict was not read off
+the key's effect; it was read off a value the key was never going to touch, and
+the same reading condemns `cmd+A` on a text view of an application that *is*
+active, which does land and leaves that value exactly where it was. A verdict
+that happens to correlate with the truth for a reason unrelated to the truth is
+not evidence.
+
+The honest answers cost the host nothing it had:
+
+| both mean | `effect` | `verification.method` |
+| --- | --- | --- |
+| I looked at the subject of this action, and it did not move | `suspected_noop` | the method that looked |
+| I looked at what I have, and it cannot tell me | `unverifiable` | the method that looked |
+| I have no observation that bears on this | `unverifiable` | `none` |
+
+Which method belongs to which action, in full:
+
+| method | dispatch | action |
+| --- | --- | --- |
+| `value_readback` | `dispatch.element` | `set_value` |
+| | `dispatch.key` | `kind: "type"` |
+| `selection_readback` | `dispatch.element` | `select_text` |
+| `tree_delta` | `dispatch.element` | `click`, `scroll` — with `settle: "quiesce"` |
+| | `dispatch.point` | every action — with `settle: "quiesce"` |
+| | `dispatch.key` | `kind: "key"` — with `settle: "quiesce"` |
+| `action_result` | `dispatch.element` | `secondary_action`, and `click`/`scroll` without a settle |
+| | `dispatch.point` | every action without a settle |
+| `none` | `dispatch.key` | `kind: "key"` without a settle |
+| | any | every refusal (§6.5), and a readback with nothing on either side to read |
+
+`none` is where a key without a settle lands rather than `action_result` because
+there is no result to report: the events were written to the target pid and
+`CGEvent` says nothing about what became of them. Naming a method there would
+claim a check that was never made, which is the same overreach one row up.
+
+Only `tree_delta` is available to a key, and it is a weak instrument by
+construction: the digest is recomputed over the elements **the quoted snapshot
+recorded**, so a key whose effect arrives as a new sheet, a new window, another
+application or a file on disk leaves it byte-identical. That is exactly why it
+may not refuse — and why a host that wants a key verified should send
+`observeAfter.settle: "quiesce"`, which is the difference between
+`unverifiable` / `tree_delta` and `unverifiable` / `none`.
 
 `verified` is **not** a wire field. The host sets
 `verified = (effect === "confirmed")` when building `CuDispatchOutcome`. Two
@@ -1959,6 +2046,48 @@ Dispatching a point at the frame just observed (§4.3, §6.3):
     that does not change on its own — against a window with a clock in it,
     `window_changed` is the correct answer and the vector proves nothing.
 
+Judging a key by something that bears on it (§6.5):
+
+53. `dispatch.key` with `{ "kind": "key", … }`, posted at a focused element whose
+    value the key does not touch, is never `suspected_noop`. With
+    `settle: "quiesce"` it reports `tree_delta` — `confirmed` when the window
+    moved, `unverifiable` when it did not — and with no settle it reports
+    `unverifiable` / `none`. `kind: "type"` is unchanged: it is still judged by
+    the focused element's value, under the same settle, on the same element, and
+    it can still report a real `suspected_noop`.
+
+    The vector that fails against an executor which reads that value back for
+    every key it posts. Measured: a model asked to export a document found the
+    menu bar unreachable, reached for `cmd+p`, was answered
+    `ok … effect: suspected_noop` seven times, and sent it seven times — then
+    reported that it must be getting the arguments wrong. A second model did the
+    same with `ctrl+f2` four times.
+
+    The vector is built on an application the live half **activates**, and the
+    reason is a second finding recorded in §14: a key posted the way this
+    executor posts it does not arrive at a background application at all — an
+    event built from a virtual key code alone carries no characters, and a
+    main-menu key equivalent additionally needs a key window. Against a
+    background window every key this vector could send goes nowhere, so it would
+    measure delivery rather than the verdict and would pass for the wrong reason
+    before the fix and after it alike. Activating removes the confound and is the
+    field case exactly: `cmd+A` on the document the user is looking at. What the
+    live half does not relax is the executor's invariant — the frontmost
+    application is asserted unchanged across each dispatch, and the one that had
+    it is put back.
+
+    Both halves are needed and neither is redundant. The unit half drives a
+    binding probe whose answer changes once a key has been posted, because a
+    probe that answers from its own record can never produce a window delta and
+    no test built on one can tell the two evidence sources apart. The live half
+    exists because the unit half **cannot fail the way production failed**: a
+    fake `AXUIElement` has no value, both sides of the readback come back `nil`,
+    the executor takes its own "nothing to check" arm, and the answer is the
+    `unverifiable` the fix produces. The defect is only visible against an
+    element that really has a value, which means a real text view — the live half
+    reads the selection out of the executor's own post-dispatch observation to
+    establish that the key arrived before saying anything about the verdict.
+
 ---
 
 ## 13. Deliberate exclusions
@@ -1991,6 +2120,57 @@ Dispatching a point at the frame just observed (§4.3, §6.3):
 which is how its one flagged question stayed open long enough for two
 implementations to answer it differently. What remains open is listed here and
 nowhere else.
+
+- **A key posted to a background application does not arrive.** §6.4 posts key
+  events to the target pid and forbids activating the application, and that is
+  right. It is also, today, the difference between a key that works and a key
+  that does nothing. Measured against a TextEdit document window while another
+  application was frontmost, one key press per row:
+
+  ```
+  type "typed"                            landed     value "ORIGINAL" → "typedORIGINAL"
+  Right, virtual key only                 no effect  loc 0
+  Right, + unicode U+F703                 landed     loc 0 → 1
+  Right, + numeric-pad and fn flags       no effect  loc 1
+  Right, + those flags + unicode U+F703   landed     loc 1 → 2
+  a, virtual key only                     no effect  value unchanged
+  a, + unicode U+0061                     landed     "OR" → "ORa"
+  cmd+a, virtual key only                 no effect  selection loc 0 len 0
+  cmd+a, + unicode U+0061                 no effect  selection loc 0 len 0
+  ```
+
+  Two separate faults, and the second one is only visible once the first is out
+  of the way:
+
+  1. **`CGEventPostToPid` does not translate a key code.** An event built from a
+     virtual key code alone reaches the application with no characters, because
+     the layout translation the window server performs is on the path this one
+     bypasses, and AppKit's key handling is driven by characters. `typeText`
+     works because it sets the unicode string; `pressKey` never does, so
+     **`dispatch.key` with `kind: "key"` delivers nothing at all** — the flags
+     are not the missing piece, the characters are.
+  2. **A main-menu key equivalent needs a key window.** `cmd+a` did not land even
+     carrying its character, and landed immediately once the same application was
+     activated. `performKeyEquivalent:` is reached through `NSApp`'s key window,
+     and a background application has none. So `cmd+p`, `cmd+s`, `cmd+w` and
+     `ctrl+f2` — the shortcuts a model reaches for precisely when the menu bar is
+     not in the observation — cannot be delivered this way at all, and fixing (1)
+     will not make them work.
+
+  The executor reports `outcome: ok` for every one of them, because the events
+  were written to the pid and nothing said no. §6.5's honesty rule keeps that out
+  of `confirmed`, but the model is still told a request succeeded that could not
+  have.
+
+  (1) is a bug with an obvious shape — give the posted event the characters the
+  window server would have added — and it needs deciding whether they come from
+  the live layout through `UCKeyTranslate` or from a table over §6.4's closed
+  set. (2) is a design question this protocol has not answered: refuse a key the
+  target cannot act on (and the executor cannot know which those are), route menu
+  commands through the menu's own AX actions instead of through the keyboard (a
+  different method, not a different key), or state the limitation on the wire so
+  the host can put it in front of the model. Both need measuring on more than one
+  application first — the table above is one application on one machine.
 
 - **The Electron/Chromium `element_released` rate is unmeasured.** §4.4 item 2
   states that tree-rebuilding applications can fail E1 on a control that is

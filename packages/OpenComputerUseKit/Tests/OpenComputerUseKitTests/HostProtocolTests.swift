@@ -527,17 +527,50 @@ final class HostProtocolTests: XCTestCase {
     }
 
     func testClickWithoutSettlingNeverClaimsConfirmationFromATreeDelta() {
-        let unsettled = hostEffectFromTreeDelta(settle: .none, digestBefore: "a", digestAfter: "b")
+        let unsettled = hostEffectFromTreeDelta(
+            settle: .none,
+            digestBefore: "a",
+            digestAfter: "b",
+            withoutDelta: hostEffectFromActionResult()
+        )
         XCTAssertEqual(unsettled.effect, .unverifiable)
         XCTAssertNotEqual(unsettled.verification.method, .treeDelta)
 
-        let settled = hostEffectFromTreeDelta(settle: .quiesce, digestBefore: "a", digestAfter: "b")
+        let settled = hostEffectFromTreeDelta(
+            settle: .quiesce,
+            digestBefore: "a",
+            digestAfter: "b",
+            withoutDelta: hostEffectFromActionResult()
+        )
         XCTAssertEqual(settled.effect, .confirmed)
         XCTAssertEqual(settled.verification.method, .treeDelta)
 
-        let quiet = hostEffectFromTreeDelta(settle: .quiesce, digestBefore: "a", digestAfter: "a")
+        let quiet = hostEffectFromTreeDelta(
+            settle: .quiesce,
+            digestBefore: "a",
+            digestAfter: "a",
+            withoutDelta: hostEffectFromActionResult()
+        )
         XCTAssertEqual(quiet.effect, .unverifiable)
         XCTAssertEqual(quiet.verification.method, .treeDelta)
+        XCTAssertNotEqual(
+            quiet.effect,
+            .suspectedNoop,
+            "the digest covers the elements this snapshot recorded, so a window that did not change is not a window where nothing happened"
+        )
+
+        // §6.5 — what "no delta was taken" means is the caller's sentence, not
+        // this function's. An `AXPress` has an `action_result` to name; a key
+        // posted to a pid has nothing.
+        XCTAssertEqual(
+            hostEffectFromTreeDelta(
+                settle: .none,
+                digestBefore: "a",
+                digestAfter: nil,
+                withoutDelta: hostEffectNotChecked()
+            ).verification.method,
+            HostVerificationMethod.none
+        )
     }
 
     func testABareActionResultIsNeverConfirmation() {
@@ -1150,6 +1183,172 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual((error["data"] as? [String: Any])?["field"] as? String, "focusPolicy")
     }
 
+    // MARK: - Which evidence judges which action (§6.5)
+
+    func testTypingIsJudgedByTheValueAndAKeyIsNot() {
+        // §6.5 vector 53 — the split is on what the action does. `type` writes
+        // into the element the request named, so that element's value answers the
+        // question; a key is a command the application interprets, and the
+        // modifier list is not what makes it one.
+        XCTAssertEqual(hostKeyEvidence(for: .type("hello")), .focusedElementValue)
+        XCTAssertEqual(hostKeyEvidence(for: .key(name: "p", modifiers: [.command])), .windowDelta)
+        XCTAssertEqual(hostKeyEvidence(for: .key(name: "F2", modifiers: [.control])), .windowDelta)
+        XCTAssertEqual(hostKeyEvidence(for: .key(name: "Tab", modifiers: [])), .windowDelta)
+        XCTAssertEqual(hostKeyEvidence(for: .key(name: "Escape", modifiers: [])), .windowDelta)
+    }
+
+    func testACombinationKeyIsNeverSuspectedNoopBecauseTheFocusedValueDidNotMove() throws {
+        // §6.5 vector 53 — the reproduction. `cmd+p` opens a print sheet and
+        // leaves the focused text element's value exactly where it was, which the
+        // executor read back and reported as `suspected_noop`: a claim to have
+        // checked, made by a check with no bearing on the question. Measured on a
+        // real run, a model sent `cmd+p` seven times against that answer and then
+        // apologised for arguments that had been right all along.
+        //
+        // The window here does not change either, so the honest answer is
+        // `unverifiable` with the method that was actually consulted named.
+        let element = hostTestElement()
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.focused = element
+        environment.probe = KeyReactiveProbe(log: environment.keyEvents)
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        harness.install(snapshot)
+
+        harness.send(
+            dispatchKey(
+                snapshot: snapshot,
+                action: #"{"kind":"key","key":"p","modifiers":["command"]}"#,
+                settle: "quiesce"
+            )
+        )
+        let result = try harness.awaitResult(timeout: 10)
+
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["outcome"] as? String, "ok")
+        XCTAssertEqual(harness.environment.keyEvents.posted, [.key(name: "p", modifiers: [.command])])
+        XCTAssertNotEqual(
+            result["effect"] as? String,
+            "suspected_noop",
+            "a key the focused element's value cannot report on was never checked for a noop"
+        )
+        XCTAssertEqual(result["effect"] as? String, "unverifiable")
+        XCTAssertEqual(
+            (result["verification"] as? [String: Any])?["method"] as? String,
+            "tree_delta",
+            "settling was asked for, so the window is what was consulted"
+        )
+        XCTAssertEqual((result["verification"] as? [String: Any])?["observedChange"] as? Bool, false)
+    }
+
+    func testAKeyThatChangesTheWindowIsConfirmedByTheWindow() throws {
+        // §6.5 vector 53 — the other half. The window delta can confirm even
+        // though it can never refute, and it is the only evidence a key gets.
+        let element = hostTestElement()
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.focused = element
+        environment.probe = KeyReactiveProbe(
+            log: environment.keyEvents,
+            after: HostElementDigestInput(role: "AXButton", label: "Print…")
+        )
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        harness.install(snapshot)
+
+        harness.send(
+            dispatchKey(
+                snapshot: snapshot,
+                action: #"{"kind":"key","key":"p","modifiers":["command"]}"#,
+                settle: "quiesce"
+            )
+        )
+        let result = try harness.awaitResult(timeout: 10)
+
+        XCTAssertEqual(result["effect"] as? String, "confirmed")
+        XCTAssertEqual((result["verification"] as? [String: Any])?["method"] as? String, "tree_delta")
+        XCTAssertEqual((result["verification"] as? [String: Any])?["observedChange"] as? Bool, true)
+    }
+
+    func testAKeyWithNoSettleReportsThatNothingWasChecked() throws {
+        // §6.5 vector 53 — with no settle there is no delta, and a key posted to a
+        // pid returns nothing to name either. `unverifiable` with `method: "none"`
+        // is the whole of what the executor knows, and it is a different sentence
+        // from `unverifiable` with a method: that one means it looked.
+        let element = hostTestElement()
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.focused = element
+        environment.probe = KeyReactiveProbe(log: environment.keyEvents)
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        harness.install(snapshot)
+
+        harness.send(
+            dispatchKey(snapshot: snapshot, action: #"{"kind":"key","key":"Escape","modifiers":[]}"#)
+        )
+        let result = try harness.awaitResult()
+
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertNotEqual(result["effect"] as? String, "suspected_noop")
+        XCTAssertEqual(result["effect"] as? String, "unverifiable")
+        XCTAssertEqual((result["verification"] as? [String: Any])?["method"] as? String, "none")
+    }
+
+    func testTypingIsNotJudgedByTheWindowEvenWhenTheWindowChanged() throws {
+        // §6.5 vector 53, the guard on the fix rather than on the defect. Routing
+        // every `dispatch.key` through the window delta would trade one misreport
+        // for another: typing that left the element's value alone would come back
+        // `confirmed` off some unrelated change elsewhere in the window, and the
+        // one action whose noop *is* observable would stop being observable.
+        let element = hostTestElement()
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.focused = element
+        environment.probe = KeyReactiveProbe(
+            log: environment.keyEvents,
+            after: HostElementDigestInput(role: "AXButton", label: "Sent")
+        )
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchKey(snapshot: snapshot, settle: "quiesce"))
+        let result = try harness.awaitResult(timeout: 10)
+
+        XCTAssertEqual(harness.environment.keyEvents.posted, [.type("hello")])
+        XCTAssertNotEqual(
+            (result["verification"] as? [String: Any])?["method"] as? String,
+            "tree_delta",
+            "typing is judged by the value it writes, whatever else the window did"
+        )
+    }
+
     // MARK: - Launching an app (§5.7)
 
     func testAppsLaunchResolvesWithinTheBudgetTheCallerDeclared() throws {
@@ -1510,15 +1709,21 @@ final class HostProtocolTests: XCTestCase {
 
     private var nextRequestId = 300
 
-    private func dispatchKey(snapshot: HostSnapshot, focusPolicy: String? = nil) -> String {
+    private func dispatchKey(
+        snapshot: HostSnapshot,
+        focusPolicy: String? = nil,
+        action: String = #"{"kind":"type","text":"hello"}"#,
+        settle: String? = nil
+    ) -> String {
         nextRequestId += 1
         let element = snapshot.payload.elements[0]
         let policy = focusPolicy.map { ",\"focusPolicy\":\"\($0)\"" } ?? ""
+        let observeAfter = settle.map { ",\"observeAfter\":{\"includeImage\":false,\"settle\":\"\($0)\"}" } ?? ""
         return """
         {"jsonrpc":"2.0","id":\(nextRequestId),"method":"dispatch.key","params":{\
         "session":"s1","snapshotId":"\(snapshot.id)","toolCallId":"call_4",\
         "focusToken":"\(element.token)","expectElementDigest":"\(element.digest)"\(policy),\
-        "action":{"kind":"type","text":"hello"}}}
+        "action":\(action)\(observeAfter)}}
         """
     }
 

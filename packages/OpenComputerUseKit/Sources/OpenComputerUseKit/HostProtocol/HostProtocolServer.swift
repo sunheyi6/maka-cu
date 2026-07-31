@@ -730,10 +730,7 @@ public final class HostProtocolServer {
         outcome: HostDispatchOutcome = .refused,
         tier: HostDispatchTier,
         path: HostDispatchPath = .none,
-        verdict: HostEffectVerdict = HostEffectVerdict(
-            effect: .unverifiable,
-            verification: HostVerification(method: .none, observedChange: false)
-        )
+        verdict: HostEffectVerdict = hostEffectNotChecked()
     ) {
         let payload = HostDispatchFailureResult(
             toolCallId: toolCallId,

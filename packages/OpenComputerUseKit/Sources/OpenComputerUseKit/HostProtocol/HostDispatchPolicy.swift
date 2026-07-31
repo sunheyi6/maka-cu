@@ -149,6 +149,74 @@ public func hostEffectFromActionResult() -> HostEffectVerdict {
     )
 }
 
+/// §6.5 — nothing was checked. The pairing matters as much as the effect:
+/// `unverifiable` with a method named means *the executor looked and could not
+/// tell*, and `unverifiable` with `method: "none"` means *the executor has no
+/// observation that bears on this question at all*. A host cannot tell a driver
+/// that does not verify from one that verified and could not confirm unless the
+/// two are spelled differently.
+public func hostEffectNotChecked() -> HostEffectVerdict {
+    HostEffectVerdict(
+        effect: .unverifiable,
+        verification: HostVerification(method: .none, observedChange: false)
+    )
+}
+
+/// §6.5 — which observation is entitled to judge a `dispatch.key` action.
+///
+/// The two `action.kind`s are not two spellings of one operation, and the
+/// executor judged them as if they were.
+///
+/// `type` writes text into the element the request named and verified, so that
+/// element's `AXValue` *is* the thing the action changes. Reading it back asks
+/// the question the action was about, and a value that did not move is a real
+/// `suspected_noop`.
+///
+/// A `key` is a command. The application decides what `cmd+p` means, and nothing
+/// in this protocol says the answer turns up in the value of whatever held
+/// focus: `cmd+p` opens a print sheet, `ctrl+f2` moves to the menu bar, `cmd+s`
+/// writes a file, `cmd+w` closes the window, `Tab` moves focus off the element
+/// entirely. None of them touch that value, so the readback answers "unchanged"
+/// whether the key landed or not — and "unchanged" was being reported as
+/// `suspected_noop`, which is the executor claiming to have checked.
+///
+/// Measured on a real run: a model asked to export a document found the menu bar
+/// unreachable in the observation and reached for the shortcut, which is the
+/// right move. `cmd+p` came back `ok … effect: suspected_noop` seven times and it
+/// sent it seven times; a second model did the same with `ctrl+f2` four times.
+/// The model's own account was that it must be getting the arguments wrong,
+/// because the arguments were the only thing it could still see to change.
+///
+/// Whether those two keys landed is a separate question the executor never
+/// answered, and separately measured (§14) they probably did not: a background
+/// application acts on no key posted the way this executor posts them. That
+/// changes nothing here. The verdict was not read off the key's effect; it was
+/// read off a value the key was never going to touch, and the same reading
+/// condemns `cmd+A` on a text view of an active application, which does land and
+/// leaves that value exactly where it was — measured, in
+/// `HostKeyDispatchLiveTests`. A verdict that happens to correlate with the truth
+/// for a reason unrelated to the truth is not evidence, and it cost the model
+/// seven retries.
+public enum HostKeyEvidence: Equatable, Sendable {
+    /// The focused element's value, read either side of the post.
+    case focusedElementValue
+    /// The window digest across the settle — the same evidence a click is judged
+    /// on, and with the same asymmetry: it can confirm, and it can never refute.
+    case windowDelta
+}
+
+public func hostKeyEvidence(for action: HostKeyAction) -> HostKeyEvidence {
+    switch action {
+    case .type:
+        return .focusedElementValue
+    case .key:
+        // Including a key with no modifiers. `Tab`, `Escape` and `Space` are as
+        // far outside the focused element's value as `cmd+p` is; the modifier
+        // list is not what makes a key a command.
+        return .windowDelta
+    }
+}
+
 /// §6.5 — `set_value` MUST read the value back. Equal to the requested value is
 /// `confirmed`; equal to the *previous* value is `suspected_noop`; anything else
 /// is `unverifiable`, because a third value means something else wrote it.
@@ -205,16 +273,25 @@ public func hostEffectFromSelectionReadback(
 /// when `settle: "quiesce"` gave a change time to appear. With `settle: "none"`
 /// no time was given, so absence of change is not evidence and neither is its
 /// presence attributable to this action.
+///
+/// It never returns `suspected_noop`, and that is the point of it rather than an
+/// omission: the digest is recomputed over the elements the quoted snapshot
+/// recorded, so an effect that arrives as a new sheet, a new window, another
+/// application or a file on disk leaves it byte-identical. Absence of a delta is
+/// not absence of effect, and the executor is not entitled to say it is.
+///
+/// `withoutDelta` is what to report when no delta was taken, and it is required
+/// rather than defaulted because it is a different sentence for every caller: an
+/// `AXPress` that returned `.success` has an `action_result` to name, and a key
+/// posted to a pid has nothing at all.
 public func hostEffectFromTreeDelta(
     settle: HostSettleMode,
     digestBefore: String,
-    digestAfter: String?
+    digestAfter: String?,
+    withoutDelta: HostEffectVerdict
 ) -> HostEffectVerdict {
     guard settle == .quiesce, let digestAfter else {
-        return HostEffectVerdict(
-            effect: .unverifiable,
-            verification: HostVerification(method: .actionResult, observedChange: false)
-        )
+        return withoutDelta
     }
 
     let changed = digestAfter != digestBefore
