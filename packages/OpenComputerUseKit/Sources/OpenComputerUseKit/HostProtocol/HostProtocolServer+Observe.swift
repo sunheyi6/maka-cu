@@ -1026,22 +1026,40 @@ extension HostProtocolServer {
 
         let frontmostBefore = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
-        guard let app = try? AppDiscovery.resolve(params.app) else {
-            emit(id: id, failure: HostDomainError(.appNotFound))
+        // §5.7 — the clock starts here, not after the app exists. The caller's
+        // budget covers the whole of "make this app usable": a cold launch spends
+        // most of it before there is a process to look for windows in, and an
+        // executor that timed its own resolution against a hardcoded five seconds
+        // refused a launch that had been given eight — while the app was starting
+        // normally and did come up.
+        let started = Date()
+        let resolutionBudget = params.waitForWindowMs
+            .flatMap { $0 > 0 ? TimeInterval($0) / 1000 : nil }
+            ?? AppDiscovery.defaultLaunchWaitSeconds
+
+        let app: HostRunningApp
+        switch environment.launchApp(params.app, waitFor: resolutionBudget) {
+        case .failure(let error):
+            // §5.7 — `timeout` and `app_not_found` are different instructions to
+            // the model. Reporting the app that is still starting as missing is
+            // what sent it off to guess other names for an app that had launched.
+            emit(id: id, failure: error)
             return
+        case .success(let resolved):
+            app = resolved
         }
 
-        let started = Date()
         var windows: [HostAppsLaunchResult.LaunchedWindow] = []
         var reason = HostLaunchWaitReason.notRequested
 
         // §5 — the executor MUST wait for a window rather than returning the empty
         // array it sees at launch time. Measured: launch returns in 1.3–3.2 s and
         // the window is mapped 2.3–4.5 s in, so the array is empty on every real
-        // launch unless somebody waits.
+        // launch unless somebody waits. What is left of the budget after
+        // resolution is what the window gets.
         if let waitMs = params.waitForWindowMs, waitMs > 0 {
             reason = .timeout
-            while Date().timeIntervalSince(started) * 1000 < Double(waitMs) {
+            repeat {
                 let found = environment.onScreenWindows()
                     .filter { $0.pid == app.pid && $0.layer == 0 }
                 if !found.isEmpty {
@@ -1052,8 +1070,12 @@ extension HostProtocolServer {
                     break
                 }
 
+                guard Date().timeIntervalSince(started) * 1000 < Double(waitMs) else {
+                    break
+                }
+
                 Thread.sleep(forTimeInterval: 0.1)
-            }
+            } while true
         } else {
             windows = environment.onScreenWindows()
                 .filter { $0.pid == app.pid && $0.layer == 0 }
@@ -1069,7 +1091,7 @@ extension HostProtocolServer {
                 // §5.7 — the request may be a display name because a not-running
                 // app has no `appId` yet; the answer is always in the one
                 // namespace, and every later call uses it.
-                appId: hostAppId(bundleIdentifier: app.bundleIdentifier, pid: app.pid),
+                appId: app.appId,
                 name: app.name,
                 // §5 — declared, not inferred. An absent boolean that means
                 // "unknown" is a three-valued field pretending to be two, and a

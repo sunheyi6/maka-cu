@@ -9,6 +9,10 @@ public enum ComputerUseError: Error, LocalizedError {
     case appNotFound(String)
     case permissionDenied(String)
     case stateUnavailable(String)
+    /// The thing asked for exists and did not finish in the time it was given.
+    /// Separate from `appNotFound` because the caller's next move differs: one
+    /// says try another name, the other says wait or look again.
+    case timeout(String)
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +27,8 @@ public enum ComputerUseError: Error, LocalizedError {
         case .permissionDenied(let message):
             return message
         case .stateUnavailable(let message):
+            return message
+        case .timeout(let message):
             return message
         }
     }

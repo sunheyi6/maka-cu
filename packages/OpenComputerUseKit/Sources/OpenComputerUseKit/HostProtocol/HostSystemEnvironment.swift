@@ -33,6 +33,14 @@ public protocol HostSystemEnvironment {
     func screenIsLocked() -> Bool
     func permissions() -> PermissionDiagnostics
     func runningApps() -> [HostRunningApp]
+    /// §5.7 — `apps.launch`. Resolves the request to a running application,
+    /// starting it if it is not running yet, and gives up after `budget`.
+    ///
+    /// It is behind the seam for the reason the rest of this protocol is: the
+    /// failure arms — nothing on disk, started but too slow, refused by the
+    /// safety list — are otherwise only reachable by launching real
+    /// applications on the machine running the tests.
+    func launchApp(_ query: String, waitFor budget: TimeInterval) -> Result<HostRunningApp, HostDomainError>
     /// Front-to-back, as §5.4 requires.
     func onScreenWindows() -> [HostWindowInfo]
     func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement?
@@ -77,6 +85,22 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
                 name: app.name,
                 running: !app.runningApplication.isTerminated
             )
+        }
+    }
+
+    public func launchApp(_ query: String, waitFor budget: TimeInterval) -> Result<HostRunningApp, HostDomainError> {
+        do {
+            let app = try AppDiscovery.resolve(query, waitFor: budget)
+            return .success(
+                HostRunningApp(
+                    appId: hostAppId(bundleIdentifier: app.bundleIdentifier, pid: app.pid),
+                    pid: app.pid,
+                    name: app.name,
+                    running: !app.runningApplication.isTerminated
+                )
+            )
+        } catch {
+            return .failure(hostAppLaunchFailure(error))
         }
     }
 
@@ -167,6 +191,36 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
         } else {
             try InputSimulation.clickTargeted(at: point, button: button, clickCount: count, pid: pid)
         }
+    }
+}
+
+// MARK: - Failing a launch (§5.7)
+
+/// The ways `apps.launch` fails are different things, and the caller acts on
+/// them differently. Collapsing them — which the handler used to do with a
+/// `try?` that answered `app_not_found` to everything — told the model to try
+/// another name in three cases where another name cannot help: the app was
+/// still starting, the app is on the safety list, or the launch itself was
+/// refused by the system.
+public func hostAppLaunchFailure(_ error: Error) -> HostDomainError {
+    guard let error = error as? ComputerUseError else {
+        // `NSWorkspace.openApplication` said no. It was attempted and it did not
+        // happen, which is what `dispatch_refused` means; the app is not missing.
+        return HostDomainError(.dispatchRefused)
+    }
+
+    switch error {
+    case .appNotFound:
+        return HostDomainError(.appNotFound)
+    case .timeout:
+        return HostDomainError(.timeout)
+    case .permissionDenied:
+        // Not `permission_missing`: no macOS grant would change this answer. The
+        // executor will not drive this application at all, so naming it again,
+        // or granting something, is not the way forward.
+        return HostDomainError(.unsupportedAction)
+    case .message, .unsupportedTool, .invalidArguments, .stateUnavailable:
+        return HostDomainError(.dispatchRefused)
     }
 }
 

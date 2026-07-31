@@ -922,6 +922,120 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual((error["data"] as? [String: Any])?["field"] as? String, "focusPolicy")
     }
 
+    // MARK: - Launching an app (§5.7)
+
+    func testAppsLaunchResolvesWithinTheBudgetTheCallerDeclared() throws {
+        // §5.7 vector 43 — `waitForWindowMs` covers the whole of "make this app
+        // usable". The executor used to resolve on a hardcoded five seconds and
+        // apply the caller's budget only to the window wait, so a cold launch
+        // that the host had allowed eight seconds for was refused at 5571 ms —
+        // after the app had, in fact, started.
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"apps.launch","params":{"session":"s1","app":"Notes","waitForWindowMs":8000}}"#)
+
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["appId"] as? String, hostTestAppId)
+        let requested = try XCTUnwrap(harness.environment.launches.requests.last)
+        XCTAssertEqual(requested.query, "Notes")
+        XCTAssertEqual(requested.budget, 8.0, accuracy: 0.001)
+
+        // A caller that declares nothing keeps the behaviour it always had.
+        var bare = FakeEnvironment()
+        bare.windows = [hostTestWindow()]
+        let unbudgeted = ServerHarness(environment: bare)
+        try unbudgeted.begin()
+        unbudgeted.send(#"{"jsonrpc":"2.0","id":3,"method":"apps.launch","params":{"session":"s1","app":"Notes"}}"#)
+        _ = try unbudgeted.awaitResult()
+
+        XCTAssertEqual(
+            try XCTUnwrap(unbudgeted.environment.launches.requests.last).budget,
+            AppDiscovery.defaultLaunchWaitSeconds,
+            accuracy: 0.001
+        )
+    }
+
+    func testAnAppThatIsStillStartingIsATimeoutNotAMissingApp() throws {
+        // §5.7 vector 44 — the app exists, was told to start, and did not
+        // register in time. `app_not_found` means "there is no such app" and
+        // sends the model off to guess other names for an app that is already
+        // launching; `timeout` says wait or look again.
+        let started = Date()
+        let budget: TimeInterval = 0.3
+
+        XCTAssertThrowsError(
+            try AppDiscovery.resolve(
+                "Some Editor",
+                waitFor: budget,
+                launch: { _ in true },
+                runningApps: { [] }
+            )
+        ) { error in
+            guard case ComputerUseError.timeout = error else {
+                return XCTFail("a launched app that did not appear is a timeout, not \(error)")
+            }
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertGreaterThanOrEqual(elapsed, budget, "the declared budget is waited out, not cut short")
+        XCTAssertLessThan(elapsed, AppDiscovery.defaultLaunchWaitSeconds, "and the default no longer overrides it")
+
+        // And it reaches the caller as `timeout` on the wire.
+        var environment = FakeEnvironment()
+        environment.launches.outcome = .failure(HostDomainError(.timeout))
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"apps.launch","params":{"session":"s1","app":"TextEdit","waitForWindowMs":8000}}"#)
+
+        XCTAssertEqual(try errorCode(try harness.awaitResult()), "timeout")
+    }
+
+    func testAnAppThatIsNowhereOnDiskIsAppNotFoundWithoutSpendingTheBudget() throws {
+        // §5.7 vector 44, the other half — nothing answers to the name, so no
+        // amount of waiting will change the answer and none is spent.
+        let started = Date()
+
+        XCTAssertThrowsError(
+            try AppDiscovery.resolve(
+                "Nothing By This Name",
+                waitFor: 5,
+                launch: { _ in false },
+                runningApps: { [] }
+            )
+        ) { error in
+            guard case ComputerUseError.appNotFound = error else {
+                return XCTFail("an app that does not exist is app_not_found, not \(error)")
+            }
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
+
+    func testABlockedAppIsRefusedRatherThanReportedMissing() throws {
+        // §5.7 vector 45 — the handler used to reach the resolver through a
+        // `try?`, which turned every failure into `app_not_found`, including the
+        // safety list. "There is no such app" is false and actionable: the model
+        // retries with another spelling of a password manager that is right there.
+        XCTAssertThrowsError(try AppDiscovery.resolve("com.1password.1password", waitFor: 0)) { error in
+            guard case ComputerUseError.permissionDenied = error else {
+                return XCTFail("a blocked app is a refusal, not \(error)")
+            }
+        }
+
+        XCTAssertEqual(hostAppLaunchFailure(ComputerUseError.permissionDenied("blocked")).code, .unsupportedAction)
+        XCTAssertEqual(hostAppLaunchFailure(ComputerUseError.appNotFound("Nope")).code, .appNotFound)
+        XCTAssertEqual(hostAppLaunchFailure(ComputerUseError.timeout("slow")).code, .timeout)
+        // The system refused the launch itself: attempted, did not happen — and
+        // still not a missing app.
+        XCTAssertEqual(
+            hostAppLaunchFailure(NSError(domain: NSCocoaErrorDomain, code: 260)).code,
+            .dispatchRefused
+        )
+    }
+
     // MARK: - Helpers
 
     private var nextRequestId = 300

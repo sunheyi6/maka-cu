@@ -141,29 +141,74 @@ enum AppDiscovery {
             }
     }
 
-    static func resolve(_ query: String) throws -> RunningAppDescriptor {
+    /// What a caller that declared no budget gets. It is the five seconds this
+    /// function always waited, kept so callers that never had a budget behave
+    /// exactly as before.
+    static let defaultLaunchWaitSeconds: TimeInterval = 5
+
+    private static let launchPollIntervalSeconds: TimeInterval = 0.25
+
+    static func resolve(
+        _ query: String,
+        waitFor budget: TimeInterval = defaultLaunchWaitSeconds
+    ) throws -> RunningAppDescriptor {
+        try resolve(query, waitFor: budget, launch: launchIfPossible, runningApps: runningApps)
+    }
+
+    /// §5.7 — `budget` covers the whole of "make this app usable", not just the
+    /// part after the process exists. A cold launch on a loaded machine spends
+    /// most of it here: measured at 5571 ms for TextEdit, which is why a
+    /// hardcoded five seconds refused a launch the caller had allowed eight
+    /// seconds for.
+    ///
+    /// The two ways this fails are two different things, and the caller acts on
+    /// them differently:
+    ///
+    /// - nothing on disk answers to the request → `appNotFound`, and the model's
+    ///   move is to name something else;
+    /// - the application exists, was told to start, and had not registered
+    ///   within `budget` → `timeout`, and the model's move is to wait or
+    ///   re-observe. Reporting that as `appNotFound` is a lie the caller acts on:
+    ///   the app *did* start, and renaming it cannot help.
+    ///
+    /// The seams exist because the failure arms are otherwise unreachable from a
+    /// test without launching real applications and waiting for them.
+    static func resolve(
+        _ query: String,
+        waitFor budget: TimeInterval,
+        launch: (String) throws -> Bool,
+        runningApps: () -> [RunningAppDescriptor]
+    ) throws -> RunningAppDescriptor {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let running = runningApps()
 
         if let bundleIdentifier = blockedBundleIdentifier(forQuery: normalizedQuery) {
             throw AppSafetyPolicy.permissionDenied(bundleIdentifier: bundleIdentifier)
         }
 
-        if let match = resolvedRunningApp(in: running, matching: normalizedQuery) {
+        if let match = resolvedRunningApp(in: runningApps(), matching: normalizedQuery) {
             return match
         }
 
-        try launchIfPossible(normalizedQuery)
+        guard try launch(normalizedQuery) else {
+            throw ComputerUseError.appNotFound(normalizedQuery)
+        }
 
-        for _ in 0..<20 {
+        let deadline = Date(timeIntervalSinceNow: max(budget, 0))
+        while true {
             if let launched = resolvedRunningApp(in: runningApps(), matching: normalizedQuery) {
                 return launched
             }
 
-            Thread.sleep(forTimeInterval: 0.25)
+            guard Date() < deadline else {
+                break
+            }
+
+            Thread.sleep(forTimeInterval: launchPollIntervalSeconds)
         }
 
-        throw ComputerUseError.appNotFound(normalizedQuery)
+        throw ComputerUseError.timeout(
+            "the application '\(normalizedQuery)' was started and had not registered within the declared budget"
+        )
     }
 
     private static func resolvedRunningApp(in descriptors: [RunningAppDescriptor], matching query: String) -> RunningAppDescriptor? {
@@ -250,27 +295,35 @@ enum AppDiscovery {
         return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 
-    private static func launchIfPossible(_ query: String) throws {
+    /// Answers whether the query named an application this executor is willing
+    /// and able to start. `false` means nothing on disk answers to it, which is
+    /// the only case that is `appNotFound`; a blocked application throws,
+    /// because "we will not drive your password manager" is not "no such app".
+    private static func launchIfPossible(_ query: String) throws -> Bool {
         if isBundleIdentifierQuery(query) {
             guard !AppSafetyPolicy.isBlocked(bundleIdentifier: query) else {
-                return
+                throw AppSafetyPolicy.permissionDenied(bundleIdentifier: query)
             }
 
-            if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) {
-                try openApplication(at: appURL)
+            guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) else {
+                return false
             }
-            return
+
+            try openApplication(at: appURL)
+            return true
         }
 
         guard let appURL = applicationURL(named: query) else {
-            return
+            return false
         }
 
-        if AppSafetyPolicy.isBlocked(bundleIdentifier: Bundle(url: appURL)?.bundleIdentifier) {
-            return
+        let bundleIdentifier = Bundle(url: appURL)?.bundleIdentifier
+        if AppSafetyPolicy.isBlocked(bundleIdentifier: bundleIdentifier) {
+            throw AppSafetyPolicy.permissionDenied(bundleIdentifier: bundleIdentifier ?? query)
         }
 
         try openApplication(at: appURL)
+        return true
     }
 
     private static func applicationURL(named query: String) -> URL? {

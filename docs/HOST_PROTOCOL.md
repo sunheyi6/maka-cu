@@ -750,6 +750,29 @@ action start because a user can revoke at any time
   is mapped 2.3–4.5 s in, so the driver's `windows` array is empty on every real
   launch (`cua-driver-backend.ts:1704-1708`). `waited.reason` ∈
   `"window_appeared" | "timeout" | "not_requested"` says which happened.
+- `waitForWindowMs` is a budget for the whole of "make this app usable", not just
+  for the window wait at the end of it. The executor spends it on both phases in
+  order: starting the application and waiting for the process to register, then
+  waiting for a window. An executor that resolves the app against a clock of its
+  own and applies the caller's budget only to the second phase refuses launches
+  the caller had allowed time for — measured: a cold TextEdit on a loaded machine
+  took 5571 ms to register, against a hardcoded five-second resolve and a
+  declared budget of 8000 ms. With no `waitForWindowMs` the executor uses its own
+  default, and `waited.reason` is `not_requested`.
+- A cold launch that outlives the budget is `timeout`, never `app_not_found`.
+  They are different facts and the caller acts on them differently:
+  `app_not_found` means nothing on this machine answers to that name, and the
+  model's move is to name something else; `timeout` means the application exists,
+  was started, and had not registered in time, and the model's move is to wait or
+  observe again. Answering `app_not_found` for a slow launch is a lie the model
+  acts on — it goes off looking for other spellings of an app that is already
+  starting, and the launch that did happen is invisible to it.
+- An application the executor will not drive at all — the safety list, currently
+  password managers — is `unsupported_action`, not `app_not_found` and not
+  `permission_missing`. It is present, no macOS grant changes the answer, and
+  another spelling of the name will not either.
+- A launch the system itself refuses is `dispatch_refused`: it was attempted and
+  did not happen. The app is not missing.
 - A launch that takes the foreground when `foregroundTaken` was meant to be false
   is still `ok: true` with `foregroundTaken: true`. It happened; hiding it does
   not un-happen it.
@@ -1664,6 +1687,25 @@ Focus policy (§6.4):
     against an executor which trusts the write instead of re-reading.
 42. `focusPolicy` outside `require` / `acquire` is `-32602` naming the field,
     not a silent fallback to `require`.
+
+Launching an app (§5.7):
+
+43. `apps.launch` with `waitForWindowMs: 8000` resolves the application under a
+    budget of 8000 ms, not under an executor-chosen one; a request that declares
+    no budget still gets the executor's default. The vector that fails against an
+    executor which waits its own five seconds for the process and then hands the
+    caller's budget to the window wait — which is what refused a cold TextEdit at
+    5571 ms.
+44. An application that was started and had not registered within the budget is
+    `timeout`; an application nothing on the machine answers to is
+    `app_not_found`, and it is answered without spending the budget. The two
+    codes must differ: one tells the model to wait, the other to try another
+    name, and an executor that reports both as `app_not_found` sends the model
+    hunting for an app it already launched.
+45. An app on the executor's safety list is `unsupported_action`, and a launch
+    the system refuses is `dispatch_refused`. Neither is `app_not_found`. This is
+    the vector that fails against a handler which reaches the resolver through a
+    `try?`, because that collapses every failure into the one code.
 
 ---
 

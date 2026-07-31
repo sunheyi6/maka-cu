@@ -158,6 +158,25 @@ final class KeyEventLog {
     }
 }
 
+/// Records what `apps.launch` asked the resolver for, so a test can tell the
+/// caller's declared budget from the executor's own default — the two were
+/// indistinguishable while the handler resolved on a hardcoded five seconds.
+final class AppLaunchLog {
+    private let lock = NSLock()
+    private(set) var requests: [(query: String, budget: TimeInterval)] = []
+    /// What the machine answers. Defaults to the fixture app already running.
+    var outcome: Result<HostRunningApp, HostDomainError> = .success(
+        HostRunningApp(appId: hostTestAppId, pid: hostTestPid, name: "Notes", running: true)
+    )
+
+    func record(_ query: String, _ budget: TimeInterval) -> Result<HostRunningApp, HostDomainError> {
+        lock.lock()
+        requests.append((query: query, budget: budget))
+        lock.unlock()
+        return outcome
+    }
+}
+
 struct FakeEnvironment: HostSystemEnvironment {
     var locked = false
     var accessibilityTrusted = true
@@ -173,6 +192,7 @@ struct FakeEnvironment: HostSystemEnvironment {
     var pointEvents = PointEventLog()
     var keyEvents = KeyEventLog()
     var focusRequests = FocusRequestLog()
+    var launches = AppLaunchLog()
 
     func screenIsLocked() -> Bool { locked }
 
@@ -185,6 +205,10 @@ struct FakeEnvironment: HostSystemEnvironment {
 
     func runningApps() -> [HostRunningApp] { apps }
     func onScreenWindows() -> [HostWindowInfo] { windows }
+
+    func launchApp(_ query: String, waitFor budget: TimeInterval) -> Result<HostRunningApp, HostDomainError> {
+        launches.record(query, budget)
+    }
 
     func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? { windowElement }
     func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
