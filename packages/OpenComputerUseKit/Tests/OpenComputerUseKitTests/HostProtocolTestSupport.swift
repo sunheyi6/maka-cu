@@ -95,6 +95,69 @@ final class PointEventLog {
     }
 }
 
+/// Records what `dispatch.key` asked the machine to do about focus, and decides
+/// what the machine does with it — so a test can tell "the executor never asked"
+/// from "it asked and the element would not take focus".
+final class FocusRequestLog {
+    private let lock = NSLock()
+    private var requests: [AXUIElement] = []
+    private var granted: AXUIElement?
+
+    /// The `kAXFocused` write itself is refused.
+    var writeSucceeds = true
+    /// The write is accepted *and* focus follows. `false` is the application that
+    /// answers `AXError.success` and leaves focus where it was — the reason the
+    /// executor re-reads instead of trusting the write.
+    var focusFollows = true
+
+    var requested: [AXUIElement] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
+
+    var currentFocus: AXUIElement? {
+        lock.lock()
+        defer { lock.unlock() }
+        return granted
+    }
+
+    func record(_ element: AXUIElement) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        requests.append(element)
+
+        guard writeSucceeds else {
+            return false
+        }
+
+        if focusFollows {
+            granted = element
+        }
+        return true
+    }
+}
+
+/// Records the keys the executor posted, so a refusal can be asserted to have
+/// posted nothing — and so a passing dispatch does not type into whatever real
+/// process happens to hold the fixture pid.
+final class KeyEventLog {
+    private let lock = NSLock()
+    private(set) var posted: [HostKeyAction] = []
+    /// When set, the post throws — the executor's "attempted, the OS said no".
+    var failure: Error?
+
+    func record(_ action: HostKeyAction) throws {
+        lock.lock()
+        posted.append(action)
+        lock.unlock()
+
+        if let failure {
+            throw failure
+        }
+    }
+}
+
 struct FakeEnvironment: HostSystemEnvironment {
     var locked = false
     var accessibilityTrusted = true
@@ -102,11 +165,14 @@ struct FakeEnvironment: HostSystemEnvironment {
     var apps: [HostRunningApp] = []
     var windows: [HostWindowInfo] = []
     var probe = FakeBindingProbe()
-    /// Left `nil`: no fake can produce a real `AXUIElement`, and every test that
-    /// needs one asserts a refusal that happens before the element is touched.
+    /// Left `nil` by default: most tests assert a refusal that happens before the
+    /// element is touched. The `dispatch.key` vectors that need a real
+    /// `AXUIElement` use `hostTestElement`.
     var focused: AXUIElement?
     var windowElement: AXUIElement?
     var pointEvents = PointEventLog()
+    var keyEvents = KeyEventLog()
+    var focusRequests = FocusRequestLog()
 
     func screenIsLocked() -> Bool { locked }
 
@@ -121,7 +187,8 @@ struct FakeEnvironment: HostSystemEnvironment {
     func onScreenWindows() -> [HostWindowInfo] { windows }
 
     func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? { windowElement }
-    func focusedElement(pid: pid_t) -> AXUIElement? { focused }
+    func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
+    func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool { focusRequests.record(element) }
     func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe { probe }
 
     func postPointEvent(
@@ -133,6 +200,10 @@ struct FakeEnvironment: HostSystemEnvironment {
     ) throws {
         try pointEvents.record(action: action, point: point, path: path)
     }
+
+    func postKeyEvent(_ action: HostKeyAction, pid: pid_t) throws {
+        try keyEvents.record(action)
+    }
 }
 
 // MARK: - Fixture values
@@ -142,6 +213,15 @@ let hostTestProcessStartTime: UInt64 = 1_234_567
 let hostTestWindowBounds = CGRect(x: 0, y: 0, width: 100, height: 100)
 let hostTestWindowTitle = "Untitled"
 let hostTestAppId = "com.apple.Notes"
+
+/// A real `AXUIElement`, needed by the `dispatch.key` vectors: `CFEqual` is what
+/// the focus check compares with, and it has no fake. Creating an application
+/// element neither requires Accessibility nor touches the process — it is an
+/// opaque handle, used here only for its identity, so a test keeps the instance
+/// it made and hands the *same* one to the binding and to the environment.
+func hostTestElement(pid: pid_t = hostTestPid) -> AXUIElement {
+    AXUIElementCreateApplication(pid)
+}
 
 func hostTestWindow(
     windowId: CGWindowID = 1,
@@ -170,7 +250,8 @@ func hostTestBinding(
     token: String,
     digestInput: HostElementDigestInput,
     enabled: Bool = true,
-    frame: HostRect? = nil
+    frame: HostRect? = nil,
+    element: AXUIElement? = nil
 ) -> HostElementBinding {
     HostElementBinding(
         token: token,
@@ -179,7 +260,7 @@ func hostTestBinding(
         pid: hostTestPid,
         processStartTime: hostTestProcessStartTime,
         digestInput: digestInput,
-        element: nil,
+        element: element,
         observed: HostObservedElement(
             token: token,
             parentToken: nil,
@@ -212,14 +293,16 @@ func hostTestSnapshot(
     imagePath: String? = nil,
     image: HostImageReference? = nil,
     enabled: Bool = true,
-    elementFrame: HostRect? = nil
+    elementFrame: HostRect? = nil,
+    element: AXUIElement? = nil
 ) -> HostSnapshot {
     let id = registry.nextSnapshotId()
     let binding = hostTestBinding(
         token: "el_\(id)_0",
         digestInput: HostElementDigestInput(role: "AXButton", label: "Send"),
         enabled: enabled,
-        frame: elementFrame
+        frame: elementFrame,
+        element: element
     )
 
     let windowDigest = hostWindowDigest(

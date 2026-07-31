@@ -1007,6 +1007,7 @@ ported.
     "toolCallId": "call_3",
     "focusToken": "el_9b41…",
     "expectElementDigest": "sha256:aa10…",
+    "focusPolicy": "acquire",
     "action": { "kind": "type", "text": "hello" },
     "observeAfter": { "includeImage": false, "settle": "quiesce" }
   } }
@@ -1114,6 +1115,48 @@ re-resolving an index. Focus mismatch is `focus_changed`, and it maps to
 `target_changed`.
 
 Key events are posted to the target pid. The executor MUST NOT activate the
+application, raise its window, or change the frontmost app.
+
+#### `focusPolicy` — verify focus, or take it
+
+```json
+"focusPolicy": "require" | "acquire"
+```
+
+Optional; **absent means `require`**. A closed set of two, and an unknown value
+is `-32602` rather than a fallback to the stricter one — a host asking for a
+third behaviour has a bug, and quietly answering it as `require` hides that bug
+behind a refusal the host will read as "the user moved focus".
+
+- **`require`** — the check described above, unchanged: the element named by
+  `focusToken` must *already* be focused, and `focus_changed` otherwise. It is
+  the default because taking focus is an action on the user's machine, and an
+  executor that takes it when nobody asked is an executor doing something the
+  host never wrote down.
+- **`acquire`** — the executor writes `kAXFocused` on the bound element, then
+  **re-reads** the focused element and proceeds only if it is now the one named.
+
+`acquire` exists because without it the host's only way to focus a control was to
+click it first, and a click is not a focus operation: on a button it is a press,
+on a menu it opens the menu, and the model paid for a side effect it never asked
+for. Maka's `press_key` promises the model an optional `element_id` that focuses
+the control before the key is posted; `require` alone cannot keep that promise.
+
+Two rules make `acquire` safe to have at all:
+
+- **Verify, then acquire — never the other way round.** The token, the digest and
+  the binding probe (§4.3) are all checked *before* the `kAXFocused` write. An
+  executor that focused first would hand focus to whatever now sits at that
+  reference, including an element whose digest has already stopped matching, and
+  would then report `element_changed` having moved the user's focus.
+- **The write's own success is not evidence.** Applications answer
+  `AXError.success` and leave focus where it was. The only accepted proof is the
+  re-read, and a failed acquisition — write refused, or write accepted and focus
+  did not move — is `focus_changed` with no key posted. There is no "focus is
+  probably close enough, post it anyway" path: a key that lands somewhere the
+  request did not name is exactly the defect this section exists to delete.
+
+`acquire` changes focus and nothing else. It still MUST NOT activate the
 application, raise its window, or change the frontmost app.
 
 ### 6.5 Outcome, path, effect — the fields that used to be inferred
@@ -1607,6 +1650,20 @@ Refused, not unsupported (§7.1):
 39. A `dispatch_refused` result reaches the model as `dispatch_refused`, not as
     `capture_failed` and not as `unsupported_action`, and the frame it quoted is
     still live afterwards.
+
+Focus policy (§6.4):
+
+40. `dispatch.key` with no `focusPolicy` behaves exactly as `require`: focus
+    elsewhere is `focus_changed` with no key posted **and no `kAXFocused` write
+    attempted**, and focus already on the named element posts the key, also
+    without writing focus. With `focusPolicy: "acquire"` that same
+    focus-elsewhere case writes focus onto the bound element and posts.
+41. `acquire` against an element that does not end up focused — the write
+    refused, and the write accepted while focus stays put — is `focus_changed`
+    both times, with no key posted. The second half is the vector that fails
+    against an executor which trusts the write instead of re-reading.
+42. `focusPolicy` outside `require` / `acquire` is `-32602` naming the field,
+    not a silent fallback to `require`.
 
 ---
 

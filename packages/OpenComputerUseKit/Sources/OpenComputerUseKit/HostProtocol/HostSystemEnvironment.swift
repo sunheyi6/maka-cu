@@ -37,6 +37,11 @@ public protocol HostSystemEnvironment {
     func onScreenWindows() -> [HostWindowInfo]
     func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement?
     func focusedElement(pid: pid_t) -> AXUIElement?
+    /// §6.4 — `focusPolicy: "acquire"`. Writes `kAXFocusedAttribute` and answers
+    /// whether the write itself was accepted. It is not proof that focus moved:
+    /// an application may return success and leave focus where it was, so the
+    /// caller re-reads `focusedElement(pid:)` before posting anything.
+    func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool
     func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe
     /// §6.3 — the path has already been selected and permitted by
     /// `hostPointDispatchPath`; this only posts it.
@@ -47,6 +52,10 @@ public protocol HostSystemEnvironment {
         pid: pid_t,
         path: HostDispatchPath
     ) throws
+    /// §6.4 — posted to the target pid. Behind the same seam as the pointer for
+    /// the same reason: a handler that reaches the keyboard directly cannot be
+    /// asserted against without typing into whatever process holds that pid.
+    func postKeyEvent(_ action: HostKeyAction, pid: pid_t) throws
 }
 
 public struct HostLiveEnvironment: HostSystemEnvironment {
@@ -81,6 +90,10 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
 
     public func focusedElement(pid: pid_t) -> AXUIElement? {
         HostAX.focusedElement(pid: pid)
+    }
+
+    public func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool {
+        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
     }
 
     public func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe {
@@ -124,6 +137,21 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
             } else {
                 try InputSimulation.scrollTargeted(at: point, direction: direction.rawValue, pages: pages, pid: pid)
             }
+        }
+    }
+
+    public func postKeyEvent(_ action: HostKeyAction, pid: pid_t) throws {
+        // Key events are posted to the target pid. The executor never activates
+        // the application, raises its window, or changes the frontmost app.
+        switch action {
+        case .type(let text):
+            try InputSimulation.typeText(text, pid: pid)
+        case .key(let name, let modifiers):
+            try InputSimulation.pressKey(
+                hostKeySpecification(name: name, modifiers: modifiers),
+                pid: pid,
+                extraFlags: modifiers.contains(.fn) ? .maskSecondaryFn : []
+            )
         }
     }
 

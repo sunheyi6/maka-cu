@@ -392,6 +392,19 @@ public enum HostOcclusionPolicy: String, Codable, Sendable {
     case none
 }
 
+/// §6.4 — what `dispatch.key` may do about focus before it posts.
+///
+/// `require` is the default because the executor never silently redirects a key:
+/// a host that did not ask for focus to move gets the strict check it has always
+/// had. `acquire` exists because the alternative the host was left with —
+/// clicking the control first to focus it — is not a focus operation at all: a
+/// click on a button presses it, and the model paid for a side effect it never
+/// asked for.
+public enum HostFocusPolicy: String, Codable, Sendable {
+    case require
+    case acquire
+}
+
 public enum HostSettleMode: String, Codable, Sendable {
     case none
     case quiesce

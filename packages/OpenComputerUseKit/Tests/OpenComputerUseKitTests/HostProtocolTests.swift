@@ -798,7 +798,149 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual(hostKeySpecification(name: "PageUp", modifiers: []), "pageup")
     }
 
+    // MARK: - Focus policy (§6.4)
+
+    func testDispatchKeyWithoutAFocusPolicyRequiresFocusAndNeverMovesIt() throws {
+        // §6.4 vector 40 — the default is `require`, so a host that says nothing
+        // gets exactly the check it always got: focus elsewhere is
+        // `focus_changed`, and no `kAXFocused` write is attempted.
+        let element = hostTestElement()
+        var elsewhere = FakeEnvironment()
+        elsewhere.windows = [hostTestWindow()]
+        elsewhere.focused = hostTestElement(pid: hostTestPid + 1)
+
+        let refused = ServerHarness(environment: elsewhere)
+        try refused.begin()
+        let missed = hostTestSnapshot(
+            registry: refused.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        refused.install(missed)
+
+        refused.send(dispatchKey(snapshot: missed))
+        let refusal = try refused.awaitResult()
+        XCTAssertEqual(try errorCode(refusal), "focus_changed")
+        XCTAssertTrue(refused.environment.focusRequests.requested.isEmpty, "`require` never writes focus")
+        XCTAssertTrue(refused.environment.keyEvents.posted.isEmpty)
+
+        // And with focus already on the named element it posts, still without
+        // writing focus.
+        var onTarget = FakeEnvironment()
+        onTarget.windows = [hostTestWindow()]
+        onTarget.focused = element
+
+        let harness = ServerHarness(environment: onTarget)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchKey(snapshot: snapshot))
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["outcome"] as? String, "ok")
+        XCTAssertEqual(result["path"] as? String, "cg_event_pid")
+        XCTAssertTrue(harness.environment.focusRequests.requested.isEmpty)
+        XCTAssertEqual(harness.environment.keyEvents.posted, [.type("hello")])
+    }
+
+    func testAcquireFocusesTheNamedElementBeforePostingTheKey() throws {
+        // §6.4 vector 40 — the whole point of the policy: the host stops having
+        // to click a control to focus it, which on a button is a press.
+        let element = hostTestElement()
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.focused = hostTestElement(pid: hostTestPid + 1)
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: element
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchKey(snapshot: snapshot, focusPolicy: "acquire"))
+        let result = try harness.awaitResult()
+
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["outcome"] as? String, "ok")
+        XCTAssertEqual(harness.environment.focusRequests.requested.count, 1)
+        XCTAssertEqual(harness.environment.keyEvents.posted, [.type("hello")])
+    }
+
+    func testAcquireIsRefusedWhenTheElementDoesNotTakeFocus() throws {
+        // §6.4 vector 41 — two ways to fail, one answer, and no key either time.
+        // A refused write is the obvious one; the write that is accepted while
+        // focus stays put is why the executor re-reads instead of trusting it.
+        for (label, configure) in [
+            ("the write is refused", { (log: FocusRequestLog) in log.writeSucceeds = false }),
+            ("focus does not follow", { (log: FocusRequestLog) in log.focusFollows = false }),
+        ] {
+            let element = hostTestElement()
+            var environment = FakeEnvironment()
+            environment.windows = [hostTestWindow()]
+            environment.focused = hostTestElement(pid: hostTestPid + 1)
+            configure(environment.focusRequests)
+
+            let harness = ServerHarness(environment: environment)
+            try harness.begin()
+            let snapshot = hostTestSnapshot(
+                registry: harness.server.currentRegistry(),
+                session: "s1",
+                element: element
+            )
+            harness.install(snapshot)
+
+            harness.send(dispatchKey(snapshot: snapshot, focusPolicy: "acquire"))
+            let result = try harness.awaitResult()
+
+            XCTAssertEqual(try errorCode(result), "focus_changed", "\(label)")
+            XCTAssertEqual(result["outcome"] as? String, "refused", "\(label)")
+            XCTAssertEqual(result["path"] as? String, "none", "\(label)")
+            XCTAssertEqual(harness.environment.focusRequests.requested.count, 1, "\(label)")
+            XCTAssertTrue(harness.environment.keyEvents.posted.isEmpty, "\(label)")
+        }
+    }
+
+    func testAFocusPolicyOutsideTheClosedSetIsInvalidParams() throws {
+        // §6.4 vector 42 — the set is `require` / `acquire`. Nothing here falls
+        // back to the strict path: a host asking for a third behaviour has a bug
+        // worth seeing, and answering it as `require` hides that.
+        let harness = ServerHarness()
+        try harness.begin()
+
+        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"dispatch.key","params":{"session":"s1","snapshotId":"snap_x","toolCallId":"call_1","focusToken":"el_1","expectElementDigest":"sha256:aa","focusPolicy":"steal","action":{"kind":"type","text":"hello"}}}"#)
+
+        let error = try XCTUnwrap(try harness.awaitResponse()["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? Int, -32602)
+        XCTAssertEqual((error["data"] as? [String: Any])?["field"] as? String, "focusPolicy")
+    }
+
     // MARK: - Helpers
+
+    private var nextRequestId = 300
+
+    private func dispatchKey(snapshot: HostSnapshot, focusPolicy: String? = nil) -> String {
+        nextRequestId += 1
+        let element = snapshot.payload.elements[0]
+        let policy = focusPolicy.map { ",\"focusPolicy\":\"\($0)\"" } ?? ""
+        return """
+        {"jsonrpc":"2.0","id":\(nextRequestId),"method":"dispatch.key","params":{\
+        "session":"s1","snapshotId":"\(snapshot.id)","toolCallId":"call_4",\
+        "focusToken":"\(element.token)","expectElementDigest":"\(element.digest)"\(policy),\
+        "action":{"kind":"type","text":"hello"}}}
+        """
+    }
+
+    private func errorCode(_ result: [String: Any]) throws -> String {
+        try XCTUnwrap((result["error"] as? [String: Any])?["code"] as? String)
+    }
 
     private func makeRegistry() -> HostSnapshotRegistry {
         HostSnapshotRegistry(limits: HostLimits()) { _ in }

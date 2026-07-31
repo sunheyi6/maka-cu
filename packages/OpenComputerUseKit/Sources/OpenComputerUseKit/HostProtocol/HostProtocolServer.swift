@@ -117,6 +117,8 @@ struct HostDispatchKeyParams: Decodable {
     let toolCallId: String
     let focusToken: String
     let expectElementDigest: String
+    /// §6.4 — absent means `require`, the check this method has always made.
+    let focusPolicy: HostFocusPolicy?
     let action: HostKeyAction
     let observeAfter: HostObserveAfter?
 }

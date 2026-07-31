@@ -932,10 +932,36 @@ extension HostProtocolServer {
         // §6.4 — `focusToken` is required and verified. Typing into whatever
         // `focusedElement` has become since the snapshot is the same class of
         // defect as re-resolving an index.
-        guard let element = binding.element,
-              let focused = environment.focusedElement(pid: snapshot.pid),
-              CFEqual(focused, element)
-        else {
+        //
+        // `focusPolicy: "acquire"` may move focus onto that element first, but
+        // only here: after the token, the digest and the binding probe have all
+        // agreed. Acquiring first would hand focus to an element the executor
+        // has not yet established is still the one the snapshot described.
+        guard let element = binding.element else {
+            refuse(HostDomainError(.focusChanged))
+            return
+        }
+
+        var focused = environment.focusedElement(pid: snapshot.pid)
+
+        if (params.focusPolicy ?? .require) == .acquire,
+           !(focused.map { CFEqual($0, element) } ?? false) {
+            guard environment.setFocusedElement(element, pid: snapshot.pid) else {
+                // No fallback: an element that refused focus is not an element to
+                // post keys at and hope. §6.4 — the code is the same
+                // `focus_changed` the strict path reports, because the observable
+                // fact is the same one: focus is not where the request named.
+                refuse(HostDomainError(.focusChanged))
+                return
+            }
+
+            // The write's own success is not proof. Applications accept
+            // `kAXFocused` and leave focus where it was, so the only evidence
+            // accepted is a re-read.
+            focused = environment.focusedElement(pid: snapshot.pid)
+        }
+
+        guard let focused, CFEqual(focused, element) else {
             refuse(HostDomainError(.focusChanged))
             return
         }
@@ -945,19 +971,7 @@ extension HostProtocolServer {
         cancellations.markDispatched(id: id)
 
         do {
-            // Key events are posted to the target pid. The executor never
-            // activates the application, raises its window, or changes the
-            // frontmost app.
-            switch params.action {
-            case .type(let text):
-                try InputSimulation.typeText(text, pid: snapshot.pid)
-            case .key(let name, let modifiers):
-                try InputSimulation.pressKey(
-                    hostKeySpecification(name: name, modifiers: modifiers),
-                    pid: snapshot.pid,
-                    extraFlags: modifiers.contains(.fn) ? .maskSecondaryFn : []
-                )
-            }
+            try environment.postKeyEvent(params.action, pid: snapshot.pid)
         } catch {
             // §6.5 — the events were posted to the pid and rejected: `failed`,
             // naming the path that was attempted.
