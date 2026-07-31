@@ -291,6 +291,35 @@ struct FakeEnvironment: HostSystemEnvironment {
     }
 }
 
+/// A clock that moves by a fixed step every time it is read, so a walk's
+/// deadline lands after a known number of nodes instead of after a real wait.
+///
+/// It exists because the windows that make `observe` run out of time are open
+/// and save panels — every node of one crosses into
+/// `com.apple.appkit.xpc.openAndSavePanelService` — and no test can put one on
+/// the screen. Sleeping instead would make the suite slow and the boundary
+/// fuzzy; this makes it exact.
+final class SteppingClock: @unchecked Sendable {
+    /// Fixed rather than `Date()`, so a failure reads the same on every machine.
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private let step: TimeInterval
+    private let lock = NSLock()
+    private var reads = 0
+
+    init(step: TimeInterval) {
+        self.step = step
+    }
+
+    func read() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = start.addingTimeInterval(step * Double(reads))
+        reads += 1
+        return now
+    }
+}
+
 // MARK: - Fixture values
 
 let hostTestPid: pid_t = 4711

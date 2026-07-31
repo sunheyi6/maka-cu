@@ -210,6 +210,7 @@ executor is already correct; the host is the side that changes.
     "maxTextChars": 500,
     "maxResponseBytes": 1048576,
     "settleCeilingMs": 2500,
+    "treeWalkCeilingMs": 6000,
     "shutdownGraceMs": 3000,
     "imageDirBudgetBytes": 268435456
   }
@@ -616,6 +617,37 @@ the window list is read.
 `maxElements`, `truncated.depth` when it hit `maxDepth`. A truncated tree is
 still a valid snapshot with valid tokens; the host decides whether to re-observe
 with a higher bound.
+
+**The walk is bounded in time as well as in size.** `limits.treeWalkCeilingMs`
+is how long one `observe` may spend reading the Accessibility tree, counted
+across every attempt §7.5 makes rather than granted afresh to each of them. When
+it runs out the executor stops descending and returns what it has, with
+`truncated.elements: true`. The root element is always emitted: a snapshot with
+no elements carries no tokens, so the host could not address the window it just
+observed.
+
+The bound exists because element count is not a proxy for time. Reading a node
+costs a round trip into the observed process, and an application that hosts its
+window in *another* process is a different order of expense: every open and save
+panel on macOS is drawn by `com.apple.appkit.xpc.openAndSavePanelService`, so
+each of its nodes crosses an XPC boundary. Measured — an ordinary window reads at
+0.8–7.5 ms per element and finishes in under two seconds, while an open panel
+reads at 23.6 ms per element and rising, and 1500 of them took 35 s. The host
+gives a request 20 s (§7.3) and answers an overrun by cancelling it and tearing
+the executor down, so an unbounded walk does not return late — it takes the
+session with it. A file dialog is not an exotic window, either: it is what the
+model is looking at whenever it does file work.
+
+`truncated.elements` is the field a time cut raises, because what came back is
+short of what the window holds and that is the fact the field states.
+`truncated.depth` is not raised: it names a level the walk refused to go below,
+and after a time cut no level was the reason. **Neither field says *why*, and
+that is a known gap** — a host that reads `truncated.elements: true` and
+re-observes with a higher `maxElements` will get another cut tree, because the
+bound it raised was not the one that fired. What the wire must never do is stay
+silent: a short tree returned as `{ "elements": false, "depth": false }` tells
+the host it has seen the whole window, and every "the control is not there"
+conclusion drawn from it is wrong.
 
 ### 5.3 Coordinate spaces, declared once
 
@@ -1446,9 +1478,20 @@ session end pins the process.
 
 ### 7.3 Timeouts
 
-The executor has no timeout of its own except `limits.settleCeilingMs`. The host
-owns request deadlines (`DEFAULT_REQUEST_TIMEOUT_MS = 20_000`) and enforces them
-by `$/cancel` followed, if the request had already been delivered, by teardown.
+The executor's own ceilings are `limits.settleCeilingMs` and
+`limits.treeWalkCeilingMs`. The host owns request deadlines
+(`DEFAULT_REQUEST_TIMEOUT_MS = 20_000`) and enforces them by `$/cancel`
+followed, if the request had already been delivered, by teardown.
+
+The executor's ceilings exist because of what that enforcement costs. A host
+deadline is not a way to bound a slow operation, it is a way to give up on the
+executor: the session, its snapshots and its images go with it. So every
+executor-side operation whose duration is set by another process — settling on
+an application's own repaint schedule, reading a tree hosted across XPC — carries
+a ceiling under the host's, and reports on the wire that it hit it. Their sum has
+to fit: an `observe` that captures an image (up to 5 s) and then walks a tree (up
+to `treeWalkCeilingMs`) is 11 s of the host's 20, and a `dispatch` that settles
+(2.5 s) before doing both is 13.5 s.
 
 ### 7.4 Bounds
 
@@ -1458,6 +1501,7 @@ Everything bounded says so on the wire:
 | --- | --- |
 | element count | `snapshot.truncated.elements` |
 | tree depth | `snapshot.truncated.depth` |
+| tree walk time | `snapshot.truncated.elements` (§5.2 — the field cannot say which bound fired) |
 | element text | `element.truncated: ["value", …]` |
 | selected text | `snapshot.selectedText.truncated` |
 | settle time | `settle.reason: "ceiling"` |
@@ -1846,6 +1890,21 @@ Launching without taking the foreground (§5.7):
     the honesty half: an app whose pid holds the foreground after a launch that
     asked not to activate is still `foregroundTaken: true`, and an executor that
     answers from its own request rather than from the two reads fails it.
+
+Observing a window that is expensive to read (§5.2):
+
+51. A walk that reaches `limits.treeWalkCeilingMs` stops, returns the elements it
+    already has with usable tokens, and reports `truncated.elements: true`. Two
+    executors fail this and they fail it differently: one has no clock at all and
+    returns a complete tree 35 s after a host that waits 20 s has already killed
+    it, and one stops on time but reports
+    `truncated: { "elements": false, "depth": false }`, which tells the host it
+    saw the whole window. The unit half drives the walk through an injected
+    clock, because the windows that are actually slow are open and save panels
+    and a test cannot put one on the screen. The live half observes a real one
+    and asserts the answer arrived inside the ceiling — an executor whose ceiling
+    is per-attempt rather than per-observation passes the unit half and fails
+    this one, because §7.5 walks the tree up to four times.
 
 ---
 

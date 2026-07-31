@@ -122,11 +122,17 @@ public struct HostTreeWalkBounds: Equatable, Sendable {
     public let maxElements: Int
     public let maxDepth: Int
     public let maxTextChars: Int
+    /// The instant the walk stops descending, or `nil` for a walk with no clock
+    /// on it. Absolute rather than a duration because §7.5 may run the walk four
+    /// times for one `observe`, and four walks each given the whole budget is
+    /// four times the budget.
+    public let deadline: Date?
 
-    public init(maxElements: Int, maxDepth: Int, maxTextChars: Int) {
+    public init(maxElements: Int, maxDepth: Int, maxTextChars: Int, deadline: Date? = nil) {
         self.maxElements = maxElements
         self.maxDepth = maxDepth
         self.maxTextChars = maxTextChars
+        self.deadline = deadline
     }
 }
 
@@ -141,18 +147,25 @@ public struct HostTreeWalkResult {
 /// the token embeds the snapshot nonce so it can only ever be looked up in the
 /// dictionary it came from — §4.2 forbids parsing an index back out of a token
 /// and re-walking the tree, which is exactly the upstream defect being removed.
+///
+/// `now` is a seam. A walk that runs out of time is otherwise only reachable by
+/// putting a window in front of it that takes seconds to read, and the windows
+/// that do that are open and save panels — which cannot be opened from a test
+/// without driving an application into one.
 public func hostWalkTree(
     root: HostAccessibilityNode,
     pid: pid_t,
     processStartTime: UInt64,
     tokenPrefix: String,
-    bounds: HostTreeWalkBounds
+    bounds: HostTreeWalkBounds,
+    now: () -> Date = Date.init
 ) -> HostTreeWalkResult {
     var elements: [HostObservedElement] = []
     var bindings: [HostElementBinding] = []
     var focusedToken: String?
     var hitElementBound = false
     var hitDepthBound = false
+    var hitTimeBound = false
     var nextIndex = 0
 
     func token(for index: Int) -> String {
@@ -176,6 +189,27 @@ public func hostWalkTree(
     ) {
         guard elements.count < bounds.maxElements else {
             hitElementBound = true
+            return
+        }
+
+        // The clock is a bound like the other two, and it is checked on the same
+        // line as the element count because this is the point past which a node
+        // costs another round of Accessibility reads. Every read below crosses
+        // into the observed process, and against an application that hosts its
+        // window in another process — every open and save panel does, in
+        // `com.apple.appkit.xpc.openAndSavePanelService` — one node costs tens of
+        // milliseconds instead of one. Measured on this machine: an ordinary
+        // window is 0.8–7.5 ms per element, that panel is 23.6 ms and rising, so
+        // 1500 elements of it took 35 s against a host that gives the whole
+        // request 20 s. The host's answer to a request that overruns is to cancel
+        // it and tear the executor down, so an unbounded walk does not merely
+        // return late, it takes the session with it.
+        //
+        // The root is exempt. A snapshot with no elements carries no tokens, so
+        // the host could not address the window it just observed, and every
+        // dispatch against it would be `element_unknown`.
+        if !elements.isEmpty, let deadline = bounds.deadline, now() >= deadline {
+            hitTimeBound = true
             return
         }
 
@@ -295,7 +329,19 @@ public func hostWalkTree(
     return HostTreeWalkResult(
         elements: elements,
         bindings: bindings,
-        truncated: HostSnapshotTruncation(elements: hitElementBound, depth: hitDepthBound),
+        // §5.2 — a walk stopped by the clock reports `elements`, because what it
+        // returned is short of what the window holds and that is the one fact
+        // the host has a field for. It does not raise `depth`: that names a
+        // level the walk refused to go below, and after a time cut no level was
+        // the reason. What neither field can say is *why*, which is a gap in the
+        // wire and is written down as one in §5.2 — but silence is not the
+        // alternative. An executor that returned a short tree with
+        // `truncated: { elements: false, depth: false }` would be telling the
+        // host it had seen the whole window.
+        truncated: HostSnapshotTruncation(
+            elements: hitElementBound || hitTimeBound,
+            depth: hitDepthBound
+        ),
         focusedToken: focusedToken
     )
 }

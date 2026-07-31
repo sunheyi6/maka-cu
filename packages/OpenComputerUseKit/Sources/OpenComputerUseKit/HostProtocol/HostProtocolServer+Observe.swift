@@ -161,6 +161,14 @@ extension HostProtocolServer {
         let focusedElement = environment.focusedElement(pid: resolved.pid)
         let capturedAt = hostNowMs()
 
+        // §5.2 — one deadline for the whole observation, taken here rather than
+        // inside the walk, because §7.5 runs the walk again for every halving of
+        // `maxElements` and four walks each given the whole budget is four times
+        // the budget. The clock starts after the capture, which has a ceiling of
+        // its own (`HostCapture.timeout`), so the two ceilings add rather than
+        // overlap and the sum still has to fit the host's request deadline.
+        let walkDeadline = Date(timeIntervalSinceNow: Double(limits.treeWalkCeilingMs) / 1000)
+
         let walk = { (elementBudget: Int) -> HostTreeWalkResult in
             hostWalkTree(
                 root: HostAXNode(
@@ -174,7 +182,8 @@ extension HostProtocolServer {
                 bounds: HostTreeWalkBounds(
                     maxElements: elementBudget,
                     maxDepth: maxDepth,
-                    maxTextChars: maxTextChars
+                    maxTextChars: maxTextChars,
+                    deadline: walkDeadline
                 )
             )
         }

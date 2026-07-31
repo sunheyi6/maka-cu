@@ -335,6 +335,110 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual(try? fits.get().payload, 8)
     }
 
+    func testAWalkThatRunsOutOfTimeStopsAndSaysTheTreeIsShort() {
+        // §5.2 vector 51 — element count is not a proxy for time. A window hosted
+        // in another process costs a round trip per node: an open panel read at
+        // 23.6 ms per element, 1500 of them in 35 s, against a host that gives
+        // the whole request 20 s and answers an overrun by killing the executor.
+        //
+        // The clock is injected because the windows that are slow are open and
+        // save panels, and no test can put one on the screen. Each read advances
+        // it by a second, so the deadline lands after a known number of nodes
+        // rather than after a real wait.
+        let clock = SteppingClock(step: 1)
+        let root = FakeNode(
+            role: "AXWindow",
+            children: (0..<200).map { FakeNode(role: "AXButton\($0)") }
+        )
+
+        let walk = hostWalkTree(
+            root: root,
+            pid: 42,
+            processStartTime: 7,
+            tokenPrefix: "snap_slow",
+            bounds: HostTreeWalkBounds(
+                maxElements: 1500,
+                maxDepth: 64,
+                maxTextChars: 500,
+                deadline: clock.start.addingTimeInterval(4)
+            ),
+            now: clock.read
+        )
+
+        // Stopped where the clock said to, not where the tree ran out: the root
+        // is free, the next four reads are inside the deadline, and the fifth is
+        // not. 195 children were still there for the taking.
+        XCTAssertEqual(walk.elements.count, 5, "the walk ignored its deadline")
+
+        // And what came back is usable: real tokens, real bindings, one per
+        // element. A truncated snapshot is still a snapshot.
+        XCTAssertEqual(walk.bindings.count, walk.elements.count)
+        XCTAssertEqual(Set(walk.elements.map(\.token)).count, walk.elements.count)
+        XCTAssertEqual(walk.elements.first?.depth, 0, "the root is always emitted")
+
+        // The part that cannot be silent. `elements` says what came back is
+        // short of what the window holds; `depth` is not raised, because no
+        // level was the reason.
+        XCTAssertTrue(walk.truncated.elements, "a short tree reported as complete is a lie the host acts on")
+        XCTAssertFalse(walk.truncated.depth)
+
+        // A walk with time to spare declares nothing, so the flag still means
+        // something when it is set.
+        let stopped = SteppingClock(step: 0)
+        let unhurried = hostWalkTree(
+            root: root,
+            pid: 42,
+            processStartTime: 7,
+            tokenPrefix: "snap_fast",
+            bounds: HostTreeWalkBounds(
+                maxElements: 1500,
+                maxDepth: 64,
+                maxTextChars: 500,
+                deadline: stopped.start.addingTimeInterval(4)
+            ),
+            now: stopped.read
+        )
+        XCTAssertEqual(unhurried.elements.count, 201)
+        XCTAssertFalse(unhurried.truncated.elements)
+        XCTAssertFalse(unhurried.truncated.depth)
+    }
+
+    func testTheObservationDeadlineIsSpentOnceAcrossEveryResponseSizeRetry() {
+        // §7.5 halves `maxElements` and walks again, up to four times. A budget
+        // handed afresh to each attempt is four times the budget — 24 s of a
+        // 20 s request deadline — so the deadline is absolute and computed
+        // before the first attempt, which is what this asserts: the later
+        // attempts start with the clock already past it and stop at the root.
+        let clock = SteppingClock(step: 1)
+        let deadline = clock.start.addingTimeInterval(3)
+        let root = FakeNode(role: "AXWindow", children: (0..<50).map { FakeNode(role: "AXCell\($0)") })
+
+        var counts: [Int] = []
+        for budget in [1500, 750, 375, 187] {
+            let walk = hostWalkTree(
+                root: root,
+                pid: 42,
+                processStartTime: 7,
+                tokenPrefix: "snap_refit",
+                bounds: HostTreeWalkBounds(
+                    maxElements: budget,
+                    maxDepth: 64,
+                    maxTextChars: 500,
+                    deadline: deadline
+                ),
+                now: clock.read
+            )
+            counts.append(walk.elements.count)
+            XCTAssertTrue(walk.truncated.elements, "every attempt after the first is out of time and says so")
+        }
+
+        XCTAssertEqual(
+            Array(counts.dropFirst()),
+            [1, 1, 1],
+            "a re-walk after the deadline emits the root and stops; it does not get a fresh budget"
+        )
+    }
+
     // MARK: - Declared schema (§6.3, §6.5)
 
     func testTierAndPathPairingsOutsideTheTableAreInconsistent() {
@@ -638,7 +742,8 @@ final class HostProtocolTests: XCTestCase {
         let limits = try XCTUnwrap(result["limits"] as? [String: Any])
         for key in [
             "snapshotsPerSession", "snapshotTtlMs", "maxElements", "maxDepth", "maxTextChars",
-            "maxResponseBytes", "settleCeilingMs", "shutdownGraceMs", "imageDirBudgetBytes",
+            "maxResponseBytes", "settleCeilingMs", "treeWalkCeilingMs", "shutdownGraceMs",
+            "imageDirBudgetBytes",
         ] {
             XCTAssertNotNil(limits[key], "\(key) must travel in the handshake")
         }

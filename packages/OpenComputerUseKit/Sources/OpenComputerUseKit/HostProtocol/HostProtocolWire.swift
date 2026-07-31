@@ -471,6 +471,25 @@ public struct HostLimits: Codable, Equatable, Sendable {
     public var maxTextChars: Int = 500
     public var maxResponseBytes: Int = 1_048_576
     public var settleCeilingMs: Int = 2500
+    /// §5.2 — how long one `observe` may spend walking the Accessibility tree,
+    /// across every attempt §7.5 makes.
+    ///
+    /// Chosen against two numbers that are not ours. The host gives a request
+    /// 20 s and answers an overrun by cancelling and tearing the executor down,
+    /// and a window capture may already have spent 5 s of that before the walk
+    /// starts; 6 s leaves the slowest observation possible here at 11 s, and the
+    /// slowest dispatch — settle 2.5 s, capture 5 s, then the `observeAfter`
+    /// walk — at 13.5 s.
+    ///
+    /// The other number is what a healthy window costs. Measured on macOS 26.5:
+    /// Calculator 65 elements in 0.54 s, Font Book 234 in 1.74 s, Safari 369 in
+    /// 0.80 s, an Electron window 1292 in 1.03 s. The slowest complete walk was
+    /// 1.74 s, so 6 s is more than three times the worst ordinary case and no
+    /// ordinary observation is cut. What it does cut is the pathological one: an
+    /// open or save panel, hosted in another process, read at 23.6 ms per
+    /// element and rising — 35 s for 1500 elements, which is not an observation
+    /// the host will ever see the end of.
+    public var treeWalkCeilingMs: Int = 6000
     public var shutdownGraceMs: Int = 3000
     public var imageDirBudgetBytes: Int = 268_435_456
 
