@@ -703,6 +703,24 @@ Note what is *not* here: `maka-cu`'s `listApps()` currently returns a rendered
 text catalogue (`ComputerUseService.swift:420-426`). Rendered text is model-facing
 prose. It goes.
 
+The list is what is running **now**, not what was running when the executor
+started. This is stated because it is not free on macOS: the obvious source,
+`NSWorkspace.shared.runningApplications`, is a cache AppKit refreshes out of
+notifications, and in a process whose main thread never runs a run loop that
+refresh never lands on any other thread — which is every thread that answers a
+request, since the reader parks the main one in `readLine`. Measured before it
+was fixed: 91 applications at executor start, TextEdit started externally and
+confirmed with `pgrep`, 91 applications and no TextEdit for the rest of the
+process's life. The same freeze applies to the frontmost application, which stays
+at whoever held the foreground when the executor launched.
+
+An executor that answers from that cache is not merely out of date. It cannot
+resolve an app it launched itself: `apps.launch` starts the process, the process
+registers — measured at 4990 ms — and the poll searches a list that will never
+contain it, so the call spends the caller's whole budget and answers `timeout`
+for an app that is on screen. Read the running set from the kernel and the
+frontmost pid from the window server, once per request.
+
 ### 5.6 `permissions.check`
 
 ```json
@@ -744,7 +762,10 @@ action start because a user can revoke at any time
 - `foregroundTaken` is declared, not inferred. `CuLaunchedApp.focusHeld` is
   currently absent when the driver simply did not check
   (`computer-use-types.ts:64-68`) — an absent boolean that means "unknown" is a
-  three-valued field pretending to be two.
+  three-valued field pretending to be two. It is a difference between two reads,
+  one before the launch and one after, and both must be live (§5.5): answering
+  both from a value cached at executor start makes the field a constant `false`,
+  so an executor that did take the user's foreground reports that it did not.
 - The executor MUST wait for a window rather than returning the empty array it
   sees at launch time. Measured: `launch_app` returns in 1.3–3.2 s and the window
   is mapped 2.3–4.5 s in, so the driver's `windows` array is empty on every real
@@ -1706,6 +1727,14 @@ Launching an app (§5.7):
     the system refuses is `dispatch_refused`. Neither is `app_not_found`. This is
     the vector that fails against a handler which reaches the resolver through a
     `try?`, because that collapses every failure into the one code.
+46. An application started after the executor appears in the next `apps.list`,
+    and one that registers part-way through a launch budget resolves rather than
+    timing out; `foregroundTaken` is the difference between a read before the
+    launch and a read after it. The vector that fails against an executor reading
+    `NSWorkspace.shared.runningApplications` or `frontmostApplication`, both of
+    which are frozen at process start on any thread but the main one (§5.5) — and
+    it only fails from a lane, so a check that runs on the main thread, or parks
+    on anything that spins the main run loop, passes against the broken executor.
 
 ---
 

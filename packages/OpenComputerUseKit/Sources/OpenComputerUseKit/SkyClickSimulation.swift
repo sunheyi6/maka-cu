@@ -142,7 +142,7 @@ enum SkyClickDispatcher {
         // WindowServer does not publish field 58's accepted width.
         let clickGroupID = Int64(DispatchTime.now().uptimeNanoseconds % 1_000_000_000)
 
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let frontmostPID = LiveApplicationInventory.frontmostApplicationPid()
         let focusContext: SkyLightSyntheticFocusContext?
         if frontmostPID == target.pid {
             focusContext = nil

@@ -33,6 +33,13 @@ public protocol HostSystemEnvironment {
     func screenIsLocked() -> Bool
     func permissions() -> PermissionDiagnostics
     func runningApps() -> [HostRunningApp]
+    /// The pid holding the foreground, or `nil` when nothing ordinary does.
+    ///
+    /// It is behind the seam because `apps.launch` reports `foregroundTaken` by
+    /// comparing this across the launch, and a handler that reads the machine
+    /// directly makes that field unassertable — which is how it went unnoticed
+    /// that the field was answered from a value frozen at executor start.
+    func frontmostApplicationPid() -> pid_t?
     /// §5.7 — `apps.launch`. Resolves the request to a running application,
     /// starting it if it is not running yet, and gives up after `budget`.
     ///
@@ -86,6 +93,10 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
                 running: !app.runningApplication.isTerminated
             )
         }
+    }
+
+    public func frontmostApplicationPid() -> pid_t? {
+        LiveApplicationInventory.frontmostApplicationPid()
     }
 
     public func launchApp(_ query: String, waitFor budget: TimeInterval) -> Result<HostRunningApp, HostDomainError> {

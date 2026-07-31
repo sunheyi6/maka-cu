@@ -1024,7 +1024,7 @@ extension HostProtocolServer {
             return
         }
 
-        let frontmostBefore = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let frontmostBefore = environment.frontmostApplicationPid()
 
         // §5.7 — the clock starts here, not after the app exists. The caller's
         // budget covers the whole of "make this app usable": a cold launch spends
@@ -1082,7 +1082,7 @@ extension HostProtocolServer {
                 .map { HostAppsLaunchResult.LaunchedWindow(windowId: $0.windowId, title: $0.title) }
         }
 
-        let frontmostAfter = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let frontmostAfter = environment.frontmostApplicationPid()
 
         emit(
             id: id,

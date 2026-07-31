@@ -177,11 +177,71 @@ final class AppLaunchLog {
     }
 }
 
+/// The machine's application list, which changes while the executor is running.
+///
+/// A reference type so a test can start an application *after* the server has
+/// already answered `apps.list` once, which is the shape of the defect it exists
+/// to keep out: an executor that reads the list into a snapshot answers the
+/// second call from the first call's world and can never see anything it
+/// launched.
+final class AppInventoryLog {
+    private let lock = NSLock()
+    private var stored: [HostRunningApp] = []
+    private(set) var reads = 0
+
+    var apps: [HostRunningApp] {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+        set {
+            lock.lock()
+            stored = newValue
+            lock.unlock()
+        }
+    }
+
+    func read() -> [HostRunningApp] {
+        lock.lock()
+        defer { lock.unlock() }
+        reads += 1
+        return stored
+    }
+}
+
+/// Which pid holds the foreground, read once per question rather than once per
+/// process. `sequence` is what a test uses when the answer has to differ across
+/// a single request — `apps.launch` asks before and after, and `foregroundTaken`
+/// is the difference.
+final class FrontmostApplicationLog {
+    private let lock = NSLock()
+    var pid: pid_t?
+    var sequence: [pid_t?] = []
+    private(set) var reads = 0
+
+    func read() -> pid_t? {
+        lock.lock()
+        defer { lock.unlock() }
+        reads += 1
+        guard !sequence.isEmpty else {
+            return pid
+        }
+
+        return sequence.removeFirst()
+    }
+}
+
 struct FakeEnvironment: HostSystemEnvironment {
     var locked = false
     var accessibilityTrusted = true
     var screenCaptureGranted = true
-    var apps: [HostRunningApp] = []
+    var inventory = AppInventoryLog()
+    var frontmost = FrontmostApplicationLog()
+    var apps: [HostRunningApp] {
+        get { inventory.apps }
+        nonmutating set { inventory.apps = newValue }
+    }
     var windows: [HostWindowInfo] = []
     var probe = FakeBindingProbe()
     /// Left `nil` by default: most tests assert a refusal that happens before the
@@ -203,7 +263,8 @@ struct FakeEnvironment: HostSystemEnvironment {
         )
     }
 
-    func runningApps() -> [HostRunningApp] { apps }
+    func runningApps() -> [HostRunningApp] { inventory.read() }
+    func frontmostApplicationPid() -> pid_t? { frontmost.read() }
     func onScreenWindows() -> [HostWindowInfo] { windows }
 
     func launchApp(_ query: String, waitFor budget: TimeInterval) -> Result<HostRunningApp, HostDomainError> {

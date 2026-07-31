@@ -1036,6 +1036,197 @@ final class HostProtocolTests: XCTestCase {
         )
     }
 
+    // MARK: - Seeing the machine change (§5.5, §5.7)
+
+    func testTheApplicationListIsAskedOfTheMachineOnEveryCall() throws {
+        // §5.5 vector 46 — the executor outlives the applications it lists. An
+        // application that starts after the executor did MUST appear in the next
+        // `apps.list`, and the one thing that makes it not appear is answering
+        // from a list read once.
+        //
+        // Measured on a real machine before this was fixed: 91 applications at
+        // executor start, TextEdit started externally and confirmed with
+        // `pgrep`, 91 applications and no TextEdit on every later call for the
+        // life of the process.
+        let environment = FakeEnvironment()
+        environment.apps = [HostRunningApp(appId: hostTestAppId, pid: hostTestPid, name: "Notes", running: true)]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+
+        harness.send(#"{"jsonrpc":"2.0","id":10,"method":"apps.list","params":{"session":"s1"}}"#)
+        let before = try harness.awaitResult()
+        XCTAssertEqual((before["apps"] as? [[String: Any]])?.count, 1)
+
+        // The user starts TextEdit while the executor is running.
+        environment.apps.append(
+            HostRunningApp(appId: "com.apple.TextEdit", pid: 5150, name: "TextEdit", running: true)
+        )
+
+        harness.send(#"{"jsonrpc":"2.0","id":11,"method":"apps.list","params":{"session":"s1"}}"#)
+        let after = try XCTUnwrap(try harness.awaitResult()["apps"] as? [[String: Any]])
+        XCTAssertEqual(after.count, 2, "an application that started after the executor did is still an application")
+        XCTAssertTrue(
+            after.contains { $0["appId"] as? String == "com.apple.TextEdit" },
+            "apps.list answered from a world that ended before the app existed"
+        )
+        XCTAssertEqual(harness.environment.inventory.reads, 2, "and it asked the machine both times")
+    }
+
+    func testAnApplicationThatRegistersDuringTheWaitIsResolved() throws {
+        // §5.7 vector 46, the launch half — the poll re-reads the list, so an
+        // application that registers part-way through the budget resolves. This
+        // is the arm the real machine could never reach: the launch succeeded,
+        // the process was up at 4990 ms, and the poll searched a list that could
+        // not contain it, so an eight-second budget was spent in full and
+        // answered `timeout`.
+        var polls = 0
+        let appeared = RunningAppDescriptor(
+            name: "Some Editor",
+            bundleIdentifier: "com.example.someeditor",
+            pid: NSRunningApplication.current.processIdentifier,
+            runningApplication: NSRunningApplication.current
+        )
+
+        let resolved = try AppDiscovery.resolve(
+            "Some Editor",
+            waitFor: 5,
+            launch: { _ in true },
+            runningApps: {
+                polls += 1
+                return polls < 3 ? [] : [appeared]
+            }
+        )
+
+        XCTAssertEqual(resolved.name, "Some Editor")
+        XCTAssertGreaterThanOrEqual(polls, 3, "the list is re-read while waiting, not read once and re-searched")
+    }
+
+    func testTheFrontmostApplicationIsReadOnBothSidesOfALaunch() throws {
+        // §5.7 — `foregroundTaken` is a difference between two reads. Answering
+        // both from one cached value makes it constant, and the constant it was
+        // stuck at is `false`: an executor that took the user's foreground
+        // reported that it had not.
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.frontmost.sequence = [nil, hostTestPid]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"apps.launch","params":{"session":"s1","app":"Notes"}}"#)
+
+        let taken = try harness.awaitResult()
+        XCTAssertEqual(taken["foregroundTaken"] as? Bool, true)
+        XCTAssertEqual(harness.environment.frontmost.reads, 2, "before and after, not once")
+
+        // An app that already held the foreground did not take it.
+        var held = FakeEnvironment()
+        held.windows = [hostTestWindow()]
+        held.frontmost.sequence = [hostTestPid, hostTestPid]
+        let unchanged = ServerHarness(environment: held)
+        try unchanged.begin()
+        unchanged.send(#"{"jsonrpc":"2.0","id":3,"method":"apps.launch","params":{"session":"s1","app":"Notes"}}"#)
+
+        XCTAssertEqual(try unchanged.awaitResult()["foregroundTaken"] as? Bool, false)
+    }
+
+    func testTheFrontmostApplicationSortsFirstWithoutConsultingIsActive() throws {
+        // The list used to be ordered by `NSRunningApplication.isActive`, which
+        // comes off the same frozen cache as the list itself. The window server's
+        // answer is what orders it now, and the ordering is the observable part.
+        //
+        // Real instances, because `NSRunningApplication` has no constructible
+        // form: whichever of two applications is declared frontmost sorts first,
+        // in both directions, so a comparator that fell back on `isActive` — a
+        // property neither of these has set — fails one of the two.
+        let applications = LiveApplicationInventory.runningApplications()
+        try XCTSkipIf(applications.count < 2, "needs two running applications to order")
+
+        let first = applications[0]
+        let second = applications[1]
+
+        XCTAssertEqual(
+            AppDiscovery.runningApps(applications: { [first, second] }, frontmostPid: { first.processIdentifier })
+                .first?.pid,
+            first.processIdentifier
+        )
+        XCTAssertEqual(
+            AppDiscovery.runningApps(applications: { [first, second] }, frontmostPid: { second.processIdentifier })
+                .first?.pid,
+            second.processIdentifier
+        )
+    }
+
+    func testTheLiveInventoryIsReadFromTheKernelRatherThanAppKitsCache() {
+        // The enumeration is a syscall, so the process running this test is in
+        // it by construction. If this ever fails the buffer handling in
+        // `processIdentifiers()` is wrong, and everything above it is guessing.
+        let pids = LiveApplicationInventory.processIdentifiers()
+        XCTAssertGreaterThan(pids.count, 1)
+        XCTAssertTrue(pids.contains(ProcessInfo.processInfo.processIdentifier))
+        XCTAssertFalse(pids.contains(0), "pid 0 is the kernel, not an application")
+    }
+
+    /// The mutation the seams above cannot make: a real application, started
+    /// after this process, read from a thread that is not the main one while the
+    /// main thread does not run a run loop — which is the only shape in which the
+    /// defect appears. `NSWorkspace` answers this correctly on the main thread,
+    /// so a test that stayed there would have passed against the broken executor;
+    /// so would one that parked on `wait(for:)`, because that spins the main run
+    /// loop and the spin is what thaws the cache. The main thread waits on a
+    /// semaphore here for the same reason the executor's does: `readLine` does
+    /// not spin anything either.
+    ///
+    /// Opt-in because it starts and stops TextEdit on the machine running it.
+    func testAnApplicationStartedAfterThisProcessIsVisibleFromALane() throws {
+        guard ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_RUN_APP_INVENTORY_LIVE_TEST"] == "1" else {
+            throw XCTSkip("Set OPEN_COMPUTER_USE_RUN_APP_INVENTORY_LIVE_TEST=1 to run the live application inventory test")
+        }
+
+        func quitTextEdit() {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", "tell application \"TextEdit\" to quit"]
+            try? process.run()
+            process.waitUntilExit()
+        }
+
+        func textEditIsRunning() -> Bool {
+            LiveApplicationInventory.runningApplications()
+                .contains { $0.bundleIdentifier == "com.apple.TextEdit" }
+        }
+
+        addTeardownBlock { quitTextEdit() }
+
+        // Warm whatever AppKit warms at first touch, so the difference under test
+        // is the staleness and not the initialisation.
+        _ = NSWorkspace.shared.runningApplications
+        quitTextEdit()
+        Thread.sleep(forTimeInterval: 2)
+
+        let finished = DispatchSemaphore(value: 0)
+        var sawItBefore = true
+        var sawItAfter = false
+
+        Thread.detachNewThread {
+            sawItBefore = textEditIsRunning()
+
+            let launch = Process()
+            launch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            launch.arguments = ["-g", "-a", "TextEdit"]
+            try? launch.run()
+            launch.waitUntilExit()
+            Thread.sleep(forTimeInterval: 6)
+
+            sawItAfter = textEditIsRunning()
+            finished.signal()
+        }
+
+        XCTAssertEqual(finished.wait(timeout: .now() + 30), .success)
+        XCTAssertFalse(sawItBefore, "TextEdit had to be stopped for this to prove anything")
+        XCTAssertTrue(sawItAfter, "the executor cannot see an application it did not start before itself")
+    }
+
     // MARK: - Helpers
 
     private var nextRequestId = 300

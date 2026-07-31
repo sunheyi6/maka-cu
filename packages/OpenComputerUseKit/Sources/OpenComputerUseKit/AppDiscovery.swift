@@ -71,7 +71,11 @@ enum AppDiscovery {
 
     static func listCatalog() -> [ListedAppDescriptor] {
         let running = userFacingRunningApps()
-        let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased()
+        let frontmostPid = LiveApplicationInventory.frontmostApplicationPid()
+        let frontmostBundleIdentifier = running
+            .first { $0.pid == frontmostPid }?
+            .bundleIdentifier?
+            .lowercased()
         let runningByBundle = running.reduce(into: [String: RunningAppDescriptor]()) { result, descriptor in
             guard let bundleIdentifier = listedBundleIdentifier(for: descriptor) else {
                 return
@@ -122,11 +126,37 @@ enum AppDiscovery {
     }
 
     static func runningApps() -> [RunningAppDescriptor] {
-        NSWorkspace.shared.runningApplications
+        runningApps(
+            applications: LiveApplicationInventory.runningApplications,
+            frontmostPid: LiveApplicationInventory.frontmostApplicationPid
+        )
+    }
+
+    /// The list is asked of the machine on every call and never held between
+    /// them. An executor that answers from a snapshot taken once — which is what
+    /// `NSWorkspace.shared.runningApplications` is off the main thread, see
+    /// `LiveApplicationInventory` — cannot see any application that started after
+    /// it did, including the one it was just told to launch.
+    ///
+    /// `isActive` is not used to order this list even though it reads like the
+    /// obvious field: it comes off the same cache and is frozen in the same way.
+    /// The frontmost pid is read from the window server instead.
+    ///
+    /// The seams exist because "the set of running applications changed" is
+    /// otherwise only reachable from a test by starting a real application.
+    static func runningApps(
+        applications: () -> [NSRunningApplication],
+        frontmostPid: () -> pid_t?
+    ) -> [RunningAppDescriptor] {
+        let frontmost = frontmostPid()
+
+        return applications()
             .filter { !$0.isTerminated }
             .sorted { lhs, rhs in
-                if lhs.isActive != rhs.isActive {
-                    return lhs.isActive && !rhs.isActive
+                let lhsIsFrontmost = lhs.processIdentifier == frontmost
+                let rhsIsFrontmost = rhs.processIdentifier == frontmost
+                if lhsIsFrontmost != rhsIsFrontmost {
+                    return lhsIsFrontmost && !rhsIsFrontmost
                 }
 
                 return appName(lhs).localizedCaseInsensitiveCompare(appName(rhs)) == .orderedAscending
