@@ -1195,39 +1195,3 @@ extension HostProtocolServer {
         }
     }
 }
-
-/// Translates the closed wire key set onto the internal xdotool-flavoured
-/// specification `KeyPressParser` already understands. The wire set is the
-/// contract; this mapping is an implementation detail that may change with it.
-func hostKeySpecification(name: String, modifiers: [HostKeyModifier]) -> String {
-    let modifierTokens = modifiers.compactMap { modifier -> String? in
-        switch modifier {
-        case .command:
-            return "cmd"
-        case .shift:
-            return "shift"
-        case .option:
-            return "option"
-        case .control:
-            return "control"
-        case .fn:
-            // `fn` has no modifier key code to hold down; it travels as an event
-            // flag instead, applied by the caller.
-            return nil
-        }
-    }
-
-    let keyToken: String
-    switch name {
-    case "ForwardDelete":
-        keyToken = "forwarddelete"
-    case "PageUp":
-        keyToken = "pageup"
-    case "PageDown":
-        keyToken = "pagedown"
-    default:
-        keyToken = name.lowercased()
-    }
-
-    return (modifierTokens + [keyToken]).joined(separator: "+")
-}

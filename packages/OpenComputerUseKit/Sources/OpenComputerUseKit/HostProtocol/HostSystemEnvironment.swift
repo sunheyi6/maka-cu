@@ -182,11 +182,16 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
         case .type(let text):
             try InputSimulation.typeText(text, pid: pid)
         case .key(let name, let modifiers):
-            try InputSimulation.pressKey(
-                hostKeySpecification(name: name, modifiers: modifiers),
-                pid: pid,
-                extraFlags: modifiers.contains(.fn) ? .maskSecondaryFn : []
-            )
+            // §6.4 — the decoder and this table read the same closed set
+            // (`hostKeyNameIsSupported` is defined as "the table has a stroke"),
+            // so `nil` is unreachable from the wire. It throws rather than
+            // defaulting because a defaulted key press is an action the user did
+            // not ask for and cannot see.
+            guard let stroke = hostKeyStroke(name: name, modifiers: modifiers) else {
+                throw HostDomainError(.unsupportedAction)
+            }
+
+            try InputSimulation.pressKeyStroke(stroke, pid: pid)
         }
     }
 

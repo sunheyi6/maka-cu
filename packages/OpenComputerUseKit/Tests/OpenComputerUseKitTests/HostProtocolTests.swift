@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import XCTest
@@ -1053,10 +1054,203 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual((error["data"] as? [String: Any])?["field"] as? String, "key")
     }
 
-    func testKeySpecificationDropsFnBecauseItHasNoKeyCodeToHold() {
-        XCTAssertEqual(hostKeySpecification(name: "Return", modifiers: [.command, .shift]), "cmd+shift+return")
-        XCTAssertEqual(hostKeySpecification(name: "Left", modifiers: [.fn]), "left")
-        XCTAssertEqual(hostKeySpecification(name: "PageUp", modifiers: []), "pageup")
+    func testEveryKeyTheWireAdvertisesResolvesToAStrokeCarryingACharacter() {
+        // §12 vector 54 — the set the decoder accepts and the set the dispatcher
+        // can post are one set, and every member of it carries characters.
+        //
+        // `hostNamedKeys` is 26 names and the printable range is U+0021–U+007E,
+        // which is 94 characters: 120 members, all of them enumerated here rather
+        // than sampled, because a member the wire advertises and the executor
+        // cannot build is exactly the defect a sample misses.
+        XCTAssertEqual(hostNamedKeys.count, 26)
+
+        var members: [String] = hostNamedKeys.sorted()
+        members.append(contentsOf: (0x21...0x7E).map { String(UnicodeScalar($0)!) })
+        XCTAssertEqual(members.count, 120)
+
+        for member in members {
+            guard let stroke = hostKeyStroke(name: member, modifiers: []) else {
+                XCTFail("\(member) is in the closed set and has no stroke to post")
+                continue
+            }
+
+            XCTAssertFalse(
+                stroke.characters.isEmpty,
+                "\(member) posts an event with no characters, which is an event the application does nothing with"
+            )
+            XCTAssertTrue(hostKeyNameIsSupported(member))
+        }
+
+        // And nothing outside it resolves, so the guard in `postKeyEvent` is
+        // unreachable rather than load-bearing.
+        XCTAssertNil(hostKeyStroke(name: " ", modifiers: []), "Space is the only spelling of the space bar")
+        XCTAssertNil(hostKeyStroke(name: "Enter", modifiers: []))
+        XCTAssertNil(hostKeyStroke(name: "cmd+a", modifiers: []))
+        XCTAssertNil(hostKeyStroke(name: "£", modifiers: []))
+    }
+
+    func testAKeyEventCarriesTheCharacterTheApplicationActsOnAndNotTheLayoutsTranslation() throws {
+        // §12 vector 54. The event `CGEvent(keyboardEventSource:virtualKey:)`
+        // hands back is not characterless — it carries the *keyboard layout's*
+        // translation of the key code, and for most of the named set that is not
+        // the character the application acts on. Measured: the right arrow
+        // translates to U+001D where AppKit binds U+F703, `ForwardDelete`
+        // translates to U+007F — which is the *backspace* key's character, so an
+        // executor trusting the layout deletes in the wrong direction — and all
+        // twelve function keys collapse onto one U+0010.
+        //
+        // So each row asserts both halves: the character is the one AppKit binds,
+        // and it is not the one the layout would have supplied. The second half
+        // is what fails against the executor that shipped, which built the event
+        // and posted it unmodified.
+        let expected: [(name: String, character: String, keyCode: CGKeyCode)] = [
+            ("Right", "\u{F703}", CGKeyCode(kVK_RightArrow)),
+            ("Left", "\u{F702}", CGKeyCode(kVK_LeftArrow)),
+            ("Up", "\u{F700}", CGKeyCode(kVK_UpArrow)),
+            ("Down", "\u{F701}", CGKeyCode(kVK_DownArrow)),
+            ("Home", "\u{F729}", CGKeyCode(kVK_Home)),
+            ("End", "\u{F72B}", CGKeyCode(kVK_End)),
+            ("PageUp", "\u{F72C}", CGKeyCode(kVK_PageUp)),
+            ("PageDown", "\u{F72D}", CGKeyCode(kVK_PageDown)),
+            ("Backspace", "\u{007F}", CGKeyCode(kVK_Delete)),
+            ("ForwardDelete", "\u{F728}", CGKeyCode(kVK_ForwardDelete)),
+            ("F1", "\u{F704}", CGKeyCode(kVK_F1)),
+            ("F5", "\u{F708}", CGKeyCode(kVK_F5)),
+            ("F12", "\u{F70F}", CGKeyCode(kVK_F12)),
+            // A printable character the layout only produces with shift held, so
+            // the key code alone answers with the unshifted one.
+            ("A", "A", CGKeyCode(kVK_ANSI_A)),
+            ("!", "!", CGKeyCode(kVK_ANSI_1)),
+        ]
+
+        for row in expected {
+            let stroke = try XCTUnwrap(hostKeyStroke(name: row.name, modifiers: []))
+            XCTAssertEqual(stroke.keyCode, row.keyCode, row.name)
+
+            let sequence = try InputSimulation.keyEvents(for: stroke)
+            XCTAssertEqual(characters(of: sequence.keyDown), row.character, "key down for \(row.name)")
+            XCTAssertEqual(characters(of: sequence.keyUp), row.character, "key up for \(row.name)")
+            XCTAssertEqual(sequence.keyDown.getIntegerValueField(.keyboardEventKeycode), Int64(row.keyCode))
+            XCTAssertTrue(sequence.modifierDowns.isEmpty, "\(row.name) declared no modifiers to hold")
+
+            let untouched = try XCTUnwrap(
+                CGEvent(keyboardEventSource: nil, virtualKey: row.keyCode, keyDown: true)
+            )
+            XCTAssertNotEqual(
+                characters(of: untouched),
+                row.character,
+                "\(row.name): the layout answers this key code differently, so an executor that posts the event as built posts the wrong character"
+            )
+        }
+
+        // The four the layout does get right, asserted anyway: they are still
+        // dispatched from the table rather than left to whatever input source is
+        // selected, and the live half is what shows they now arrive.
+        for row in [("Tab", "\u{0009}"), ("Return", "\u{000D}"), ("Escape", "\u{001B}"), ("Space", "\u{0020}")] {
+            let stroke = try XCTUnwrap(hostKeyStroke(name: row.0, modifiers: []))
+            XCTAssertEqual(characters(of: try InputSimulation.keyEvents(for: stroke).keyDown), row.1, row.0)
+        }
+    }
+
+    func testShiftIsTheOneModifierThatChangesWhichCharacterIsPosted() throws {
+        // A printable key has a second character and `shift` is how the wire asks
+        // for it: an event carrying `a` while claiming shift is held is an event
+        // that disagrees with itself, and the application acts on the character.
+        let shifted = try XCTUnwrap(hostKeyStroke(name: "a", modifiers: [.shift]))
+        XCTAssertEqual(characters(of: try InputSimulation.keyEvents(for: shifted).keyDown), "A")
+        XCTAssertEqual(shifted.keyCode, CGKeyCode(kVK_ANSI_A), "the same physical key")
+
+        // Idempotent: a character that is already the shifted form stays itself.
+        let already = try XCTUnwrap(hostKeyStroke(name: "!", modifiers: [.shift]))
+        XCTAssertEqual(characters(of: try InputSimulation.keyEvents(for: already).keyDown), "!")
+
+        // A named key has no second character. `shift+Tab` is U+0009 with a shift
+        // flag on it, and what that means is the application's decision.
+        let tab = try XCTUnwrap(hostKeyStroke(name: "Tab", modifiers: [.shift]))
+        XCTAssertEqual(characters(of: try InputSimulation.keyEvents(for: tab).keyDown), "\u{0009}")
+
+        // And no other modifier touches it: `cmd+a` is the character `a` under a
+        // command flag — which is a stroke that does not carry its characters at
+        // all, and the next test is why.
+        let command = try XCTUnwrap(hostKeyStroke(name: "a", modifiers: [.command]))
+        XCTAssertEqual(command.characters, Array("a".utf16))
+    }
+
+    func testACommandStrokeDoesNotCarryItsCharactersBecauseAMenuEquivalentCannotSurviveThem() throws {
+        // §12 vector 54 — the one exception, and it is a measurement rather than
+        // caution. `performKeyEquivalent:` matches a menu command against the
+        // application's own translation of the key code; an event that arrives
+        // with characters on it is taken as text and never offered to that path.
+        // Measured on a real TextEdit document, resetting the selection through
+        // Accessibility between rows: frontmost `cmd+a` plain selects the
+        // document and frontmost `cmd+a` carrying "a" does nothing at all.
+        let command = try XCTUnwrap(hostKeyStroke(name: "a", modifiers: [.command]))
+        XCTAssertFalse(command.carriesCharacters)
+        XCTAssertEqual(
+            command.characters,
+            Array("a".utf16),
+            "the stroke still knows the character; what it declines to do is put it on the event"
+        )
+
+        // Every other modifier keeps them, because every other modifier reaches
+        // the application through the responder chain, which is the path that
+        // needs characters to work at all in the background: measured,
+        // `shift+Right`, `option+Right` and `control+e` all land on a background
+        // TextEdit carrying the character the key produces.
+        for modifiers in [[HostKeyModifier.shift], [.option], [.control], [.fn], []] {
+            let stroke = try XCTUnwrap(hostKeyStroke(name: "Right", modifiers: modifiers))
+            XCTAssertTrue(stroke.carriesCharacters, "\(modifiers)")
+            XCTAssertEqual(characters(of: try InputSimulation.keyEvents(for: stroke).keyDown), "\u{F703}", "\(modifiers)")
+        }
+
+        // The command flag is still on the event, and the modifier is still held
+        // around it. Dropping the characters is not dropping the shortcut.
+        let sequence = try InputSimulation.keyEvents(for: command)
+        XCTAssertTrue(sequence.keyDown.flags.contains(.maskCommand))
+        XCTAssertEqual(sequence.modifierDowns.count, 1)
+        XCTAssertEqual(sequence.keyDown.getIntegerValueField(.keyboardEventKeycode), Int64(kVK_ANSI_A))
+    }
+
+    func testModifiersAreHeldAroundTheKeyAndFnTravelsAsAFlag() throws {
+        let stroke = try XCTUnwrap(hostKeyStroke(name: "Return", modifiers: [.command, .shift]))
+        XCTAssertTrue(stroke.flags.contains(.maskCommand))
+        XCTAssertTrue(stroke.flags.contains(.maskShift))
+
+        let sequence = try InputSimulation.keyEvents(for: stroke)
+        XCTAssertEqual(sequence.modifierDowns.count, 2, "one key-down per modifier that has a key code")
+        XCTAssertEqual(sequence.modifierUps.count, 2)
+        XCTAssertEqual(
+            sequence.modifierDowns.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+            [Int64(kVK_Shift), Int64(kVK_Command)]
+        )
+        XCTAssertEqual(
+            sequence.modifierUps.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+            [Int64(kVK_Command), Int64(kVK_Shift)],
+            "released in the reverse of the order they were held"
+        )
+        XCTAssertEqual(sequence.keyDown.flags.rawValue & CGEventFlags.maskCommand.rawValue, CGEventFlags.maskCommand.rawValue)
+
+        // `fn` has no key code to hold down, so it is a flag on the events and
+        // nothing extra in the sequence.
+        let fn = try XCTUnwrap(hostKeyStroke(name: "Left", modifiers: [.fn]))
+        XCTAssertTrue(fn.flags.contains(.maskSecondaryFn))
+        let fnSequence = try InputSimulation.keyEvents(for: fn)
+        XCTAssertTrue(fnSequence.modifierDowns.isEmpty)
+        XCTAssertTrue(fnSequence.keyDown.flags.contains(.maskSecondaryFn))
+        XCTAssertEqual(characters(of: fnSequence.keyDown), "\u{F702}")
+    }
+
+    /// What the application will read off the event, read back the same way.
+    private func characters(of event: CGEvent) -> String {
+        var length = 0
+        event.keyboardGetUnicodeString(maxStringLength: 0, actualStringLength: &length, unicodeString: nil)
+        guard length > 0 else {
+            return ""
+        }
+
+        var buffer = [UniChar](repeating: 0, count: length)
+        event.keyboardGetUnicodeString(maxStringLength: length, actualStringLength: &length, unicodeString: &buffer)
+        return String(utf16CodeUnits: buffer, count: length)
     }
 
     // MARK: - Focus policy (§6.4)

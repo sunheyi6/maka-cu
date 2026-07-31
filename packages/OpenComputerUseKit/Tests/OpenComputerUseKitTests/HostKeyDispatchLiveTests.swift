@@ -23,17 +23,16 @@ import XCTest
 /// is only visible against an element that really has a value, which means a real
 /// text view in a real application.
 ///
-/// **This test activates its target, and that is deliberate.** §14 records two
-/// measured delivery defects: a key posted with `CGEventPostToPid` carries no
-/// characters unless the caller sets them, which `InputSimulation.pressKey` does
-/// not, so nothing routed through the responder chain lands; and a main-menu key
-/// equivalent does not land on a background application even when it does carry
-/// them, because `performKeyEquivalent:` needs a key window. Against a background
-/// window every key this vector could send is a key that goes nowhere, and the
-/// vector would then be measuring delivery rather than the verdict — passing for
-/// the wrong reason before the fix and after it alike. Activating removes the
-/// confound and reproduces the field case exactly: a model pressing `cmd+A` on
-/// the document the user is looking at.
+/// **This test activates its target, and that is deliberate.** §14 records a
+/// delivery defect this vector must not measure instead: `cmd+A` is a main-menu
+/// key equivalent, `performKeyEquivalent:` is reached through `NSApp`'s key
+/// window, and a background application has none — so against a background
+/// window the one key this vector can send goes nowhere, and the vector would be
+/// measuring delivery rather than the verdict, passing for the wrong reason
+/// before the fix and after it alike. Activating removes the confound and
+/// reproduces the field case exactly: a model pressing `cmd+A` on the document
+/// the user is looking at. Background delivery is vector 54's subject, in
+/// `HostKeyDeliveryLiveTests`, which never activates anything.
 ///
 /// What is *not* relaxed is the executor's own invariant. The frontmost
 /// application is asserted to be unchanged **across each dispatch** — the test

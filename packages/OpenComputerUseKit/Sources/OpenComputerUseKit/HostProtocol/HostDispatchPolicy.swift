@@ -188,15 +188,15 @@ public func hostEffectNotChecked() -> HostEffectVerdict {
 /// because the arguments were the only thing it could still see to change.
 ///
 /// Whether those two keys landed is a separate question the executor never
-/// answered, and separately measured (§14) they probably did not: a background
-/// application acts on no key posted the way this executor posts them. That
-/// changes nothing here. The verdict was not read off the key's effect; it was
-/// read off a value the key was never going to touch, and the same reading
-/// condemns `cmd+A` on a text view of an active application, which does land and
-/// leaves that value exactly where it was — measured, in
-/// `HostKeyDispatchLiveTests`. A verdict that happens to correlate with the truth
-/// for a reason unrelated to the truth is not evidence, and it cost the model
-/// seven retries.
+/// answered, and separately measured (§14) they did not: both are main-menu key
+/// equivalents, `performKeyEquivalent:` is reached through `NSApp`'s key window,
+/// and a background application has none. That changes nothing here. The verdict
+/// was not read off the key's effect; it was read off a value the key was never
+/// going to touch, and the same reading condemns `cmd+A` on a text view of an
+/// active application, which does land and leaves that value exactly where it was
+/// — measured, in `HostKeyDispatchLiveTests`. A verdict that happens to correlate
+/// with the truth for a reason unrelated to the truth is not evidence, and it
+/// cost the model seven retries.
 public enum HostKeyEvidence: Equatable, Sendable {
     /// The focused element's value, read either side of the post.
     case focusedElementValue

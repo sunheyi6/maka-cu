@@ -1,7 +1,22 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+
+/// One `{ "kind": "key" }`, built and not yet posted. Named parts rather than a
+/// flat list because the assertion worth making is about the key events and not
+/// about the modifiers around them.
+struct HostKeyEventSequence {
+    let modifierDowns: [CGEvent]
+    let keyDown: CGEvent
+    let keyUp: CGEvent
+    let modifierUps: [CGEvent]
+
+    var ordered: [CGEvent] {
+        modifierDowns + [keyDown, keyUp] + modifierUps
+    }
+}
 
 enum MouseButtonKind: String {
     case left
@@ -212,9 +227,102 @@ enum InputSimulation {
         return chunks
     }
 
-    /// `extraFlags` carries modifiers that have no key code to hold down. `fn` is
-    /// the only one today: the `maka.cu/2` wire declares it a modifier, and a
-    /// flag is the only way to deliver it.
+    /// §6.4 — the events one `{ "kind": "key" }` posts, in the order they go out.
+    ///
+    /// Separate from posting them so a test can read what was built. Two things
+    /// about these events are worth asserting and neither is visible from
+    /// outside a `postToPid`: which character the key events carry, and whether
+    /// the executor set it at all.
+    ///
+    /// It must set it. A key code is half an event and the character is the
+    /// half an application acts on; an application that is not frontmost does
+    /// not supply the missing half for itself, so for the whole of `maka-cu`'s
+    /// life `dispatch.key` with `kind: "key"` posted events that did nothing.
+    /// `typeText` worked all along because it sets the string. Nor is the
+    /// layout's own translation of the key code the right character to pass
+    /// along: it answers U+001D for the right arrow where AppKit binds U+F703,
+    /// and the backspace key's U+007F for `ForwardDelete`.
+    static func keyEvents(for stroke: HostKeyStroke) throws -> HostKeyEventSequence {
+        var modifierDowns: [CGEvent] = []
+        var modifierUps: [CGEvent] = []
+        var active: CGEventFlags = stroke.flags.intersection(.maskSecondaryFn)
+
+        for modifier in holdableModifiers where stroke.flags.contains(modifier.flag) {
+            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: modifier.keyCode, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: nil, virtualKey: modifier.keyCode, keyDown: false) else {
+                throw ComputerUseError.message("Failed to create modifier key event.")
+            }
+
+            active.insert(modifier.flag)
+            down.flags = active
+            // The release carries the state the key press was made under, and
+            // the flag it drops is dropped by the next one going out.
+            up.flags = active
+            modifierDowns.append(down)
+            modifierUps.append(up)
+        }
+
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: stroke.keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: stroke.keyCode, keyDown: false) else {
+            throw ComputerUseError.message("Failed to create key event.")
+        }
+
+        keyDown.flags = stroke.flags
+        keyUp.flags = stroke.flags
+
+        // The characters, which are the whole of this path's repair — and which
+        // a `command` stroke must not carry, because a menu equivalent is
+        // matched against the application's own translation of the key code and
+        // an event that already has characters is never offered to it. See
+        // `HostKeyStroke.carriesCharacters` for the measurement.
+        if stroke.carriesCharacters {
+            var characters = stroke.characters
+            characters.withUnsafeMutableBufferPointer { buffer in
+                guard let baseAddress = buffer.baseAddress else {
+                    return
+                }
+
+                keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+                keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+            }
+        }
+
+        return HostKeyEventSequence(
+            modifierDowns: modifierDowns,
+            keyDown: keyDown,
+            keyUp: keyUp,
+            modifierUps: modifierUps.reversed()
+        )
+    }
+
+    /// §6.4 — posted to the target pid, and nothing is activated or raised.
+    static func pressKeyStroke(_ stroke: HostKeyStroke, pid: pid_t) throws {
+        for event in try keyEvents(for: stroke).ordered {
+            event.postToPid(pid)
+        }
+
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+
+    /// Held in this order and released in the reverse, which is the order a hand
+    /// does it in. `fn` is not here: it has no key code to hold, so it travels as
+    /// a flag on every event in the sequence.
+    private static let holdableModifiers: [(flag: CGEventFlags, keyCode: CGKeyCode)] = [
+        (.maskControl, CGKeyCode(kVK_Control)),
+        (.maskAlternate, CGKeyCode(kVK_Option)),
+        (.maskShift, CGKeyCode(kVK_Shift)),
+        (.maskCommand, CGKeyCode(kVK_Command)),
+    ]
+
+    /// The CLI surface's key press, which parses an xdotool-flavoured string and
+    /// posts the event the key code alone produces.
+    ///
+    /// **Not the `maka.cu/2` path.** `dispatch.key` goes through
+    /// `pressKeyStroke` and the closed table above, because a key posted this
+    /// way carries the keyboard layout's translation of the key code — which is
+    /// the wrong character for 22 of the wire's 26 named keys — and does not
+    /// reach an application that is not frontmost at all. `extraFlags` carries
+    /// modifiers that have no key code to hold down.
     static func pressKey(_ specification: String, pid: pid_t, extraFlags: CGEventFlags = []) throws {
         let parsed = try KeyPressParser.parse(specification)
         var activeFlags: CGEventFlags = extraFlags

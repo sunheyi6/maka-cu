@@ -1166,6 +1166,85 @@ Two names were dropped from the `maka.cu/1` executor's set
 
 `Backspace` and `ForwardDelete` are unambiguous and are the only way to say it.
 
+#### The event has to carry the character
+
+An executor MUST set the characters on a `kind: "key"` event itself, rather than
+posting the event the system built from the key code.
+
+This is not a quality-of-implementation note. §6.4 posts to the target pid, and a
+key code is only half an event: what an application acts on is the character.
+An application that is frontmost translates the code itself and needs no help; an
+application that is not does not, and the executor's own `dispatch.key` therefore
+did nothing at all — measured in §14, one key press per row. `type` worked
+throughout only because it sets the string, which is the whole of the difference
+between the two kinds.
+
+Nor is the layout's own answer good enough to pass along. Measured against the
+current input source, the key code alone translates to the wrong character for
+22 of the 26 named keys: the right arrow gives U+001D where AppKit binds U+F703,
+`ForwardDelete` gives U+007F — which is the *backspace* key's character, so a key
+named forward-delete would have deleted backwards — and all twelve function keys
+collapse onto a single U+0010.
+
+Which characters, exactly — the set is closed, so they are written down:
+
+| key | character |
+| --- | --- |
+| `Return` `Tab` `Space` `Escape` | U+000D, U+0009, U+0020, U+001B |
+| `Backspace` | U+007F, the character that key produces, not the U+0008 its name points at |
+| `ForwardDelete` `Home` `End` `PageUp` `PageDown` | U+F728, U+F729, U+F72B, U+F72C, U+F72D |
+| `Up` `Down` `Left` `Right` | U+F700 – U+F703 |
+| `F1` … `F12` | U+F704 – U+F70F |
+| a printable character | itself, and its shifted form when `modifiers` contains `shift` |
+
+The private-use values are AppKit's `NSUpArrowFunctionKey` family, which is what
+a real arrow key event carries; no keyboard layout produces them, so no layout
+lookup can supply them either.
+
+**A table and not the live layout.** The alternative is `UCKeyTranslate` against
+whichever input source the user has selected, and this protocol declines it on
+three counts: the current layout is global mutable state, so the same request
+would mean different things depending on the menu bar; it does not have the
+answer for the 26 named keys, as the paragraph above measures, so the table ships
+either way; and it is stateful — a dead key returns nothing while arming the next
+translation, which makes one key press depend on the one before it. What the
+table gives up is the virtual **key code** on a non-US layout, where the ANSI
+position names a different physical key than the character does. That costs
+nothing where it matters, because the application acts on the character.
+
+**One exception, and it is the whole of the exception: a stroke whose
+`modifiers` contain `command` is posted without characters.** A command-modified
+key is how macOS spells a menu command, `performKeyEquivalent:` matches it
+against the application's own translation of the key code, and an event that
+arrives with characters already on it is taken as text and never offered to that
+path. Setting them does not improve a shortcut — it deletes one that worked.
+Measured against a TextEdit document, resetting the selection through
+Accessibility between rows so that no row can read as the one before it:
+
+```
+                   frontmost                background
+cmd+a   plain      loc 0 → len 34           no effect
+cmd+a   + "a"      no effect                no effect
+cmd+←   plain      loc 0 → 33               no effect
+cmd+←   + U+F703   loc 0 → 33               loc 0 → 33
+→       plain      loc 0 → 1                no effect
+→       + U+F703   loc 0 → 1                loc 0 → 1
+shift+→ + U+F703   —                        len 0 → 1
+opt+→   + U+F703   —                        loc 0 → 4
+ctrl+e  + "e"      —                        loc 0 → 33
+```
+
+Every combination gains from the characters except `command`, which loses. Row
+four is what the exception leaves on the table: `cmd+←` is a caret motion rather
+than a menu command and would reach a background application if the characters
+were there. The executor cannot tell the two apart — `cmd+↓` is caret motion in a
+text view and *Open* in the Finder — and they need opposite events, so it takes
+the rule that costs nothing and §14 carries the question.
+
+The modifier flags carried are exactly the ones `modifiers` declared. Real arrow
+key events additionally carry the numeric-pad and secondary-fn flags, and §14
+measured that adding them changes nothing.
+
 #### The host parses; the executor never sees a combination
 
 Maka's callers do not hold this closed set. `CuAction.key` is
@@ -2064,17 +2143,15 @@ Judging a key by something that bears on it (§6.5):
     same with `ctrl+f2` four times.
 
     The vector is built on an application the live half **activates**, and the
-    reason is a second finding recorded in §14: a key posted the way this
-    executor posts it does not arrive at a background application at all — an
-    event built from a virtual key code alone carries no characters, and a
-    main-menu key equivalent additionally needs a key window. Against a
-    background window every key this vector could send goes nowhere, so it would
-    measure delivery rather than the verdict and would pass for the wrong reason
-    before the fix and after it alike. Activating removes the confound and is the
-    field case exactly: `cmd+A` on the document the user is looking at. What the
-    live half does not relax is the executor's invariant — the frontmost
-    application is asserted unchanged across each dispatch, and the one that had
-    it is put back.
+    reason is the finding still open in §14: `cmd+A` is a main-menu key
+    equivalent, `performKeyEquivalent:` is reached through `NSApp`'s key window,
+    and a background application has none. Against a background window this
+    vector's key goes nowhere, so it would measure delivery rather than the
+    verdict and would pass for the wrong reason before the fix and after it
+    alike. Activating removes the confound and is the field case exactly: `cmd+A`
+    on the document the user is looking at. What the live half does not relax is
+    the executor's invariant — the frontmost application is asserted unchanged
+    across each dispatch, and the one that had it is put back.
 
     Both halves are needed and neither is redundant. The unit half drives a
     binding probe whose answer changes once a key has been posted, because a
@@ -2087,6 +2164,42 @@ Judging a key by something that bears on it (§6.5):
     element that really has a value, which means a real text view — the live half
     reads the selection out of the executor's own post-dispatch observation to
     establish that the key arrived before saying anything about the verdict.
+
+Posting a key that the application can act on (§6.4):
+
+54. Every member of the closed set resolves to an event that **carries
+    characters**, and a key posted to a **background** application arrives.
+
+    Its unit half enumerates the set rather than sampling it — 26 named keys and
+    94 printable characters, 120 members — and asserts that the set the decoder
+    accepts and the set the dispatcher can build are one set, with a character on
+    every member. For 22 of the named keys it asserts *both* that the character
+    is the one AppKit binds and that it is **not** the one the key code's own
+    layout translation supplies: the right arrow translates to U+001D against
+    AppKit's U+F703, `ForwardDelete` translates to the backspace key's U+007F,
+    and all twelve function keys collapse onto one U+0010. That second half is
+    what fails against the executor that shipped, which built the event and
+    posted it unmodified.
+
+    It also asserts the `command` exception, and asserts it as a property of the
+    stroke rather than of the event, because the difference between a string set
+    by the executor and one the system supplied is invisible from inside the
+    posting process — which is exactly why the live halves exist.
+
+    Its live half posts against a **background** TextEdit document and reads the
+    application's own answer: the insertion point for the four arrows, and the
+    document's value for `Tab`, `Return`, `Backspace`, `ForwardDelete` and a
+    printable character with and without `shift`. It never activates the target,
+    and the frontmost pid is asserted unchanged across every dispatch — which is
+    what makes those effects evidence of background delivery rather than of a
+    foreground the test quietly took.
+
+    Vector 53 is the other half of the pair and neither is redundant: 53
+    **activates** its target and sends `cmd+A`, so it is the vector that catches
+    an executor which sets characters on a command stroke and silently deletes
+    every menu shortcut that used to work. 54 never activates, because background
+    delivery is the thing it measures. An executor cannot satisfy both by
+    choosing one behaviour for all keys, which is the point.
 
 ---
 
@@ -2121,10 +2234,9 @@ which is how its one flagged question stayed open long enough for two
 implementations to answer it differently. What remains open is listed here and
 nowhere else.
 
-- **A key posted to a background application does not arrive.** §6.4 posts key
-  events to the target pid and forbids activating the application, and that is
-  right. It is also, today, the difference between a key that works and a key
-  that does nothing. Measured against a TextEdit document window while another
+- **A main-menu key equivalent does not reach a background application.** §6.4
+  posts key events to the target pid and forbids activating the application, and
+  that is right. Measured against a TextEdit document window while another
   application was frontmost, one key press per row:
 
   ```
@@ -2139,38 +2251,79 @@ nowhere else.
   cmd+a, + unicode U+0061                 no effect  selection loc 0 len 0
   ```
 
-  Two separate faults, and the second one is only visible once the first is out
-  of the way:
+  Two separate faults, and the second one was only visible once the first was out
+  of the way.
 
-  1. **`CGEventPostToPid` does not translate a key code.** An event built from a
-     virtual key code alone reaches the application with no characters, because
-     the layout translation the window server performs is on the path this one
-     bypasses, and AppKit's key handling is driven by characters. `typeText`
-     works because it sets the unicode string; `pressKey` never does, so
-     **`dispatch.key` with `kind: "key"` delivers nothing at all** — the flags
-     are not the missing piece, the characters are.
-  2. **A main-menu key equivalent needs a key window.** `cmd+a` did not land even
-     carrying its character, and landed immediately once the same application was
-     activated. `performKeyEquivalent:` is reached through `NSApp`'s key window,
-     and a background application has none. So `cmd+p`, `cmd+s`, `cmd+w` and
-     `ctrl+f2` — the shortcuts a model reaches for precisely when the menu bar is
-     not in the observation — cannot be delivered this way at all, and fixing (1)
-     will not make them work.
+  **The first is closed.** An event posted straight to a pid carries only what
+  the executor put on it, and the executor put no characters on it: a key code
+  is half an event, and what an application acts on is the character. `typeText`
+  worked because it set the unicode string; `pressKey` never did, so
+  `dispatch.key` with `kind: "key"` delivered nothing at all. Nor was passing the
+  layout's own translation along an option — measured afterwards, the key code
+  alone translates to the wrong character for 22 of the 26 named keys: U+001D for
+  the right arrow where AppKit binds U+F703, U+007F for `ForwardDelete` which is
+  the *backspace* key's character, and one shared U+0010 for all twelve function
+  keys. The executor now resolves the closed set through a table that carries the
+  character for every one of its 120 members (§6.4), and the answer to *where the
+  characters come from* is that table rather than `UCKeyTranslate`, for the
+  reasons stated there.
 
-  The executor reports `outcome: ok` for every one of them, because the events
-  were written to the pid and nothing said no. §6.5's honesty rule keeps that out
-  of `confirmed`, but the model is still told a request succeeded that could not
+  Measured against a background TextEdit document afterwards, through the full
+  `dispatch.key` path, with the frontmost application asserted unchanged across
+  every one:
+
+  ```
+  Right                                   landed     loc 0 → 1 → 2
+  Left                                    landed     loc 2 → 1
+  Down / Up                               landed     loc 1 → end of document → 1
+  Tab                                     landed     tab inserted at the caret
+  Return                                  landed     newline inserted
+  Backspace                               landed     character before the caret deleted
+  ForwardDelete                           landed     character after the caret deleted
+  z                                       landed     "z" inserted
+  shift+z                                 landed     "Z" inserted
+  Home / End                              no caret   bound to scrolling on macOS, not to the caret
+  Escape                                  no effect  visible; `cancelOperation:` orders in no panel for an inactive app
+  ```
+
+  `Escape` was measured separately against a background Calculator, where it
+  cleared the entry two digit keys had just put in the display: it lands, and
+  TextEdit is simply not an application that can show it. `Home` and `End` are
+  `scrollToBeginningOfDocument:` and `scrollToEndOfDocument:` on macOS, so a
+  document that fits its window has nothing to show for them either way.
+  `HostKeyDeliveryLiveTests` is the standing form of this table (§12 vector 54).
+
+  **The second is still open, and closing the first sharpened it.** A main-menu
+  key equivalent needs a key window. `cmd+a` did not land even carrying its
+  character, and landed immediately once the same application was activated:
+  `performKeyEquivalent:` is reached through `NSApp`'s key window, and a
+  background application has none. So `cmd+p`, `cmd+s`, `cmd+w` and `ctrl+f2` —
+  the shortcuts a model reaches for precisely when the menu bar is not in the
+  observation — cannot be delivered this way at all.
+
+  What the fix added is the other half of it: an event carrying characters is
+  taken as text and is never offered to `performKeyEquivalent:` at all, so
+  setting them *removes* a shortcut that worked while the target happened to be
+  frontmost. §6.4 therefore posts a `command` stroke without characters, which
+  costs one thing worth naming — `cmd+←` and its siblings are caret motions
+  rather than menu commands and would reach a background application if the
+  characters were there (measured: `loc 0 → 33`). The executor has no way to tell
+  a menu equivalent from a responder-chain binding: `cmd+↓` is caret motion in a
+  text view and *Open* in the Finder, and the two need opposite events.
+
+  The executor reports `outcome: ok` for all of them, because the events were
+  written to the pid and nothing said no. §6.5's honesty rule keeps that out of
+  `confirmed`, but the model is still told a request succeeded that could not
   have.
 
-  (1) is a bug with an obvious shape — give the posted event the characters the
-  window server would have added — and it needs deciding whether they come from
-  the live layout through `UCKeyTranslate` or from a table over §6.4's closed
-  set. (2) is a design question this protocol has not answered: refuse a key the
-  target cannot act on (and the executor cannot know which those are), route menu
-  commands through the menu's own AX actions instead of through the keyboard (a
-  different method, not a different key), or state the limitation on the wire so
-  the host can put it in front of the model. Both need measuring on more than one
-  application first — the table above is one application on one machine.
+  Three ways out, none taken yet: refuse a key the target cannot act on (and the
+  executor cannot know which those are), route menu commands through the menu's
+  own AX actions instead of through the keyboard (a different method, not a
+  different key), or state the limitation on the wire so the host can put it in
+  front of the model. Whichever it is, it also has to answer the `command`
+  question above — and it needs measuring on more than one application first.
+  Both tables here are TextEdit on one machine, with one Calculator row beside
+  them.
 
 - **The Electron/Chromium `element_released` rate is unmeasured.** §4.4 item 2
   states that tree-rebuilding applications can fail E1 on a control that is

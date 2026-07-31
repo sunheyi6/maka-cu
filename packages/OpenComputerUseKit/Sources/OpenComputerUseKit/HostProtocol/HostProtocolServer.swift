@@ -268,33 +268,10 @@ extension HostKeyAction: Decodable {
     }
 }
 
-/// The named keys the executor will accept, plus single printable characters.
-///
-/// §6.4 — `Enter` and `Delete` are deliberately absent. `Enter` was a second name
-/// for `Return` with no stated difference; `Delete` is the legend on a Mac
-/// backspace key and the *forward* delete in the xdotool vocabulary, so one
-/// string named two destructive keys and the wire could not say which.
-/// `Backspace` and `ForwardDelete` are the only spellings.
-public let hostNamedKeys: Set<String> = [
-    "Return", "Tab", "Space", "Escape", "Backspace", "ForwardDelete",
-    "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown",
-    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-]
-
-public func hostKeyNameIsSupported(_ name: String) -> Bool {
-    if hostNamedKeys.contains(name) {
-        return true
-    }
-
-    guard name.count == 1, let scalar = name.unicodeScalars.first else {
-        return false
-    }
-
-    // §6.4 — the printable range starts at U+0021 and not U+0020 because `Space`
-    // is the only spelling of the space bar, and two spellings of one key is the
-    // defect that section exists to remove.
-    return scalar.value >= 0x21 && scalar.value <= 0x7E
-}
+/// The named keys the executor will accept, plus single printable characters,
+/// both answered by the stroke table in `HostKeyStroke.swift`: the set the wire
+/// advertises is the set the dispatcher can post, and nothing keeps two copies
+/// in step.
 
 // MARK: - Response payloads
 
