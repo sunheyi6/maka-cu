@@ -4,7 +4,7 @@ import Foundation
 import XCTest
 @testable import OpenComputerUseKit
 
-/// §12 vector 47 — the half of the capture contract no unit test can
+/// §12 vectors 47 and 48 — the half of the capture contract no unit test can
 /// reach. A bitmap only disagrees with the size it declares once a real
 /// compositor has drawn into it, and the executor's own arithmetic agrees with
 /// itself either way.
@@ -163,6 +163,68 @@ final class HostCaptureLiveTests: XCTestCase {
         )
     }
 
+    // MARK: - §12.48 — screen.capture with no displayId
+
+    func testScreenCaptureWithNoDisplayIdCapturesTheMainDisplayAndSaysSo() throws {
+        try requireLiveCapture()
+
+        let imageDirectory = try makeImageDirectory()
+        let inbox = ResponseInbox()
+        let server = HostProtocolServer(
+            output: HostOutputWriter { inbox.append($0) },
+            environment: FakeEnvironment()
+        )
+
+        server.handle(line: #"""
+        {"jsonrpc":"2.0","id":1,"method":"host.hello","params":{"protocol":"\#(makaCuProtocolVersion)","hostPid":\#(ProcessInfo.processInfo.processIdentifier),"imageDir":"\#(imageDirectory.path)","allowGlobalPointer":false}}
+        """#)
+        _ = try inbox.next()
+        server.handle(line: #"{"jsonrpc":"2.0","id":2,"method":"session.begin","params":{"session":"s1","captureScope":"window"}}"#)
+        _ = try inbox.next()
+
+        server.handle(line: #"{"jsonrpc":"2.0","id":3,"method":"screen.capture","params":{"session":"s1"}}"#)
+        let response = try inbox.next(timeout: 30)
+
+        XCTAssertNil(response["error"], "a request with no displayId is not a parameter error")
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertEqual(result["ok"] as? Bool, true, "\(result)")
+        XCTAssertEqual(
+            result["displayId"] as? String,
+            String(CGMainDisplayID()),
+            "the answer names the display that was captured, even when the request did not"
+        )
+
+        let image = try XCTUnwrap(result["image"] as? [String: Any])
+        let path = try XCTUnwrap(image["path"] as? String)
+        let widthPx = try XCTUnwrap(image["widthPx"] as? Int)
+        let heightPx = try XCTUnwrap(image["heightPx"] as? Int)
+        let scale = try XCTUnwrap(image["scale"] as? Double)
+
+        let onDisk = try XCTUnwrap(NSImage(contentsOfFile: path)?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertEqual(onDisk.width, widthPx, "the file is not the size the response declared")
+        XCTAssertEqual(onDisk.height, heightPx)
+
+        let measure = Self.opaqueBoundingBox(of: onDisk)
+        XCTAssertEqual(measure.box, CGRect(x: 0, y: 0, width: widthPx, height: heightPx))
+        XCTAssertGreaterThan(measure.coverage, 0.5)
+
+        let mainScale = try XCTUnwrap(Self.backingScale(ofDisplay: CGMainDisplayID()))
+        XCTAssertEqual(scale, mainScale, accuracy: 0.001, "a display is captured at its own pixel density (§6.6)")
+
+        // A named display still answers under the id it was named with, so the
+        // default is a default and not a redirect.
+        for displayId in hostActiveDisplayIds() {
+            server.handle(line: #"{"jsonrpc":"2.0","id":4,"method":"screen.capture","params":{"session":"s1","displayId":"\#(displayId)"}}"#)
+            let named = try inbox.next(timeout: 30)
+            XCTAssertNil(named["error"], "display \(displayId) is attached")
+            XCTAssertEqual((named["result"] as? [String: Any])?["displayId"] as? String, String(displayId))
+        }
+
+        server.handle(line: #"{"jsonrpc":"2.0","id":5,"method":"session.end","params":{"session":"s1"}}"#)
+        _ = try inbox.next()
+        try? FileManager.default.removeItem(at: imageDirectory)
+    }
+
     // MARK: - Helpers
 
     /// The sweep runs on its own thread and the assertions run on the main one,
@@ -194,6 +256,32 @@ final class HostCaptureLiveTests: XCTestCase {
             lock.lock()
             defer { lock.unlock() }
             return failures
+        }
+    }
+
+    /// Line-delimited responses collected off whichever lane produced them, and
+    /// handed to the main thread through a semaphore rather than a run loop.
+    private final class ResponseInbox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [Data] = []
+        private let arrived = DispatchSemaphore(value: 0)
+
+        func append(_ data: Data) {
+            lock.lock()
+            lines.append(data)
+            lock.unlock()
+            arrived.signal()
+        }
+
+        func next(timeout: TimeInterval = 5) throws -> [String: Any] {
+            guard arrived.wait(timeout: .now() + timeout) == .success else {
+                throw ComputerUseError.message("no response within \(timeout)s")
+            }
+
+            lock.lock()
+            let data = lines.removeFirst()
+            lock.unlock()
+            return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         }
     }
 

@@ -144,6 +144,26 @@ public enum HostWindowInventory {
     }
 }
 
+/// The displays attached right now, asked of the window server rather than read
+/// off `NSScreen.screens`. §5.5 — AppKit's caches are refreshed by the main run
+/// loop, and this executor's main thread sits in `readLine`; a lane that asks
+/// `NSScreen` whether a display exists can be answered from a snapshot taken
+/// before the display was plugged in. `screen.capture` validates the caller's
+/// `displayId` against this, so the answer has to come from the machine.
+public func hostActiveDisplayIds() -> [CGDirectDisplayID] {
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
+        return []
+    }
+
+    var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    guard CGGetActiveDisplayList(count, &ids, &count) == .success else {
+        return []
+    }
+
+    return Array(ids.prefix(Int(count)))
+}
+
 /// `CGSessionCopyCurrentDictionary` is the only reliable lock signal available to
 /// a background process: Accessibility and ScreenCaptureKit both fail on a locked
 /// screen, but they fail with codes that also mean other things.

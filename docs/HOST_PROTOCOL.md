@@ -1286,6 +1286,11 @@ ended up deriving each from the other with three fallbacks.
 ```
 
 ```json
+{ "method": "screen.capture",
+  "params": { "session": "s-01J…" } }
+```
+
+```json
 { "ok": true,
   "image": { "path": "…/cap_8812.png", "format": "png",
              "widthPx": 3024, "heightPx": 1964, "byteLength": 2_100_331,
@@ -1297,6 +1302,23 @@ ended up deriving each from the other with three fallbacks.
 Whole-display capture, no snapshot, no binding, no state change. It exists
 because `CuAction` has a `screenshot` member and the model may ask for one
 without a target.
+
+**`displayId` is optional, and absent means the main display.** It has to be
+optional for the same reason the method exists: the request this method serves
+is the one with no target, and a model that has observed nothing has not read
+`displays[]` either. Requiring the field answered every untargeted screenshot
+with `-32602`, so the one action the method was added for was the one action it
+never performed. The result reports `displayId` whether or not the request
+carried one, so a caller that declined to choose still knows exactly which
+screen it is looking at.
+
+Absent is not the same as wrong. A `displayId` that names no attached display is
+`-32602` on the field, never a quiet fall back to the main one. Substituting a
+display the caller did not ask for answers a question about display B with a
+picture of display A, and the `displayId` in the result would agree with the
+picture rather than with the request, so nothing downstream could tell. The
+executor validates against the displays the window server reports, not against
+`NSScreen` (§5.5).
 
 The image is the display at the display's own pixel density, which is what the
 example above shows: a Retina screen comes back at its full pixel count with
@@ -1772,7 +1794,7 @@ Launching an app (§5.7):
     it only fails from a lane, so a check that runs on the main thread, or parks
     on anything that spins the main run loop, passes against the broken executor.
 
-Capture geometry (§6.7):
+Capture geometry (§6.6, §6.7):
 
 47. A window capture is drawn over the whole of the size it declares: the
     bounding box of the image's non-transparent pixels is the entire bitmap,
@@ -1784,6 +1806,16 @@ Capture geometry (§6.7):
     machine whose displays do not all share one backing scale, because where the
     guess happens to be right there is nothing to catch; that is why it is a
     live vector and why it sweeps every window on screen rather than one.
+48. `screen.capture` with no `displayId` captures the main display and reports
+    the id it used. The vector that fails against an executor which decodes the
+    field as required: `CuAction.screenshot` is defined to arrive with no
+    target, so a required `displayId` makes `-32602` the answer to every
+    screenshot the model actually asks for.
+49. `screen.capture` naming a display that is not attached is `-32602` on
+    `displayId`, and no image is written. This vector and 48 have to be read as
+    a pair — an executor that satisfies 48 by defaulting whenever the lookup
+    fails passes 48 and fails 49, and it fails it by returning a picture of the
+    main display under the display id the caller asked for.
 
 ---
 

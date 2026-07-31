@@ -78,7 +78,12 @@ struct HostAppsLaunchParams: Decodable {
 
 struct HostScreenCaptureParams: Decodable {
     let session: String
-    let displayId: String
+    /// §6.6 — optional. The model reaches this method through `CuAction`'s
+    /// `screenshot` member, which exists precisely to ask for a picture without
+    /// naming a target; requiring the field made every such request `-32602`.
+    /// Absent means the main display, and the answer always names the display
+    /// that was captured.
+    let displayId: String?
 }
 
 struct HostObserveAfter: Decodable {

@@ -1113,16 +1113,31 @@ extension HostProtocolServer {
             return
         }
 
-        guard let displayId = UInt32(params.displayId) else {
-            emit(id: id, rpcError: HostRPCError.invalidParams("displayId"))
-            return
+        let displayId: CGDirectDisplayID
+        if let requested = params.displayId {
+            // §6.6 — a display the caller named and the machine does not have is
+            // `-32602` on the field, never a capture that quietly happens
+            // somewhere else. The default exists for a caller that declined to
+            // choose, not for one that chose wrong: silently substituting the
+            // main display would answer a question about display B with a
+            // picture of display A, and the `displayId` in the result would
+            // agree with the picture, so nothing downstream could notice.
+            guard let parsed = UInt32(requested),
+                  hostActiveDisplayIds().contains(CGDirectDisplayID(parsed))
+            else {
+                emit(id: id, rpcError: HostRPCError.invalidParams("displayId"))
+                return
+            }
+            displayId = CGDirectDisplayID(parsed)
+        } else {
+            displayId = CGMainDisplayID()
         }
 
-        switch HostCapture.captureDisplay(displayId: CGDirectDisplayID(displayId)) {
+        switch HostCapture.captureDisplay(displayId: displayId) {
         case .failure(let error):
             emit(id: id, failure: error)
         case .success(let image):
-            let logicalWidth = CGDisplayBounds(CGDirectDisplayID(displayId)).width
+            let logicalWidth = CGDisplayBounds(displayId).width
             switch currentImageStore().writePNG(image, namePrefix: "cap", logicalWidth: logicalWidth) {
             case .failure(let error):
                 emit(id: id, failure: error)
@@ -1142,7 +1157,10 @@ extension HostProtocolServer {
                     id: id,
                     payload: HostScreenCaptureResult(
                         image: reference,
-                        displayId: params.displayId,
+                        // The display actually captured, which is the requested
+                        // one when there was one and the main display when there
+                        // was not. The caller never has to infer which it got.
+                        displayId: String(displayId),
                         capturedAt: capturedAt
                     )
                 )

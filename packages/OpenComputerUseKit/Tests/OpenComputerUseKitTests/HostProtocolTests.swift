@@ -752,6 +752,67 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertThrowsError(try harness.awaitResponse(timeout: 0.2))
     }
 
+    // MARK: - Capture geometry (§6.6, §12 vectors 48–49)
+
+    /// §12.48 — `CuAction.screenshot` is defined to arrive with no target, so a
+    /// required `displayId` makes `-32602` the answer to the only request this
+    /// method exists to serve. Asserted on the decoder rather than through a
+    /// capture because the capture itself needs a compositor; the live half of
+    /// this vector is in `HostCaptureLiveTests`.
+    func testScreenCaptureAcceptsARequestThatNamesNoDisplay() throws {
+        let omitted = try JSONDecoder().decode(
+            HostScreenCaptureParams.self,
+            from: Data(#"{"session":"s1"}"#.utf8)
+        )
+        XCTAssertNil(omitted.displayId)
+
+        let named = try JSONDecoder().decode(
+            HostScreenCaptureParams.self,
+            from: Data(#"{"session":"s1","displayId":"69732928"}"#.utf8)
+        )
+        XCTAssertEqual(named.displayId, "69732928")
+    }
+
+    /// §12.49 — the pair to the vector above. An executor that made `displayId`
+    /// optional by falling back to the main display whenever the lookup fails
+    /// passes 48 and fails here, and it fails by returning a picture of the main
+    /// display under the display id the caller asked for.
+    ///
+    /// `0` is `kCGNullDirectDisplay` and `4294967295` is the top of the id
+    /// space; neither is ever an attached display, on any machine, so this runs
+    /// without a desktop.
+    func testScreenCaptureRejectsADisplayIdThatNamesNoAttachedDisplay() throws {
+        for (index, displayId) in ["0", "4294967295", "not-a-number"].enumerated() {
+            let harness = ServerHarness()
+            _ = try harness.begin()
+
+            harness.send(
+                #"{"jsonrpc":"2.0","id":\#(30 + index),"method":"screen.capture","#
+                    + #""params":{"session":"s1","displayId":"\#(displayId)"}}"#
+            )
+            let response = try harness.awaitResponse()
+
+            XCTAssertNil(
+                response["result"],
+                "screen.capture must not answer \(displayId) with a picture of some other display"
+            )
+            let error = try XCTUnwrap(response["error"] as? [String: Any])
+            XCTAssertEqual(error["code"] as? Int, -32602, "displayId \(displayId)")
+            XCTAssertEqual((error["data"] as? [String: Any])?["field"] as? String, "displayId")
+        }
+    }
+
+    /// The list `screen.capture` validates against has to be the machine's, and
+    /// it has to contain the display the default resolves to — otherwise the
+    /// validation above would reject the executor's own fallback.
+    func testTheActiveDisplayListComesFromTheWindowServerAndContainsTheMainDisplay() {
+        let ids = hostActiveDisplayIds()
+
+        XCTAssertFalse(ids.isEmpty, "a machine running this test has at least one display")
+        XCTAssertTrue(ids.contains(CGMainDisplayID()))
+        XCTAssertFalse(ids.contains(0), "0 is kCGNullDirectDisplay, not a display")
+    }
+
     // MARK: - Key vocabulary (§6.4)
 
     func testKeyNamesOutsideTheClosedSetAreRejected() {
