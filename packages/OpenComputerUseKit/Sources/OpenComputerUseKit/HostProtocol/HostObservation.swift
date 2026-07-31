@@ -115,6 +115,16 @@ public protocol HostAccessibilityNode: AnyObject {
     /// Window-local logical points.
     var frameInWindow: CGRect? { get }
     var rawActionNames: [String] { get }
+    /// The live `AXParent` role chain, root-ward — the same read the binding
+    /// probe makes at dispatch time. `nil` for a node with no element behind it
+    /// (fixtures and tests), which leaves the caller its traversal chain.
+    ///
+    /// It is a property of the node rather than a call the walker makes on
+    /// `HostAX` so that a test can put a node with a live chain in front of the
+    /// walk. Without it, every fixture reports no chain, the walk falls back to
+    /// its own traversal, and the seam where the two ends disagree is the one
+    /// thing the suite cannot reach.
+    var liveAncestorRoles: [String]? { get }
     var children: [HostAccessibilityNode] { get }
 }
 
@@ -172,14 +182,6 @@ public func hostWalkTree(
         "el_\(tokenPrefix)_\(index)"
     }
 
-    /// The live `AXParent` chain, or nil when the node has no element behind it
-    /// (fixtures and tests). Deliberately the same call the binding probe makes,
-    /// so the two can never be computed differently.
-    func liveAncestorRoles(_ node: HostAccessibilityNode) -> [String]? {
-        guard let element = node.axElement else { return nil }
-        return HostAX.ancestorRoles(of: element)
-    }
-
     func visit(
         _ node: HostAccessibilityNode,
         parentToken: String?,
@@ -231,34 +233,21 @@ public func hostWalkTree(
             truncatedFields.append(.placeholder)
         }
 
-        let actions = node.rawActionNames
-            .compactMap(HostElementActionName.normalized(rawAXAction:))
-            .reduce(into: [HostElementActionName]()) { unique, action in
-                if !unique.contains(action) {
-                    unique.append(action)
-                }
-            }
+        let actions = hostNormalizedActions(node.rawActionNames)
 
-        let digestInput = HostElementDigestInput(
-            role: node.role,
-            subrole: node.subrole,
-            axIdentifier: node.axIdentifier,
-            title: node.title,
-            label: node.label,
-            untruncatedValue: node.value,
-            frameInWindow: node.frameInWindow,
-            actionNames: actions.map(\.rawValue),
-            // Read the live parent chain, the same way `currentDigestInput`
-            // will read it at dispatch. The traversal's own chain is not the
-            // same thing: the walker elides wrapper nodes, and `AXParent` does
-            // not, so on any Chromium tree the two disagree and every dispatch
-            // is refused `element_changed` with `changed: ["ancestors"]` on an
-            // element nothing touched. Measured against Maka's own window,
-            // where it refused the first click of every run.
-            //
-            // `siblingIndex` two lines down already carries this lesson in its
-            // comment; ancestors were left on the other side of it.
-            ancestorRoles: liveAncestorRoles(node) ?? ancestorRoles,
+        // §4.3's field list, assembled where the probe assembles it too. The
+        // ancestor chain is read live rather than taken from this walk's own
+        // traversal: the walker elides wrapper nodes and `AXParent` does not, so
+        // on any Chromium tree the two disagree and every dispatch is refused
+        // `element_changed` with `changed: ["ancestors"]` on an element nothing
+        // touched — measured against Maka's own window, where it refused the
+        // first click of every run. The traversal chain remains the fallback for
+        // a node with no element behind it, which is fixtures only.
+        let digestInput = hostElementDigestInput(
+            node: node,
+            depth: depth,
+            actions: actions,
+            ancestorRoles: node.liveAncestorRoles ?? ancestorRoles,
             siblingIndex: siblingIndex
         )
 

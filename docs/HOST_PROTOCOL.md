@@ -377,8 +377,27 @@ Element digest = SHA-256 over the canonical JSON array
 value is capped at `limits.maxTextChars`, and digesting the capped copy would
 make every edit past character 500 invisible to the check.
 
-Ancestor roles are capped at 8 levels root-ward. Sibling index is the element's
-position among its parent's traversed children.
+Ancestor roles are capped at 8 levels root-ward, and are read from the live
+parent links rather than from the walk's own traversal: a walk elides wrapper
+nodes and `AXParent` does not, so a chain taken from the traversal at observe
+time cannot be reproduced at dispatch time on any tree that has wrappers in it.
+Sibling index is the element's position among its parent's traversed children.
+
+**The root of a snapshot has no ancestors and no siblings.** A snapshot is rooted
+at the window it was taken of, so within the frame there is nothing above the
+root: its `ancestorRoles` is `[]` and its `siblingIndex` is `0`, whatever the
+application element above it would say. This is not a shortcut. A window's place
+in its application's `AXWindows` is z-order in many applications, so a root that
+took its identity from its live position would change identity whenever a
+*different* window of the same application came forward.
+
+**Recorded and recomputed must come from one code path.** The digest inputs are
+recorded at observe time and recomputed at dispatch time, and every field of §4.3
+has to be read the same way at both ends or the check fails on something nothing
+touched — a false refusal that no amount of re-observing can clear, because
+re-observing produces the same disagreement. An executor that assembles this
+field list twice has two copies of §4.3 to keep in step; the reference executor
+assembles it once, in `hostElementDigestInput`, and both ends call it.
 
 The digest is exposed to the host as `element.digest` — written the one way §1.3
 declares, like every other hash here — and the host MUST echo it in every element
@@ -1048,7 +1067,17 @@ became expressible when refusals started carrying `path` (§1.1).
   guessing which one it was handed.
 - `expectWindowDigest` is required. A point has no element to anchor to, so the
   whole window is the anchor — which is what the host already does for coordinate
-  actions (`cua-driver-target-resolution.ts:336-365`).
+  actions (`cua-driver-target-resolution.ts:336-365`). The executor MUST
+  **recompute** that digest against the live window before dispatching, and MUST
+  refuse `window_changed` when it differs; comparing the echo against its own
+  record and stopping there checks the host against itself, and inside the TTL
+  the click goes to whatever the window has become — a resize rescales the point
+  silently, because the screen point is derived from the *current* bounds.
+  The recompute is over the elements the snapshot recorded, read the one way
+  §4.3 requires. This is the whole of point dispatch's binding, so an executor
+  whose two ends disagree by one field on one element does not lose an edge case:
+  it refuses every point dispatch ever made against it, and answers
+  `window_changed` for a window sitting still. See §12 vector 52.
 - `occlusionPolicy` defaults to `"any"` here, not `"same_app"`. A pixel is a
   pixel: anything on top of it owns it.
 - `startPoint` is present only for `drag`.
@@ -1905,6 +1934,30 @@ Observing a window that is expensive to read (§5.2):
     and asserts the answer arrived inside the ceiling — an executor whose ceiling
     is per-attempt rather than per-observation passes the unit half and fails
     this one, because §7.5 walks the tree up to four times.
+
+Dispatching a point at the frame just observed (§4.3, §6.3):
+
+52. `observe` a window, then immediately `dispatch.point` against the snapshot it
+    returned: the answer is not `window_changed`. Nothing moved between the two
+    calls, so the anchor the observation recorded must still recompute to the
+    same bytes.
+
+    The vector that fails against an executor whose two ends of §4.3 read one
+    field of one element differently. Measured: the walk recorded the snapshot
+    root's ancestor chain live as `["AXApplication"]` while the binding probe
+    answered `[]` for the root, so 1 element of 65 differed, the window digest
+    differed, and `dispatch.point` refused `window_changed` on every call against
+    every application on both displays. No element dispatch could see it —
+    `strictness: "element"` checks the element it targets — so an executor can
+    hold this defect with a full element matrix passing.
+
+    Its unit half puts a tree in front of the walk whose nodes report a live
+    parent chain, and asserts the root records neither an ancestor nor a sibling
+    index; an executor that answers the binding probe from its own record rather
+    than by recomputing passes every other point vector and cannot fail this one,
+    which is why the vector also has a live half. The live half needs a window
+    that does not change on its own — against a window with a clock in it,
+    `window_changed` is the correct answer and the vector proves nothing.
 
 ---
 

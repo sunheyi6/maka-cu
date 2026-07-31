@@ -21,6 +21,11 @@ final class FakeNode: HostAccessibilityNode {
     let selected: Bool?
     let frameInWindow: CGRect?
     let rawActionNames: [String]
+    /// What `AXParent` would answer for this node. `nil` is a node with nothing
+    /// behind it, which is what most fixtures want; a test that needs the seam
+    /// between the walk and the binding probe sets it, because that seam only
+    /// exists for nodes whose chain is read live.
+    let liveAncestorRoles: [String]?
     private let childNodes: [FakeNode]
 
     var axElement: AXUIElement? { nil }
@@ -39,6 +44,7 @@ final class FakeNode: HostAccessibilityNode {
         selected: Bool? = nil,
         frameInWindow: CGRect? = nil,
         rawActionNames: [String] = [],
+        liveAncestorRoles: [String]? = nil,
         children: [FakeNode] = []
     ) {
         self.role = role
@@ -53,6 +59,7 @@ final class FakeNode: HostAccessibilityNode {
         self.selected = selected
         self.frameInWindow = frameInWindow
         self.rawActionNames = rawActionNames
+        self.liveAncestorRoles = liveAncestorRoles
         self.childNodes = children
     }
 }
@@ -60,6 +67,11 @@ final class FakeNode: HostAccessibilityNode {
 /// Answers E1–E3 from configured state. With no `override` it reports exactly
 /// what the binding recorded, so a dispatch that should pass the binding check
 /// does, and a test that expects a refusal has to say which check fails.
+///
+/// It answers from the *record*, which makes it blind by construction to the one
+/// thing §4.3 actually rests on: whether the walk and the probe compute the same
+/// inputs from the same unchanged element. `FakeRecomputingProbe` below is the
+/// double for that.
 struct FakeBindingProbe: HostElementBindingProbe {
     var alive = true
     var startTime: UInt64? = hostTestProcessStartTime
@@ -73,6 +85,44 @@ struct FakeBindingProbe: HostElementBindingProbe {
     func processStartTime(pid: pid_t) -> UInt64? { startTime }
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
         override ?? binding.digestInput
+    }
+}
+
+/// Recomputes the digest inputs the way `HostAXBindingProbe` does: from the node
+/// as it is now, through `hostElementDigestInput`, with the live ancestor chain
+/// and a live sibling index — and with no traversal to fall back on, because this
+/// side reads one element rather than a tree.
+///
+/// The window under it is unchanged. Every refusal it produces is therefore a
+/// disagreement between the two ends about how to read something that did not
+/// move, which is the fault class this double exists to catch.
+///
+/// A reference type because the tokens it answers for are minted by the walk,
+/// which needs the server's registry, which needs the environment holding this.
+final class FakeRecomputingProbe: HostElementBindingProbe {
+    /// The nodes as the machine would answer for them now, by token.
+    var nodes: [String: FakeNode] = [:]
+    /// What a live `AXParent` read would answer for each token's position. The
+    /// root's entry is deliberately not its traversal index: a window's place in
+    /// its application's `AXWindows` is z-order in many apps, and §4.3's root
+    /// rule is what keeps that out of the digest.
+    var siblingIndexes: [String: Int] = [:]
+
+    func isReferenceAlive(_ binding: HostElementBinding) -> Bool { nodes[binding.token] != nil }
+    func processStartTime(pid: pid_t) -> UInt64? { hostTestProcessStartTime }
+
+    func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
+        guard let node = nodes[binding.token] else {
+            return nil
+        }
+
+        return hostElementDigestInput(
+            node: node,
+            depth: binding.depth,
+            actions: hostNormalizedActions(node.rawActionNames),
+            ancestorRoles: node.liveAncestorRoles ?? [],
+            siblingIndex: siblingIndexes[binding.token] ?? 0
+        )
     }
 }
 
@@ -243,7 +293,7 @@ struct FakeEnvironment: HostSystemEnvironment {
         nonmutating set { inventory.apps = newValue }
     }
     var windows: [HostWindowInfo] = []
-    var probe = FakeBindingProbe()
+    var probe: HostElementBindingProbe = FakeBindingProbe()
     /// Left `nil` by default: most tests assert a refusal that happens before the
     /// element is touched. The `dispatch.key` vectors that need a real
     /// `AXUIElement` use `hostTestElement`.
@@ -460,6 +510,72 @@ func hostTestSnapshot(
         bindings: [binding],
         imagePath: imagePath
     )
+}
+
+/// A snapshot minted by the **real** tree walk over a fake tree, so the window
+/// digest under test is the one `observe` would have recorded rather than one the
+/// fixture computed for itself. Pair it with `FakeRecomputingProbe` to put both
+/// ends of §4.3 in the same test.
+func hostTestWalkedSnapshot(
+    registry: HostSnapshotRegistry,
+    session: String,
+    root: FakeNode,
+    window: HostWindowInfo = hostTestWindow(),
+    image: HostImageReference? = hostTestImage()
+) -> (snapshot: HostSnapshot, walk: HostTreeWalkResult) {
+    let id = registry.nextSnapshotId()
+    let capturedAt = hostNowMs()
+    let walk = hostWalkTree(
+        root: root,
+        pid: window.pid,
+        processStartTime: hostTestProcessStartTime,
+        tokenPrefix: id,
+        bounds: HostTreeWalkBounds(maxElements: 100, maxDepth: 32, maxTextChars: 500)
+    )
+
+    let windowDigest = hostWindowDigest(
+        elementDigests: walk.elements.map(\.digest),
+        bounds: window.bounds,
+        title: window.title
+    )
+
+    let payload = HostSnapshotPayload(
+        snapshotId: id,
+        capturedAt: capturedAt,
+        target: HostWindowTarget(
+            pid: window.pid,
+            windowId: window.windowId,
+            appId: window.appId,
+            appName: window.appName,
+            title: window.title,
+            bounds: HostRect(window.bounds),
+            layer: window.layer,
+            zIndex: window.zIndex,
+            displayId: window.displayId
+        ),
+        windowDigest: windowDigest,
+        focusedElementToken: walk.focusedToken,
+        selectedText: nil,
+        image: image,
+        displays: [],
+        obscuringRects: [],
+        elements: walk.elements,
+        truncated: walk.truncated
+    )
+
+    let snapshot = HostSnapshot(
+        id: id,
+        session: session,
+        pid: window.pid,
+        windowId: window.windowId,
+        capturedAt: capturedAt,
+        windowDigest: windowDigest,
+        payload: payload,
+        bindings: walk.bindings,
+        imagePath: nil
+    )
+
+    return (snapshot, walk)
 }
 
 func hostTestImage(scale: Double = 2.0) -> HostImageReference {

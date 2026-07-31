@@ -218,6 +218,67 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual(before, reordered, "the digest is over a sorted set, not an order")
     }
 
+    // MARK: - The two ends of the binding check (§4.3)
+
+    func testTheSnapshotRootTakesNoIdentityFromTheApplicationAboveIt() {
+        // §4.3 — the walk is rooted at the window and never sees the application
+        // element above it, so inside the frame the root has no ancestors and no
+        // siblings. The rule is not decoration: reading the live chain for the
+        // root recorded `["AXApplication"]`, the probe answered `[]`, and the
+        // window digest differed on a window nothing had touched.
+        let button = FakeNode(role: "AXButton", label: "Send", liveAncestorRoles: ["AXGroup", "AXWindow"])
+        let group = FakeNode(role: "AXGroup", liveAncestorRoles: ["AXWindow"], children: [button])
+        let root = FakeNode(role: "AXWindow", liveAncestorRoles: ["AXApplication"], children: [group])
+
+        let walk = hostWalkTree(
+            root: root,
+            pid: hostTestPid,
+            processStartTime: hostTestProcessStartTime,
+            tokenPrefix: "snap_test",
+            bounds: HostTreeWalkBounds(maxElements: 100, maxDepth: 64, maxTextChars: 500)
+        )
+
+        XCTAssertEqual(walk.bindings[0].digestInput.ancestorRoles, [])
+        XCTAssertEqual(walk.bindings[0].digestInput.siblingIndex, 0)
+
+        // Below the root the chain is the live one, not the walk's own traversal:
+        // the walker elides wrapper nodes and `AXParent` does not, and taking the
+        // traversal chain here made every Electron target unreachable.
+        XCTAssertEqual(walk.bindings[1].digestInput.ancestorRoles, ["AXWindow"])
+        XCTAssertEqual(walk.bindings[2].digestInput.ancestorRoles, ["AXGroup", "AXWindow"])
+    }
+
+    func testTheTwoEndsOfTheBindingCheckAgreeOnAnElementThatDidNotMove() throws {
+        // The walk records the inputs and the probe recomputes them, and §4.3
+        // holds only if the two produce the same bytes from the same unchanged
+        // element. Asserted at the root, where they disagreed: no element
+        // dispatch could see it — it checks the element it targets — and
+        // `dispatch.point`, which anchors on the whole window, saw it every time.
+        let root = FakeNode(role: "AXWindow", title: "Untitled", liveAncestorRoles: ["AXApplication"])
+
+        let walk = hostWalkTree(
+            root: root,
+            pid: hostTestPid,
+            processStartTime: hostTestProcessStartTime,
+            tokenPrefix: "snap_test",
+            bounds: HostTreeWalkBounds(maxElements: 100, maxDepth: 64, maxTextChars: 500)
+        )
+
+        let binding = walk.bindings[0]
+        let probe = FakeRecomputingProbe()
+        probe.nodes = [binding.token: root]
+        // What a live read answers for a window that is third in `AXWindows`.
+        probe.siblingIndexes = [binding.token: 3]
+
+        let recomputed = try XCTUnwrap(probe.currentDigestInput(binding))
+        XCTAssertEqual(
+            hostChangedDigestFields(recorded: binding.digestInput, current: recomputed),
+            [],
+            "nothing moved, so no field may differ"
+        )
+        XCTAssertNil(hostVerifyBinding(binding, probe: probe))
+    }
+
     // MARK: - Bounded observation (§5, §7.4)
 
     func testTreeOverTheElementBudgetDeclaresTruncationAndStillReturnsUsableTokens() {

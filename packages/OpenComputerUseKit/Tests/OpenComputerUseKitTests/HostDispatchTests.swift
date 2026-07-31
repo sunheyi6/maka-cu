@@ -224,6 +224,69 @@ final class HostDispatchTests: XCTestCase {
         XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty, "a refused point dispatch posts nothing")
     }
 
+    /// §12 vector 52 — a window that did not change is dispatchable at a point.
+    ///
+    /// Every other point vector installs a snapshot whose digest the fixture
+    /// computed, and verifies it against a probe that answers from the record. So
+    /// the recompute always agreed with itself, and the executor could ship with
+    /// the two ends of §4.3 reading the same unchanged element differently:
+    /// against every real application, `dispatch.point` refused `window_changed`
+    /// on the frame it had just been handed.
+    ///
+    /// Here the snapshot comes from the real tree walk and the probe recomputes
+    /// from the nodes, so the two ends are both present and neither is the other.
+    func testAPointDispatchAgainstAWindowThatDidNotChangeIsNotRefused() throws {
+        // A window, one group, one button. Every node reports the live parent
+        // chain the probe will read — including the root, whose chain runs up
+        // into the application element the walk never sees.
+        let button = FakeNode(
+            role: "AXButton",
+            label: "Send",
+            liveAncestorRoles: ["AXGroup", "AXWindow"]
+        )
+        let group = FakeNode(role: "AXGroup", liveAncestorRoles: ["AXWindow"], children: [button])
+        let root = FakeNode(role: "AXWindow", liveAncestorRoles: ["AXApplication"], children: [group])
+
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        let probe = FakeRecomputingProbe()
+        environment.probe = probe
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let (snapshot, walk) = hostTestWalkedSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            root: root
+        )
+
+        probe.nodes = [
+            walk.elements[0].token: root,
+            walk.elements[1].token: group,
+            walk.elements[2].token: button,
+        ]
+        probe.siblingIndexes = [
+            // The root's live index is not its traversal index: this window is
+            // third in its application's `AXWindows`. §4.3's root rule is what
+            // keeps a *different* window coming forward out of this digest.
+            walk.elements[0].token: 3,
+            walk.elements[1].token: 0,
+            walk.elements[2].token: 0,
+        ]
+        harness.install(snapshot)
+
+        harness.send(dispatchPoint(snapshot: snapshot, expectDigest: snapshot.windowDigest, x: 100, y: 100))
+        let result = try harness.awaitResult()
+
+        XCTAssertNil(
+            (result["error"] as? [String: Any])?["code"] as? String,
+            "nothing in the window moved, so the anchor must still hold"
+        )
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["path"] as? String, "cg_event_pid")
+        XCTAssertFalse(harness.environment.pointEvents.posted.isEmpty)
+    }
+
     func testPointDispatchTellsAHostEchoMistakeApartFromAChangedWindow() throws {
         var environment = FakeEnvironment()
         environment.windows = [hostTestWindow()]

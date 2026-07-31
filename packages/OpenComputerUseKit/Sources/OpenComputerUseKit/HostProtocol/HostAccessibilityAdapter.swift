@@ -248,6 +248,10 @@ final class HostAXNode: HostAccessibilityNode {
         HostAX.actionNames(element)
     }
 
+    var liveAncestorRoles: [String]? {
+        HostAX.ancestorRoles(of: element)
+    }
+
     var children: [HostAccessibilityNode] {
         HostAX.children(of: element).map {
             HostAXNode(element: $0, windowBounds: windowBounds, focusedElement: focusedElement)
@@ -515,8 +519,11 @@ enum HostAX {
     }
 }
 
-/// The binding probe backed by live Accessibility. Mirrors `hostWalkTree`'s digest
-/// inputs exactly; if the two ever drift, every dispatch fails `element_changed`.
+/// The binding probe backed by live Accessibility. It builds its digest inputs
+/// through `hostElementDigestInput`, the same call `hostWalkTree` records them
+/// with, because a probe that assembles the §4.3 field list itself is a second
+/// copy of that list — and the two copies have drifted twice now, each time
+/// refusing dispatches against elements nothing had touched.
 struct HostAXBindingProbe: HostElementBindingProbe {
     let windowBounds: CGRect
 
@@ -537,29 +544,14 @@ struct HostAXBindingProbe: HostElementBindingProbe {
         }
 
         let node = HostAXNode(element: element, windowBounds: windowBounds, focusedElement: nil)
-        let actions = node.rawActionNames
-            .compactMap(HostElementActionName.normalized(rawAXAction:))
-            .reduce(into: [HostElementActionName]()) { unique, action in
-                if !unique.contains(action) {
-                    unique.append(action)
-                }
-            }
-
-        return HostElementDigestInput(
-            role: node.role,
-            subrole: node.subrole,
-            axIdentifier: node.axIdentifier,
-            title: node.title,
-            label: node.label,
-            untruncatedValue: node.value,
-            frameInWindow: node.frameInWindow,
-            actionNames: actions.map(\.rawValue),
-            // The snapshot is rooted at the window, so the root element has no
-            // ancestors and no siblings *inside the snapshot*. Reading them from
-            // the application element above it would fail E3 on every dispatch
-            // that targets the window itself.
-            ancestorRoles: binding.depth == 0 ? [] : HostAX.ancestorRoles(of: element),
-            siblingIndex: binding.depth == 0 ? 0 : HostAX.siblingIndex(of: element)
+        return hostElementDigestInput(
+            node: node,
+            depth: binding.depth,
+            actions: hostNormalizedActions(node.rawActionNames),
+            // No traversal to fall back on here: this side reads one element, not
+            // a tree. A live element always answers `liveAncestorRoles`.
+            ancestorRoles: node.liveAncestorRoles ?? [],
+            siblingIndex: HostAX.siblingIndex(of: element)
         )
     }
 }

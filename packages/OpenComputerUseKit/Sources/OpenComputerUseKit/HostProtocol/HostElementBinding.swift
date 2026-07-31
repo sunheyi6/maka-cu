@@ -47,6 +47,72 @@ public struct HostElementDigestInput: Equatable, Sendable {
     }
 }
 
+/// §5 — the raw AX action names mapped onto the closed set, deduplicated, in the
+/// order the application reported them. Shared because the digest is taken over
+/// this list and the wire carries it, and the two must be the same list.
+public func hostNormalizedActions(_ rawAXActions: [String]) -> [HostElementActionName] {
+    rawAXActions
+        .compactMap(HostElementActionName.normalized(rawAXAction:))
+        .reduce(into: [HostElementActionName]()) { unique, action in
+            if !unique.contains(action) {
+                unique.append(action)
+            }
+        }
+}
+
+/// §4.3 — one node's digest inputs, assembled the one way.
+///
+/// Both ends of the binding check come through here: `hostWalkTree` records what
+/// this returns, and `HostAXBindingProbe` recomputes it at dispatch. They used to
+/// assemble the field list separately, which is a second copy of §4.3 — and the
+/// copies have now drifted twice, each time refusing a dispatch against something
+/// nothing had touched:
+///
+/// - `ancestorRoles` taken from the walker's own traversal on one side and from
+///   `AXParent` on the other, which disagree on every Chromium tree.
+/// - `ancestorRoles` for the **root**: the walker read the live chain for every
+///   node, so a window recorded `["AXApplication"]`, while the probe answered
+///   `[]`. One element out of sixty-five, and no element dispatch could see it —
+///   it checks the element it targets. `dispatch.point` has no element to target,
+///   anchors on the whole window, and so refused `window_changed` on every call
+///   against every application.
+///
+/// `depth == 0` is the snapshot's root, and inside the frame the root has no
+/// ancestors and no siblings: the walk is rooted at the window and never sees the
+/// application element above it. Both halves of that rule are applied here so
+/// neither caller can hold half of it — which is the shape of the second drift.
+/// Emptiness is also the stabler reading: an application's `AXWindows` is ordered
+/// by z-order in many apps, so a root that took its identity from its live
+/// position would change it whenever a *different* window of the same app came
+/// forward.
+///
+/// `actions` is passed in rather than read from the node because the observation
+/// needs the same list for the wire, and `rawActionNames` is an Accessibility
+/// round trip — reading it once here and once there doubles a per-element IPC on
+/// the walk. The ancestor chain and the sibling index are autoclosures for the
+/// same reason: the root needs neither, and each is another round trip.
+public func hostElementDigestInput(
+    node: HostAccessibilityNode,
+    depth: Int,
+    actions: [HostElementActionName],
+    ancestorRoles: @autoclosure () -> [String],
+    siblingIndex: @autoclosure () -> Int
+) -> HostElementDigestInput {
+    let isRoot = depth == 0
+    return HostElementDigestInput(
+        role: node.role,
+        subrole: node.subrole,
+        axIdentifier: node.axIdentifier,
+        title: node.title,
+        label: node.label,
+        untruncatedValue: node.value,
+        frameInWindow: node.frameInWindow,
+        actionNames: actions.map(\.rawValue),
+        ancestorRoles: isRoot ? [] : ancestorRoles(),
+        siblingIndex: isRoot ? 0 : siblingIndex()
+    )
+}
+
 public enum HostDigest {
     public static func sha256(_ data: Data) -> String {
         "sha256:" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
