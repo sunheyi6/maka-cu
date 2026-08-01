@@ -41,6 +41,7 @@ extension HostProtocolServer {
             session: params.session,
             target: params.target,
             includeImage: params.includeImage ?? true,
+            includeMenu: params.menu ?? false,
             maxElements: params.maxElements ?? limits.maxElements,
             maxDepth: params.maxDepth ?? limits.maxDepth,
             maxTextChars: params.maxTextChars ?? limits.maxTextChars
@@ -83,6 +84,7 @@ extension HostProtocolServer {
         session: String,
         target: HostTargetSelector,
         includeImage: Bool,
+        includeMenu: Bool,
         maxElements: Int,
         maxDepth: Int,
         maxTextChars: Int
@@ -169,6 +171,34 @@ extension HostProtocolServer {
         // overlap and the sum still has to fit the host's request deadline.
         let walkDeadline = Date(timeIntervalSinceNow: Double(limits.treeWalkCeilingMs) / 1000)
 
+        // §5.8 — the menu bar is walked first, once, and outside the fit loop
+        // below.
+        //
+        // *First*, because the two walks share one deadline and only one of them
+        // has a bounded cost. Every menu measured came back in 118–522 ms cold,
+        // and its own ceiling caps it at 1500; a window has no such ceiling — a
+        // Finder window measured 5.22 s for 1711 elements, and an open panel
+        // reads at 23.6 ms an element with no limit at all. Walking the window
+        // first would mean the applications with the largest windows never got a
+        // menu, and those are the same applications whose menus carry the work.
+        //
+        // *Once*, because §7.5 may rebuild the payload four times to fit the byte
+        // limit, and the menu does not depend on the budget it halves: rebuilding
+        // it would spend up to four menu walks to produce four identical trees.
+        // The menu is also not what overruns `maxResponseBytes` — 500 elements
+        // with no frame encode to about 125 KB against a 1 MB limit — so shrinking
+        // the window is the whole of the remedy.
+        let menuWalk = includeMenu
+            ? walkMenuBar(
+                pid: resolved.pid,
+                processStartTime: startTime,
+                snapshotId: snapshotId,
+                maxDepth: maxDepth,
+                maxTextChars: maxTextChars,
+                deadline: min(walkDeadline, Date(timeIntervalSinceNow: Double(limits.menuWalkCeilingMs) / 1000))
+            )
+            : nil
+
         let walk = { (elementBudget: Int) -> HostTreeWalkResult in
             hostWalkTree(
                 root: HostAXNode(
@@ -230,7 +260,8 @@ extension HostProtocolServer {
                 displays: displays,
                 obscuringRects: obscuring,
                 elements: result.elements,
-                truncated: result.truncated
+                truncated: result.truncated,
+                menu: menuWalk?.observation
             )
 
             let encoded = (try? HostProtocolCodec.encoder.encode(payload)) ?? Data()
@@ -254,11 +285,64 @@ extension HostProtocolServer {
                     capturedAt: capturedAt,
                     windowDigest: payload.windowDigest,
                     payload: payload,
-                    bindings: walkResult.bindings,
+                    // §5.8 — menu bindings join the same dictionary, so
+                    // `dispatch.element` resolves a menu token through the one
+                    // lookup §4.2 allows. Their tokens cannot collide with the
+                    // window's: the two walks are given different prefixes.
+                    bindings: walkResult.bindings + (menuWalk?.bindings ?? []),
                     imagePath: image?.path
                 )
             )
         }
+    }
+
+    /// §5.8 — one menu bar, read from the application element, under its own
+    /// element bound and its own deadline.
+    ///
+    /// Returns `nil` for an application with no menu bar at all, which is how the
+    /// payload distinguishes "there is none" from "there is one and it is empty":
+    /// the second comes back as a single root element with no children, because
+    /// the walk always emits its root.
+    private func walkMenuBar(
+        pid: pid_t,
+        processStartTime: UInt64,
+        snapshotId: String,
+        maxDepth: Int,
+        maxTextChars: Int,
+        deadline: Date
+    ) -> (observation: HostMenuObservation, bindings: [HostElementBinding])? {
+        guard let root = environment.menuBarNode(pid: pid) else {
+            return (HostMenuObservation(
+                elements: [],
+                truncated: HostSnapshotTruncation(elements: false, depth: false)
+            ), [])
+        }
+
+        let result = hostWalkTree(
+            root: root,
+            pid: pid,
+            processStartTime: processStartTime,
+            // A prefix of its own, so a menu token and a window token from the
+            // same snapshot can never be the same string. §4.2 forbids parsing an
+            // index back out of a token, so the shape of the prefix is not a
+            // contract — only its uniqueness within the snapshot is.
+            tokenPrefix: "\(snapshotId)_menu",
+            bounds: HostTreeWalkBounds(
+                maxElements: limits.maxMenuElements,
+                maxDepth: maxDepth,
+                maxTextChars: maxTextChars,
+                deadline: deadline
+            ),
+            isMenu: true
+        )
+
+        // `focusedToken` is deliberately dropped. The snapshot has one focused
+        // element and it is the window's; a menu item is never it, and a second
+        // producer for that field is a second thing to keep consistent.
+        return (
+            HostMenuObservation(elements: result.elements, truncated: result.truncated),
+            result.bindings
+        )
     }
 
     // MARK: dispatch.element
@@ -761,6 +845,7 @@ extension HostProtocolServer {
                 session: snapshot.session,
                 target: .window(pid: snapshot.pid, windowId: snapshot.windowId),
                 includeImage: observeAfter.includeImage,
+                includeMenu: observeAfter.menu ?? false,
                 maxElements: limits.maxElements,
                 maxDepth: limits.maxDepth,
                 maxTextChars: limits.maxTextChars

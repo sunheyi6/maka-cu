@@ -181,13 +181,36 @@ public func hostScreenIsLocked() -> Bool {
 /// element, which is what keeps the reference alive for the snapshot's lifetime.
 final class HostAXNode: HostAccessibilityNode {
     let element: AXUIElement
-    private let windowBounds: CGRect
+    /// The window this node's frame is expressed relative to, or `nil` for a node
+    /// that has no position in any window — which is every node of the menu bar
+    /// (§5.8). It is an *absent* frame rather than a converted one because both
+    /// of the frames Accessibility offers here would be lies in this field's
+    /// declared space (§5.3): an unopened menu item reports the degenerate
+    /// `(0, 982, 0, 0)` — measured identical for all 346 of TextEdit's, all 452
+    /// of VS Code's — and a menu bar item reports a real *screen* rectangle that
+    /// would land outside the window once the origin was subtracted, and would
+    /// change the element's digest every time the window moved.
+    private let windowBounds: CGRect?
     private let focusedElement: AXUIElement?
+    /// §5.8 — set only on the menu bar root. The Apple menu is the system's, not
+    /// the application's: it is byte-identical across every application, it is
+    /// where `关机` and `重新启动` live, and it costs 59 of TextEdit's 346 menu
+    /// elements. The old renderer already dropped it
+    /// (`AccessibilitySnapshot.swift`, `shouldSkipChild`); this keeps that rule
+    /// and writes it into the protocol (§5.8) so it is a stated scope rather than
+    /// a silent omission.
+    private let dropsAppleMenu: Bool
 
-    init(element: AXUIElement, windowBounds: CGRect, focusedElement: AXUIElement?) {
+    init(
+        element: AXUIElement,
+        windowBounds: CGRect?,
+        focusedElement: AXUIElement?,
+        dropsAppleMenu: Bool = false
+    ) {
         self.element = element
         self.windowBounds = windowBounds
         self.focusedElement = focusedElement
+        self.dropsAppleMenu = dropsAppleMenu
     }
 
     var axElement: AXUIElement? { element }
@@ -237,7 +260,7 @@ final class HostAXNode: HostAccessibilityNode {
     }
 
     var frameInWindow: CGRect? {
-        guard let frame = HostAX.frame(element) else {
+        guard let windowBounds, let frame = HostAX.frame(element) else {
             return nil
         }
 
@@ -253,9 +276,11 @@ final class HostAXNode: HostAccessibilityNode {
     }
 
     var children: [HostAccessibilityNode] {
-        HostAX.children(of: element).map {
-            HostAXNode(element: $0, windowBounds: windowBounds, focusedElement: focusedElement)
-        }
+        HostAX.children(of: element)
+            .filter { !dropsAppleMenu || !HostAX.isAppleMenu($0) }
+            .map {
+                HostAXNode(element: $0, windowBounds: windowBounds, focusedElement: focusedElement)
+            }
     }
 }
 
@@ -471,6 +496,37 @@ enum HostAX {
         return (value as! AXUIElement)
     }
 
+    /// §5.8 — the application's menu bar. It hangs off the *application* element,
+    /// not off any window, which is why no amount of walking a window tree ever
+    /// reached it: `observe` roots its walk at the window, so `kAXMenuBarAttribute`
+    /// was never on any path it took, and menu roles were 0 in every observation
+    /// the executor has ever produced.
+    ///
+    /// This is a read. It does not activate the application, does not open a menu
+    /// and does not change the z-order — measured across seven applications in
+    /// the background, with the frontmost pid asserted unchanged.
+    static func menuBar(pid: pid_t) -> AXUIElement? {
+        guard let value = attribute(AXUIElementCreateApplication(pid), kAXMenuBarAttribute) else {
+            return nil
+        }
+        return (value as! AXUIElement)
+    }
+
+    /// The Apple menu, which is the first child of every `AXMenuBar`. AppKit
+    /// titles it `"Apple"` and does not localise that title: measured on a fully
+    /// Chinese-localised system, where every other menu bar item came back
+    /// translated (`文件`, `编辑`, `显示`) and this one did not, in all seven
+    /// applications probed.
+    ///
+    /// Matching the title rather than the index is deliberate. If AppKit ever
+    /// changed it, matching the title over-includes — the model sees a menu it
+    /// has no business in — while matching index 0 would silently drop the
+    /// application's own first menu. Of the two failures only the first is
+    /// visible on the wire.
+    static func isAppleMenu(_ element: AXUIElement) -> Bool {
+        string(element, kAXTitleAttribute) == "Apple"
+    }
+
     static func selectedText(_ element: AXUIElement) -> String? {
         string(element, kAXSelectedTextAttribute)
     }
@@ -603,7 +659,16 @@ struct HostAXBindingProbe: HostElementBindingProbe {
             return nil
         }
 
-        let node = HostAXNode(element: element, windowBounds: windowBounds, focusedElement: nil)
+        // §5.8 — a menu binding is rebuilt with no window to be relative to, so
+        // this side suppresses the frame exactly as the walk did. Passing
+        // `windowBounds` here regardless would recompute a frame the observation
+        // never emitted, and `element_changed` / `changed: ["frame"]` would
+        // refuse every menu dispatch.
+        let node = HostAXNode(
+            element: element,
+            windowBounds: binding.isMenu ? nil : windowBounds,
+            focusedElement: nil
+        )
         return hostElementDigestInput(
             node: node,
             depth: binding.depth,

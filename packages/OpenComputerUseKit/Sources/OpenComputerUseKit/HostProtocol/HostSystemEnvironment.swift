@@ -51,6 +51,19 @@ public protocol HostSystemEnvironment {
     /// Front-to-back, as §5.4 requires.
     func onScreenWindows() -> [HostWindowInfo]
     func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement?
+    /// §5.8 — the application's menu bar as a walkable tree, or `nil` when the
+    /// application has no menu bar at all.
+    ///
+    /// It hands back a node rather than an `AXUIElement`, unlike
+    /// `windowElement(pid:windowId:bounds:)` above, for two reasons. The two
+    /// decisions that make a menu node different from a window node — it reports
+    /// no frame (§5.3), and it drops the Apple menu (§5.8) — belong on the side
+    /// that knows it is looking at a menu, rather than being re-applied by every
+    /// caller. And a seam that answers with an opaque Accessibility reference
+    /// cannot be handed a tree by a test: a fake `AXUIElement` has no children,
+    /// so every assertion about the shape of a menu observation would need a real
+    /// application on the screen.
+    func menuBarNode(pid: pid_t) -> HostAccessibilityNode?
     func focusedElement(pid: pid_t) -> AXUIElement?
     /// §6.4 — `focusPolicy: "acquire"`. Writes `kAXFocusedAttribute` and answers
     /// whether the write itself was accepted. It is not proof that focus moved:
@@ -121,6 +134,23 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
 
     public func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? {
         HostAX.window(pid: pid, windowId: windowId, bounds: bounds)
+    }
+
+    public func menuBarNode(pid: pid_t) -> HostAccessibilityNode? {
+        guard let element = HostAX.menuBar(pid: pid) else {
+            return nil
+        }
+
+        return HostAXNode(
+            element: element,
+            // §5.3 — a menu has no window to be relative to, so it reports no
+            // frame at all rather than a rectangle in a space this field does not
+            // have. See `HostAXNode.windowBounds`.
+            windowBounds: nil,
+            // The snapshot has one focused element and it is the window's.
+            focusedElement: nil,
+            dropsAppleMenu: true
+        )
     }
 
     public func focusedElement(pid: pid_t) -> AXUIElement? {

@@ -281,6 +281,15 @@ public final class HostElementBinding {
     /// Retained for the life of the snapshot. `nil` only in tests and fixtures.
     public let element: AXUIElement?
     public let observed: HostObservedElement
+    /// §5.8 — this element came from the menu bar rather than from the window
+    /// tree, which the dispatch-time probe has to know before it reads anything:
+    /// a menu element's frame is suppressed at observe time, and a probe that
+    /// read the live one back would compare `nil` against `(0, 982, 0, 0)` and
+    /// refuse every menu dispatch `element_changed` with `changed: ["frame"]` on
+    /// an element nothing had touched. This is the same seam that has already
+    /// drifted twice over `ancestorRoles`, so the fact travels with the binding
+    /// rather than being re-derived on the far side.
+    public let isMenu: Bool
 
     public init(
         token: String,
@@ -290,7 +299,8 @@ public final class HostElementBinding {
         processStartTime: UInt64,
         digestInput: HostElementDigestInput,
         element: AXUIElement?,
-        observed: HostObservedElement
+        observed: HostObservedElement,
+        isMenu: Bool = false
     ) {
         self.token = token
         self.parentToken = parentToken
@@ -301,6 +311,7 @@ public final class HostElementBinding {
         self.digest = hostElementDigest(digestInput)
         self.element = element
         self.observed = observed
+        self.isMenu = isMenu
     }
 }
 

@@ -70,6 +70,7 @@ final class HostSettleLiveTests: XCTestCase {
                 session: "s1",
                 target: .window(pid: window.pid, windowId: window.windowId),
                 includeImage: false,
+                includeMenu: false,
                 maxElements: limits.maxElements,
                 maxDepth: limits.maxDepth,
                 maxTextChars: limits.maxTextChars

@@ -13,6 +13,23 @@ public struct HostObservedElement: Codable, Equatable, Sendable {
     public let role: String
     public let subrole: String?
     public let axIdentifier: String?
+    /// `AXTitle`. It is a separate field from `label` rather than folded into it
+    /// because the two are separate attributes and §4.3 digests them separately:
+    /// a wire that merged them could not report `detail.changed: ["title"]`
+    /// against anything the host had been shown.
+    ///
+    /// It was missing from `maka.cu/2` until the menu bar needed it, and it was
+    /// already a hole before that. §4.3 lists `title` among the digest inputs and
+    /// §6.2 reports it in `detail.changed`, so the protocol could tell a host
+    /// *the title changed* about a field it had never sent — the host's only
+    /// possible response being to re-observe and compare nothing.
+    ///
+    /// Measured on a background Calculator: of 35 window elements 23 carry a
+    /// `label`, because AppKit's controls set `AXDescription` (`删除`, `清除`,
+    /// `百分比`). Of 126 menu elements **2** do. Menu items name themselves with
+    /// `AXTitle` and set no description at all, so without this field a menu
+    /// observation is 126 anonymous nodes and the feature is worthless.
+    public let title: String?
     public let label: String?
     public let value: String?
     public let placeholder: String?
@@ -29,6 +46,7 @@ public struct HostObservedElement: Codable, Equatable, Sendable {
 }
 
 public enum HostElementTextField: String, Codable, Equatable, Sendable {
+    case title
     case label
     case value
     case placeholder
@@ -79,6 +97,38 @@ public struct HostSnapshotTruncation: Codable, Equatable, Sendable {
     public let depth: Bool
 }
 
+/// §5.8 — the application's menu bar, when the host asked for it.
+///
+/// A second array rather than a second root inside `elements`, for three reasons
+/// that are all about what the *rest* of the executor would otherwise have to
+/// remember:
+///
+/// 1. `windowDigest` is taken over `elements`, and settling recomputes it — one
+///    Accessibility round trip per recorded element, per look. Folding 274 menu
+///    elements into a Finder window's 1500 would have made every settle sample
+///    18% more expensive for elements that cannot change while the window does.
+/// 2. `elements` means "what is in this window", and the menu bar is not in it.
+///    A consumer that filtered by role would be guessing at a distinction the
+///    wire can simply state.
+/// 3. Menu elements carry no `frame` (§5.3) and their `enabled` answers a
+///    different question (§5.8). Separating them means no consumer has to ask
+///    which kind of element it is holding before it reads a field.
+///
+/// Tokens are minted from the same snapshot and resolve through the same
+/// dictionary, so `dispatch.element` addresses a menu item exactly as it
+/// addresses a button.
+public struct HostMenuObservation: Codable, Equatable, Sendable {
+    /// Rooted at `AXMenuBar`. Empty means the application has no menu bar at all;
+    /// a single root element with no children means it has one and it is empty.
+    public let elements: [HostObservedElement]
+    public let truncated: HostSnapshotTruncation
+
+    public init(elements: [HostObservedElement], truncated: HostSnapshotTruncation) {
+        self.elements = elements
+        self.truncated = truncated
+    }
+}
+
 public struct HostSnapshotPayload: Codable, Equatable, Sendable {
     public let snapshotId: String
     public let capturedAt: Int64
@@ -91,6 +141,11 @@ public struct HostSnapshotPayload: Codable, Equatable, Sendable {
     public let obscuringRects: [HostRect]
     public let elements: [HostObservedElement]
     public let truncated: HostSnapshotTruncation
+    /// §5.8 — absent when the host did not ask for the menu bar, so "we did not
+    /// look" and "we looked and there is nothing" are different reads. Every
+    /// other optional here is `null`-when-absent because absence is a fact about
+    /// the window; this one is a fact about the request.
+    public let menu: HostMenuObservation?
 }
 
 // MARK: - Tree source
@@ -168,6 +223,7 @@ public func hostWalkTree(
     processStartTime: UInt64,
     tokenPrefix: String,
     bounds: HostTreeWalkBounds,
+    isMenu: Bool = false,
     now: () -> Date = Date.init
 ) -> HostTreeWalkResult {
     var elements: [HostObservedElement] = []
@@ -218,11 +274,15 @@ public func hostWalkTree(
         let selfToken = token(for: nextIndex)
         nextIndex += 1
 
+        let title = hostTruncate(node.title, limit: bounds.maxTextChars)
         let label = hostTruncate(node.label, limit: bounds.maxTextChars)
         let value = hostTruncate(node.value, limit: bounds.maxTextChars)
         let placeholder = hostTruncate(node.placeholder, limit: bounds.maxTextChars)
 
         var truncatedFields: [HostElementTextField] = []
+        if title.wasTruncated {
+            truncatedFields.append(.title)
+        }
         if label.wasTruncated {
             truncatedFields.append(.label)
         }
@@ -258,6 +318,7 @@ public func hostWalkTree(
             role: node.role,
             subrole: node.subrole,
             axIdentifier: node.axIdentifier,
+            title: title.text,
             label: label.text,
             value: value.text,
             placeholder: placeholder.text,
@@ -280,7 +341,8 @@ public func hostWalkTree(
                 processStartTime: processStartTime,
                 digestInput: digestInput,
                 element: node.axElement,
-                observed: observed
+                observed: observed,
+                isMenu: isMenu
             )
         )
 

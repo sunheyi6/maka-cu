@@ -64,6 +64,9 @@ struct HostObserveParams: Decodable {
     let maxElements: Int?
     let maxDepth: Int?
     let maxTextChars: Int?
+    /// §5.8 — absent is `false`. The menu bar costs a walk of its own and most
+    /// observations do not need it, so it is asked for rather than assumed.
+    let menu: Bool?
 }
 
 struct HostPermissionsCheckParams: Decodable {
@@ -89,6 +92,13 @@ struct HostScreenCaptureParams: Decodable {
 struct HostObserveAfter: Decodable {
     let includeImage: Bool
     let settle: HostSettleMode
+    /// §5.8 — absent is `false`, as it is on `observe`. It exists because a menu
+    /// press changes what the *rest* of the menu will do: `文件 > 打开…` brings a
+    /// document up, and with it `存储`, `导出为PDF…` and `关闭` all move from
+    /// disabled to enabled. Without this the host would have to spend a whole
+    /// second `observe` to see that, and that observe would supersede the frame
+    /// the dispatch had just handed it.
+    let menu: Bool?
 }
 
 struct HostDispatchElementParams: Decodable {

@@ -507,6 +507,39 @@ public struct HostLimits: Codable, Equatable, Sendable {
     /// element and rising — 35 s for 1500 elements, which is not an observation
     /// the host will ever see the end of.
     public var treeWalkCeilingMs: Int = 6000
+    /// §5.8 — how many elements one menu bar observation may carry.
+    ///
+    /// Its own bound rather than a share of `maxElements`, because the two
+    /// compete and the competition has a wrong winner. Measured on macOS 26.5,
+    /// whole menu bars with the Apple menu excluded: Calculator 141, System
+    /// Settings 164, Stickies 219, Obsidian 234, Finder 274, TextEdit 287,
+    /// Preview 331, VS Code 393. Against the same applications' windows:
+    /// TextEdit 13 elements, Preview 25, Calculator 65, Finder **1711**.
+    ///
+    /// So a shared budget fails at both ends. TextEdit's observation would be 96%
+    /// menu, burying the thirteen elements the host actually asked about; and
+    /// Finder's window already exceeds `maxElements` on its own, so the menu
+    /// would be cut to nothing — in the application whose menu bar carries `前往`,
+    /// `显示 > 排序方式` and every file operation there is. The applications with
+    /// the most window to describe are the ones whose menus matter most, which is
+    /// exactly the case a shared budget starves.
+    ///
+    /// 500 clears the largest measured menu by 27%. It is not a request
+    /// parameter: half a menu tree is not half as useful the way half a window
+    /// tree is — a path the model cannot see the end of is a path it cannot take
+    /// — so a host that wants less menu asks for none.
+    public var maxMenuElements: Int = 500
+    /// §5.8 — and how long it may spend reading them, carved out of
+    /// `treeWalkCeilingMs` rather than added to it.
+    ///
+    /// Element count is not a proxy for time — the reason `treeWalkCeilingMs`
+    /// exists — and it is no more of one here. Measured cold, first read after
+    /// launch: Finder's 333 in 118 ms, VS Code's 452 in 159 ms, Calculator's 200
+    /// in 265 ms, TextEdit's 346 in 428 ms, Preview's 390 in 522 ms; warm, half
+    /// of that. 1500 ms is nearly three times the slowest cold read and leaves at
+    /// least 4.5 s of the walk budget to the window, which is the part that can
+    /// be pathological: a Finder window measured 1711 elements in 5.22 s.
+    public var menuWalkCeilingMs: Int = 1500
     public var shutdownGraceMs: Int = 3000
     public var imageDirBudgetBytes: Int = 268_435_456
 

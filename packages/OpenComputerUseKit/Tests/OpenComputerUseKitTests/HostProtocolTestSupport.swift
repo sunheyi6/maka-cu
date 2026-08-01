@@ -330,6 +330,10 @@ struct FakeEnvironment: HostSystemEnvironment {
     /// `AXUIElement` use `hostTestElement`.
     var focused: AXUIElement?
     var windowElement: AXUIElement?
+    /// §5.8 — the menu bar tree, or `nil` for an application with no menu bar.
+    /// Left `nil` by default so an observation that did not ask for the menu is
+    /// the same test it always was.
+    var menuBar: FakeNode?
     var pointEvents = PointEventLog()
     var keyEvents = KeyEventLog()
     var focusRequests = FocusRequestLog()
@@ -353,6 +357,7 @@ struct FakeEnvironment: HostSystemEnvironment {
     }
 
     func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? { windowElement }
+    func menuBarNode(pid: pid_t) -> HostAccessibilityNode? { menuBar }
     func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool { focusRequests.record(element) }
     func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe { probe }
@@ -540,6 +545,7 @@ func hostTestBinding(
             role: digestInput.role,
             subrole: nil,
             axIdentifier: nil,
+            title: digestInput.title,
             label: digestInput.label,
             value: nil,
             placeholder: nil,
@@ -604,7 +610,8 @@ func hostTestSnapshot(
         displays: [],
         obscuringRects: [],
         elements: [binding.observed],
-        truncated: HostSnapshotTruncation(elements: false, depth: false)
+        truncated: HostSnapshotTruncation(elements: false, depth: false),
+        menu: nil
     )
 
     return HostSnapshot(
@@ -668,7 +675,8 @@ func hostTestWalkedSnapshot(
         displays: [],
         obscuringRects: [],
         elements: walk.elements,
-        truncated: walk.truncated
+        truncated: walk.truncated,
+        menu: nil
     )
 
     let snapshot = HostSnapshot(

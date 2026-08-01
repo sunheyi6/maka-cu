@@ -605,6 +605,7 @@ the window list is read.
   "role": "AXButton",
   "subrole": "AXCloseButton",
   "axIdentifier": "sendButton",
+  "title": null,
   "label": "Send",
   "value": null,
   "placeholder": null,
@@ -620,6 +621,20 @@ the window list is read.
 
 - `parentToken` is `null` for the root. `null` and absent are the same on the
   wire; the executor SHOULD emit `null` for clarity.
+- **`title` is `AXTitle` and `label` is `AXDescription`, and they are two
+  fields.** Which one an element names itself with is the application's choice,
+  not a shape the host may assume: measured on a background Calculator, 23 of 35
+  window elements carry a `label` — AppKit's controls set `AXDescription`
+  (`删除`, `清除`, `百分比`) — and 2 of 126 menu elements do, because menu items
+  name themselves with `AXTitle` and set no description at all. A host that reads
+  only one of the two sees an anonymous tree in whichever half of macOS chose the
+  other.
+
+  They are not merged into one field because §4.3 digests them separately and
+  §6.2 reports `detail.changed: ["title"]`. `maka.cu/2` carried the digest input
+  without carrying the field, so the executor could tell a host *the title
+  changed* about something it had never sent — and the host's only possible reply
+  was to re-observe and compare nothing.
 - `actions` is a **closed set** of normalised names:
   `press`, `confirm`, `open`, `show_menu`, `raise`, `cancel`, `pick`,
   `increment`, `decrement`, `scroll_up`, `scroll_down`, `scroll_left`,
@@ -629,8 +644,9 @@ the window list is read.
   (`ComputerUseService.swift:835-845`) and its "`X` is not a valid secondary
   action" class of error.
 - `truncated` lists which of this element's text fields were cut at
-  `maxTextChars`. An empty array is not omitted, so "was anything cut" is a
-  field read, not a length comparison.
+  `maxTextChars`, from the closed set `title`, `label`, `value`, `placeholder`.
+  An empty array is not omitted, so "was anything cut" is a field read, not a
+  length comparison.
 
 **Truncation is never silent.** `truncated.elements` is `true` when the tree hit
 `maxElements`, `truncated.depth` when it hit `maxDepth`. A truncated tree is
@@ -894,6 +910,230 @@ action start because a user can revoke at any time
 - A launch that takes the foreground when `foregroundTaken` was meant to be false
   is still `ok: true` with `foregroundTaken: true`. It happened; hiding it does
   not un-happen it.
+
+### 5.8 The menu bar
+
+`observe` takes `menu: true` and answers with a second element array beside
+`elements`:
+
+```json
+{ "snapshot": {
+    "elements": [ … ],
+    "truncated": { "elements": false, "depth": false },
+    "menu": {
+      "elements": [ … ],
+      "truncated": { "elements": false, "depth": false }
+    } } }
+```
+
+The elements are the same `element` shape §5.2 defines, minted from the same
+snapshot and resolved through the same dictionary, so `dispatch.element`
+addresses `文件 > 导出为 PDF…` exactly as it addresses a button. There is no new
+target kind, no new dispatch kind and no new method: a menu item exposes
+`AXPress`, which normalises to `press`, which is what
+`{ "kind": "click", "button": "left" }` already requires.
+
+**Why this exists.** Before it, no observation this executor produced contained a
+single menu element — not a truncated one, not a filtered one, *none*. `observe`
+roots its walk at a window element and `kAXMenuBarAttribute` hangs off the
+**application**, so the menu bar was never on any path the walk took. Measured:
+Calculator 65 elements, TextEdit 1500, zero `AXMenuBar` / `AXMenuBarItem` /
+`AXMenu` / `AXMenuItem` between them. Against a real-machine matrix of five
+models and six tasks, three of the four tasks that failed for every model failed
+on this one fact — *save as PDF*, *find in project*, *rotate image* are menu
+commands and nothing else in the observation could reach them. The other route
+is closed for a reason §14 already records: a main-menu key equivalent needs a
+key window, a background application has none, and taking the foreground to give
+it one is the invariant this executor does not trade.
+
+**`menu` is absent unless asked for.** Not `null`, not an empty array: absent. A
+menu costs a walk of its own and most observations do not need one, so "we did
+not look" and "we looked and there is nothing" must be different reads. An
+application with no menu bar answers `"menu": { "elements": [] }`; an application
+whose menu bar is empty answers with one root element and no children, because
+the walk always emits its root.
+
+**A menu item names itself with `title`, not `label`.** This is the ordinary rule
+of §5.2 rather than anything special about menus, but it is where the rule
+bites: 2 of Calculator's 126 menu elements carry a `label` and every named one
+carries a `title`. A consumer that reads `label` alone gets an anonymous tree.
+`title` did not exist on this wire until the menu bar needed it; §5.2 records
+why it was already missing.
+
+**`elements` and `menu.elements` are separate, and `windowDigest` is over
+`elements` only.** The digest anchors `dispatch.point` and is recomputed on
+every settle sample — one Accessibility round trip per recorded element, per
+look — and a menu folded into it would make the same window digest differently
+depending on whether menus had been asked for, while charging every settle for
+elements that cannot change when the window does.
+
+#### The Apple menu is not the application's menu
+
+The first child of every `AXMenuBar` is the Apple menu, and it is excluded. This
+is a stated scope, not a truncation: `truncated` stays `false` and nothing about
+it is silent.
+
+It is the system's menu rather than the application's — byte-identical under
+every application — it is where `关机`, `重新启动` and `退出登录` live, and it
+costs 59 of TextEdit's 346 menu elements. AppKit titles it `"Apple"` and does not
+localise that title: measured on a fully Chinese-localised system, where every
+other menu bar item came back translated (`文件`, `编辑`, `显示`), this one did
+not, in all seven applications probed. The old renderer already dropped it
+(`AccessibilitySnapshot.swift`, `shouldSkipChild`); this keeps the rule and
+writes it down.
+
+#### A menu element carries no `frame`
+
+`frame` is `null` for every element under `menu`, and that is not a gap in the
+read. Accessibility offers two rectangles here and both would be lies in this
+field's declared space (§5.3):
+
+- An **unopened menu item** reports a degenerate `(0, 982, 0, 0)` — measured
+  identical for all 346 of TextEdit's, all 390 of Preview's and all 452 of VS
+  Code's, on a display whose logical height is 982. It is a placeholder, not a
+  position.
+- A **menu bar item** reports a real rectangle, but in *screen* points. §5.3
+  makes `element.frame` window-local, and the menu bar is not in the window: the
+  conversion would put it at a negative offset outside every window, in an image
+  the snapshot's own capture does not contain.
+
+The second is the worse of the two, because `frame` is a digest input (§4.3): a
+menu item whose frame was recorded relative to a window would change its digest
+every time the window moved, and every menu dispatch would be refused
+`element_changed` with `changed: ["frame"]` on an element nothing had touched.
+The suppression is therefore applied at **both** ends of the binding check — the
+walk and the dispatch-time probe — which is the seam that has already drifted
+twice over `ancestorRoles`.
+
+A host that wants to draw the agent cursor at a menu item has nothing to draw
+with, and that is correct: the executor did not click a pixel, it performed an
+accessibility action on an element that is not on screen.
+
+#### `enabled` is trustworthy as read, and it is not what it looks like
+
+`enabled` on a menu item is **live and exact**, and the executor neither refreshes
+it nor qualifies it. What it answers, though, is a question about the *observed
+application's current state*, not about whether the command exists — and for a
+background application the answer is frequently `false`.
+
+Three measurements, macOS 26.5, in order, because each one closes off a reading
+of the one before:
+
+1. **Opening the menu does not change it.** Every menu of TextEdit, Preview and
+   Finder, read before opening and again while open: 0 items drifted out of 190.
+2. **The menus really did open**, so (1) is not a vacuous comparison of the same
+   read twice. Measured on the same call: the `AXMenu` frame went
+   `(0, 982, 0, 0)` → `(112, 34, 239, 414)`, a layer-101 window appeared for the
+   pid, and the menu bar item's `AXSelected` went `false` → `true`.
+3. **Activating the application does change it, sweepingly.** TextEdit,
+   background → foreground, 293 items compared: **110 flipped**, and 111 flipped
+   back when the foreground was returned. `文件 > 导出为PDF…`, `存储`, `关闭`,
+   `编辑 > 撤销`, `粘贴`, `全选` all went `false` → `true`; `编辑 > 查找` went
+   `true` → `false`.
+
+So this is not a stale cache that opening the menu would refresh. It is AppKit
+answering `validateMenuItem:` against a responder chain with no key window in it
+— the same fact §14 records about main-menu key equivalents, arriving through a
+different door.
+
+**And the executor's existing `element_disabled` refusal is load-bearing here.**
+`AXUIElementPerformAction(item, "AXPress")` on a disabled menu item returns
+`kAXErrorSuccess` and does nothing at all. Measured against a background
+Calculator: `编辑 > 拷贝`, reported `enabled: false`, pressed — `AXPress` returned
+success and the pasteboard changeCount did not move (253 → 253); `显示 > 基础`,
+reported `enabled: true`, pressed through the identical call — the window went
+674×408 → 230×408. Without the refusal every disabled menu item would come back
+`outcome: "ok"`, and the model would be told a command had run that had not. The
+refusal is `element_disabled`, `outcome: "refused"`, `path: "none"`, and it is
+the one honest answer available: the item is there, it is named, and the
+application will not run it in the state it is in.
+
+The executor does **not** activate the application to make an item enabled. That
+is the host's decision to take or not, with the fact in front of it.
+
+#### An unexpanded submenu is reported as it is found
+
+Some menus are populated by `menuNeedsUpdate:` when they are opened. The executor
+does not open them: it reports the `AXMenu` node with the children it has, which
+for such a menu is none.
+
+This is rarer than it sounds. Measured across the same applications, counting
+`AXMenu` nodes that came back with zero children before anything was opened:
+Calculator 0 of 12, Finder 0 of 19, VS Code 0 of 31, TextEdit 1 of 31, Preview 1
+of 26 — and both of the two are the same menu, *Import From Device*, the
+Continuity Camera list. `打开最近使用` / *Open Recent*, the case this rule was
+written expecting to lose, is fully populated before opening.
+
+Expanding them was considered and rejected. Opening a menu is a visible,
+stateful side effect on somebody else's application performed to satisfy a read,
+and the measurement above prices the alternative honestly: it would open up to
+31 menus per observation to recover, at most, a device list.
+
+#### Budget
+
+The menu has its own element bound, `limits.maxMenuElements` (500), and its own
+share of the walk clock, `limits.menuWalkCeilingMs` (1500), taken out of
+`limits.treeWalkCeilingMs` rather than added to it. Neither is a request
+parameter.
+
+A shared budget is wrong at both ends, and the numbers say so. Menu bars, Apple
+menu excluded: Calculator 141, System Settings 164, Stickies 219, Obsidian 234,
+Finder 274, TextEdit 287, Preview 331, VS Code 393. The same applications'
+windows: TextEdit 13, Preview 25, Calculator 65, Finder **1711**. Folded into one
+`maxElements` of 1500, TextEdit's observation would be 96% menu — burying the
+thirteen elements the host asked about — while Finder's window already exceeds
+the bound on its own, so its menu would be cut to nothing. Finder is the
+application whose menu bar carries `前往`, `显示 > 排序方式` and every file
+operation there is. **The applications with the most window to describe are the
+ones whose menus matter most, which is exactly the case a shared budget starves.**
+
+`maxMenuElements` is not a request parameter because half a menu tree is not half
+as useful the way half a window tree is: a path the model cannot see the end of
+is a path it cannot take. A host that wants less menu asks for none.
+
+The menu is walked **first**, and **once**:
+
+- *First*, because the two walks share one deadline and only one of them has a
+  bounded cost. Every menu measured read in 118–522 ms cold and about half that
+  warm — Finder 333 elements in 118 ms, VS Code 452 in 159 ms, Calculator 200 in
+  265 ms, TextEdit 346 in 428 ms, Preview 390 in 522 ms — against a window walk
+  with no ceiling of its own, where a Finder window measured 1711 elements in
+  5.22 s and an open panel reads at 23.6 ms an element indefinitely. Walking the
+  window first would mean the applications with the largest windows never got a
+  menu.
+- *Once*, because §7.5 may rebuild the payload four times to fit
+  `maxResponseBytes`, and the menu does not depend on the budget that halving
+  shrinks. Rebuilding it would spend four menu walks to produce four identical
+  trees. The menu is not what overruns the byte limit either: 500 elements with
+  no frame encode to roughly 125 KB against 1 MB, so shrinking the window is the
+  whole of the remedy.
+
+`menu.truncated` reports the menu's own cut and never the window's, and
+`truncated` reports the window's and never the menu's. A menu cut by either bound
+raises `menu.truncated.elements`, under the same rule and with the same known gap
+§5.2 states: the field says *that* something was cut, not *why*. Silence is what
+is forbidden — a host shown a short menu with `truncated: false` concludes the
+command is not there, and stops looking.
+
+#### `observeAfter.menu`
+
+`dispatch.element`, `dispatch.point` and `dispatch.key` take `menu` in
+`observeAfter` on the same terms, absent meaning `false`. It exists because a
+menu press changes what the rest of the menu will do: `文件 > 打开…` brings a
+document up, and `存储`, `导出为PDF…` and `关闭` all move from disabled to
+enabled with it. Without it the host would have to spend a second `observe` to
+see that, and that observe would supersede the frame the dispatch had just handed
+it (§4.1).
+
+#### What the host still owns
+
+Everything the model reads. The executor emits `role`, `label`, `enabled`,
+`actions` and the parent links, and nothing else — no path string, no rendered
+`文件 > 导出为 PDF…`, no note about what `enabled: false` means. §13 is unchanged:
+the menu arrives as data, and Maka's runtime owns every word made out of it. In
+particular, the host is the only side that may tell the model that a disabled
+menu item might become available if its application were in front — that is a
+statement about what the *user* would see, and the executor does not have one.
 
 ---
 
@@ -2522,6 +2762,68 @@ Managing a window (§6.1):
     `kAXErrorAttributeUnsupported`, which must arrive as `outcome: "failed"` with
     `path: "ax_action"` rather than as an `ok` that did nothing.
 
+59. `menu` is absent from a snapshot that did not ask for it and present when it
+    did; an application with no menu bar answers with the key and an empty array,
+    and an application with an empty menu bar answers with one root element and
+    no children. The three are different facts and the wire distinguishes all
+    three: a host that read an absent key as "no menus" could not tell it from
+    "you never asked", and would stop looking for a command that is there.
+
+60. Asking for the menu does not change `windowDigest` and does not change
+    `elements`. This is what keeps the menu out of the settle loop: the digest is
+    recomputed once per settle sample at one Accessibility round trip per
+    recorded element, and a menu folded into `elements` would have charged every
+    settle of every window for 141–393 elements that cannot move while the window
+    does. It also keeps one window from digesting two ways depending on a flag in
+    the request that observed it.
+
+61. A menu is cut by its own bound and says so in its own field:
+    `menu.truncated.elements` rises and `truncated.elements` does not. The bound
+    asserted is the shipped `limits.maxMenuElements`, not one injected by the
+    test — the number *is* the claim, since 500 has to clear the largest menu bar
+    measured (VS Code, 393 with the Apple menu excluded) or the applications that
+    need menus most are the ones that get cut.
+
+62. **Live.** A background application's menu items are readable and pressable,
+    and neither reading nor pressing takes the foreground. The live test observes
+    a background Calculator with `menu: true` and asserts, with the frontmost pid
+    checked across every call:
+
+    - the menu came back at all, rooted at `AXMenuBar`, with items exposing
+      `press` — the whole of what was missing before;
+    - **no element under `menu` carries a `frame`**, which is the half no unit
+      test can reach: the value being suppressed is the degenerate
+      `(0, 982, 0, 0)` AppKit puts on a real unopened menu item, and no fake
+      produces it;
+    - nothing under `menu` is titled `"Apple"`, so the system menu — and
+      `关机` with it — is out of scope rather than merely far down the list;
+    - a `dispatch.element` against a menu token is **not** refused
+      `element_changed`, which is the assertion that the frame suppression was
+      applied at *both* ends of §4.3 rather than only at the walk. An executor
+      that suppressed it only on the way out passes every unit vector above and
+      fails this one on every menu item of every application;
+    - pressing an *enabled* item lands: `显示 > 基础` / `显示 > 科学` on a
+      background Calculator moves the window between 230×408 and 674×408, which
+      is observable from outside the application and reversible from inside the
+      test. The item is chosen for exactly that: a menu press with a side effect
+      the test cannot undo is not a test, it is damage.
+
+    The disabled half of the pair — that `AXPress` on an item the application
+    reports disabled returns `kAXErrorSuccess` and does nothing — is asserted as
+    a refusal in the unit vectors, because the executor must refuse before it
+    reaches the API. What the live test would otherwise be asserting is
+    AppKit's behaviour, and the measurement is recorded in §5.8 instead.
+
+63. `title` and `label` arrive as separate fields and neither overwrites the
+    other: a title-only element is named, a description-only element is named,
+    and an element carrying both keeps both. A cut title raises `"title"` in
+    `truncated`. The vector exists because the wire carried `label` alone while
+    §4.3 digested `title` and §6.2 could report `changed: ["title"]` — and
+    because which of the two an element uses is the application's choice, so an
+    executor that reads one of them returns an anonymous tree for whichever half
+    of macOS chose the other. Measured: 23 of 35 Calculator window elements carry
+    `label`, 2 of its 126 menu elements do.
+
 - **No tool schemas, no descriptions, no instructions.** `ToolDefinitions.swift`
   and `computerUseServerInstructions` do not survive. Maka's runtime owns every
   model-facing word, and a second copy in the executor is a second copy to drift.
@@ -2641,6 +2943,28 @@ nowhere else.
   question above — and it needs measuring on more than one application first.
   Both tables here are TextEdit on one machine, with one Calculator row beside
   them.
+
+  **The second of the three is now taken, and it does not close this.** §5.8 puts
+  the menu bar in the observation and lets `dispatch.element` press a menu item
+  through `AXPress`, so `cmd+s`, `cmd+p` and `cmd+w` have a route that does not
+  go through a key window: the model presses `文件 > 存储` rather than sending the
+  shortcut. Measured, that route works on a background application — a
+  depth-2 item pressed on a background Calculator moved its window 674×408 →
+  230×408 with the frontmost pid unchanged.
+
+  What it does not do is make `dispatch.key` honest. A `cmd+s` sent as a key is
+  still written to the pid, still cannot reach `performKeyEquivalent:`, and is
+  still reported `outcome: "ok"`. The menu route is an *alternative* the host can
+  now choose, not a repair of the keyboard one, and the executor still has no way
+  to tell a menu equivalent from a responder-chain binding at the point the key
+  arrives. What has changed is that the host now has somewhere else to go.
+
+  §5.8 also puts a number on the cost of the responder chain being empty, which
+  this section only had one row for: of TextEdit's 293 menu items, **110 report
+  `enabled: false` while the application is in the background and flip to `true`
+  the moment it is activated** — `导出为PDF…`, `存储`, `撤销`, `粘贴`, `全选`
+  among them. The menu route reaches those items and reports them honestly; it
+  does not make a background application willing to run them.
 
 - **A window cannot be restored from the Dock without activating its
   application.** §6.1 ships `minimize_window` and no inverse, and the reason is
