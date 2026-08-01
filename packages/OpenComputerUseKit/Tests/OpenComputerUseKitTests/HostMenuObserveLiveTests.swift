@@ -136,6 +136,60 @@ final class HostMenuObserveLiveTests: XCTestCase {
             "menu elements belong to `menu`, not to `elements`"
         )
 
+        // MARK: Every menu element's binding, not just the one that gets pressed
+
+        // The press below goes through `显示 > 基础`, whose parent is an `AXMenu`.
+        // A top-level bar item's parent is the `AXMenuBar`, and that is the one
+        // place the walk drops a child (the Apple menu) — so it is the one place
+        // the walk's numbering and the probe's could disagree. They did: the walk
+        // filtered before indexing and `siblingIndex` did not, so every bar item
+        // recorded an index one below what dispatch recomputed, and every press
+        // on 文件 / 编辑 / 显示 was refused `element_changed` with
+        // `changed: ["siblingIndex"]` in the same second it was observed. The
+        // press below never saw it, because a submenu item has no Apple menu
+        // among its siblings.
+        //
+        // Recomputing is a read: nothing here presses anything, so it can cover
+        // all of them, including the items pressing would be destructive.
+        let environment = HostLiveEnvironment()
+        if let menuRoot = environment.menuBarNode(pid: app.pid) {
+            let walk = hostWalkTree(
+                root: menuRoot,
+                pid: app.pid,
+                processStartTime: hostProcessStartTime(pid: app.pid) ?? 0,
+                tokenPrefix: "seam_menu",
+                bounds: HostTreeWalkBounds(
+                    maxElements: 2000,
+                    maxDepth: 24,
+                    maxTextChars: 2000,
+                    deadline: Date().addingTimeInterval(20)
+                ),
+                isMenu: true
+            )
+            let probe = HostAXBindingProbe(windowBounds: .zero)
+            var disagreed: [String] = []
+            for binding in walk.bindings {
+                guard let now = probe.currentDigestInput(binding) else { continue }
+                let fields = hostChangedDigestFields(recorded: binding.digestInput, current: now)
+                if !fields.isEmpty {
+                    let name = binding.observed.label ?? binding.observed.title ?? binding.observed.role
+                    let names = fields.map { $0.rawValue }.joined(separator: ",")
+                    disagreed.append("\(name) [\(binding.observed.role)] → \(names)")
+                }
+            }
+            XCTAssertEqual(
+                disagreed,
+                [],
+                "\(disagreed.count) of \(walk.bindings.count) menu bindings disagree with what dispatch recomputes for them, so those elements are addressable in the observation and refuse every dispatch"
+            )
+            let barItems = walk.bindings.filter { $0.observed.role == "AXMenuBarItem" }
+            XCTAssertGreaterThan(
+                barItems.count,
+                2,
+                "the seam check has to actually reach top-level bar items, which are the ones that regressed"
+            )
+        }
+
         // MARK: Vector 62 — the binding check agrees with itself across the seam
 
         func sizeOfCalculatorWindow() -> CGSize? {

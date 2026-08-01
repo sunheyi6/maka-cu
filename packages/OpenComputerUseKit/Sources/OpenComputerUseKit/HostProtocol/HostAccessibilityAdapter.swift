@@ -276,8 +276,7 @@ final class HostAXNode: HostAccessibilityNode {
     }
 
     var children: [HostAccessibilityNode] {
-        HostAX.children(of: element)
-            .filter { !dropsAppleMenu || !HostAX.isAppleMenu($0) }
+        HostAX.traversedChildren(of: element, dropsAppleMenu: dropsAppleMenu)
             .map {
                 HostAXNode(element: $0, windowBounds: windowBounds, focusedElement: focusedElement)
             }
@@ -624,14 +623,44 @@ enum HostAX {
         return roles
     }
 
+    /// The children a walk actually descends into.
+    ///
+    /// The Apple menu is dropped here, and dropping it renumbers every sibling
+    /// after it. That is the whole reason this exists as one function: the walk
+    /// filtered, `siblingIndex` did not, and so every top-level menu recorded a
+    /// sibling index one lower than the probe recomputed at dispatch. Every menu
+    /// dispatch was refused `element_changed` with `changed: ["siblingIndex"]` —
+    /// against an element nothing had touched, in the same second it was
+    /// observed. The menu bar was addressable in the observation and unusable in
+    /// practice, which is worse than not shipping it.
+    ///
+    /// It is the third time the two sides of §4.3 have been assembled
+    /// separately and drifted (after `ancestorRoles` from two traversals, and
+    /// again for the root). One producer, both callers.
+    static func traversedChildren(of element: AXUIElement, dropsAppleMenu: Bool) -> [AXUIElement] {
+        children(of: element).filter { !dropsAppleMenu || !isAppleMenu($0) }
+    }
+
     /// The element's position among its parent's traversed children, computed
-    /// through the same traversal used at observe time so the two cannot disagree.
+    /// through the same traversal used at observe time so the two cannot
+    /// disagree — which now means the same function, not the same intent.
+    ///
+    /// Whether the Apple menu is dropped is decided here by reading the parent,
+    /// not by passing a flag down from the caller. The walk drops it only at the
+    /// menu bar itself — `dropsAppleMenu` is set on the root node and not
+    /// propagated to its children — so "the parent is an `AXMenuBar`" is the same
+    /// rule stated as something both sides can observe. Passing `isMenu` from the
+    /// binding instead would over-drop at every depth below the first, and be
+    /// indistinguishable from correct until an application shipped a submenu item
+    /// titled `Apple`.
     static func siblingIndex(of element: AXUIElement) -> Int {
         guard let parent = parent(of: element) else {
             return 0
         }
 
-        return children(of: parent).firstIndex(where: { CFEqual($0, element) }) ?? 0
+        let dropsAppleMenu = string(parent, kAXRoleAttribute) == kAXMenuBarRole as String
+        return traversedChildren(of: parent, dropsAppleMenu: dropsAppleMenu)
+            .firstIndex(where: { CFEqual($0, element) }) ?? 0
     }
 }
 
