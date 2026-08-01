@@ -284,6 +284,87 @@ final class HostMenuObserveLiveTests: XCTestCase {
     /// here: the second press has to go through a second snapshot, and its menu
     /// tokens are a second set.
     @discardableResult
+    /// §6.5 — a refused action reports the path it took, and it took none.
+    ///
+    ///     OPEN_COMPUTER_USE_RUN_MENU_LIVE_TEST=1 \
+    ///         swift test --filter testARefusedActionSaysNothingWasDispatched
+    ///
+    /// Calculator advertises `AXRaise` on its window and answers -25205 when it
+    /// is performed. That combination cannot be built from a fixture: a fake
+    /// element fails with `invalidUIElement`, which is a different arm.
+    ///
+    /// What it cost, measured across 30 real model runs: `raise` was 36 of 217
+    /// calls and 29 of them failed. 15 were this refusal, and because it claimed
+    /// `path: "ax_action"` the host spent the frame — so each one also produced
+    /// a `reobserve_required` on the next call and an `observe` after that. One
+    /// refused action, three calls, 15-20% of everything the models did.
+    func testARefusedActionSaysNothingWasDispatched() throws {
+        guard ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_RUN_MENU_LIVE_TEST"] == "1" else {
+            throw XCTSkip("Set OPEN_COMPUTER_USE_RUN_MENU_LIVE_TEST=1 to run this live test")
+        }
+        guard AXIsProcessTrusted() else {
+            throw XCTSkip("Accessibility is not granted to the process running these tests")
+        }
+        guard !hostScreenIsLocked() else {
+            throw XCTSkip("The screen is locked")
+        }
+
+        let app = try backgroundLaunchedCalculator()
+        let window = try XCTUnwrap(try windowOf(pid: app.pid), "Calculator came up with no window")
+        let imageDirectory = try makeImageDirectory()
+        defer { try? FileManager.default.removeItem(at: imageDirectory) }
+
+        let inbox = ResponseInbox()
+        let server = HostProtocolServer(
+            output: HostOutputWriter { inbox.append($0) },
+            environment: HostLiveEnvironment()
+        )
+        server.handle(line: #"""
+        {"jsonrpc":"2.0","id":1,"method":"host.hello","params":{"protocol":"\#(makaCuProtocolVersion)","hostPid":\#(ProcessInfo.processInfo.processIdentifier),"imageDir":"\#(imageDirectory.path)","allowGlobalPointer":false}}
+        """#)
+        _ = try inbox.next()
+        server.handle(line: #"{"jsonrpc":"2.0","id":2,"method":"session.begin","params":{"session":"s1","captureScope":"window"}}"#)
+        _ = try inbox.next()
+
+        server.handle(line: #"""
+        {"jsonrpc":"2.0","id":3,"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":\#(window.pid),"windowId":\#(window.windowId)},"includeImage":false}}
+        """#)
+        let observed = try XCTUnwrap(try inbox.next(timeout: 30)["result"] as? [String: Any])
+        let snapshot = try XCTUnwrap(observed["snapshot"] as? [String: Any])
+        let snapshotId = try XCTUnwrap(snapshot["snapshotId"] as? String)
+        let elements = try XCTUnwrap(snapshot["elements"] as? [[String: Any]])
+
+        let root = try XCTUnwrap(elements.first, "the walk always emits its root")
+        try XCTSkipUnless(
+            (root["actions"] as? [String])?.contains("raise") == true,
+            "this window does not advertise raise, so there is nothing to refuse"
+        )
+
+        server.handle(line: #"""
+        {"jsonrpc":"2.0","id":4,"method":"dispatch.element","params":{"session":"s1","snapshotId":"\#(snapshotId)","toolCallId":"call_4","elementToken":"\#(try XCTUnwrap(root["token"] as? String))","expectElementDigest":"\#(try XCTUnwrap(root["digest"] as? String))","action":{"kind":"secondary_action","action":"raise"}}}
+        """#)
+        let result = try XCTUnwrap(try inbox.next(timeout: 30)["result"] as? [String: Any])
+
+        print("  raise on pid \(app.pid): ok=\(result["ok"] ?? "?") path=\(result["path"] ?? "?") error=\((result["error"] as? [String: Any])?["code"] ?? "-")")
+
+        // Either answer is legitimate — TextEdit and Finder accept the same
+        // action — so this asserts the pairing rather than the verdict.
+        if result["ok"] as? Bool == false {
+            XCTAssertEqual(
+                (result["error"] as? [String: Any])?["code"] as? String,
+                "dispatch_refused",
+                "an advertised action the application rejects is a refusal, not a protocol error"
+            )
+            XCTAssertEqual(
+                result["path"] as? String,
+                "none",
+                "AXUIElementPerformAction returned an error, so nothing reached the target and the host must not spend the frame"
+            )
+        } else {
+            XCTAssertEqual(result["path"] as? String, "ax_action")
+        }
+    }
+
     private func pressMode(
         server: HostProtocolServer,
         inbox: ResponseInbox,

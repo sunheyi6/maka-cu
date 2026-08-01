@@ -585,7 +585,9 @@ extension HostProtocolServer {
             let previous = HostAX.stringLikeValue(element, kAXValueAttribute)
             let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
             guard result == .success else {
-                return failed(.dispatchRefused, path: .axAttribute)
+                // A rejected write did not happen, and `path` is what the
+                // dispatch did. `ax_attribute` here claimed a route was taken.
+                return failed(.dispatchRefused, path: .none)
             }
 
             let readback = HostAX.stringLikeValue(element, kAXValueAttribute)
@@ -616,7 +618,7 @@ extension HostProtocolServer {
 
             let result = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, axRange)
             guard result == .success else {
-                return failed(.dispatchRefused, path: .axAttribute)
+                return failed(.dispatchRefused, path: .none)
             }
 
             return PerformedAction(
@@ -684,7 +686,7 @@ extension HostProtocolServer {
 
         let previous = subject.read(element)
         guard subject.write(element) == .success else {
-            return failed(.dispatchRefused, path: .axAttribute)
+            return failed(.dispatchRefused, path: .none)
         }
 
         // What the application reports straight away. For a geometry write this
@@ -773,7 +775,16 @@ extension HostProtocolServer {
                 // A failure part-way through a double or triple click means the
                 // earlier presses did happen, so "nothing happened" would be a
                 // lie; only a first-press failure is `failed`.
-                return delivered == 0 ? failed(.dispatchRefused, path: .axAction) : unknownOutcome()
+                //
+                // `path: .none` on that first-press failure, because `path` is
+                // what the dispatch *did* and a refused `AXUIElementPerformAction`
+                // did nothing — §6.5's word for that is `none`. Reporting
+                // `ax_action` said a route had been taken, and a host that reads
+                // it that way spends the frame: measured across 30 real runs,
+                // 15 refused `raise` calls each cost a second call answering
+                // `reobserve_required` and a third spent re-observing a window
+                // nothing had touched. That is 15-20% of every call made.
+                return delivered == 0 ? failed(.dispatchRefused, path: .none) : unknownOutcome()
             }
         }
 
