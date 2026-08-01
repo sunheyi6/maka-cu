@@ -553,14 +553,32 @@ public struct HostLimits: Codable, Equatable, Sendable {
 /// `mouse_down` / `mouse_up` are therefore not advertised — a half click has no
 /// target-bound form that survives the executor's own event source going away
 /// between the two halves — and `jpeg` waits for the capture stream that needs it.
-/// `unminimize_window` is absent for the same reason, and it is the one absence
-/// worth naming here because the action plainly exists on the machine. Writing
-/// `AXMinimized = false` restores the window and **activates its application**:
-/// measured on macOS 26.5 with no `AXMain` write anywhere near it, Calculator's
-/// pid took the foreground 300 ms after the write and TextEdit's did the same.
-/// §6.1 forbids an action that brings its target to the front, so the executor
-/// has no way to perform it and does not advertise one. §14 carries the
-/// measurement and what closing it would cost.
+/// `unminimize_window` is absent, and it is the one absence worth naming here
+/// because the action plainly exists on the machine.
+///
+/// The reason recorded here used to be that writing `AXMinimized = false`
+/// activates the application. That is **not** what this machine does: sampling
+/// the frontmost pid at 100 Hz for three seconds after the write, across
+/// Calculator, TextEdit and Preview, 900 samples caught the foreground moving
+/// zero times. The earlier measurement is left named rather than deleted
+/// because it was taken through the executor's whole dispatch path and this one
+/// was not, and the two have not been reconciled.
+///
+/// The reason it is absent is simpler and is not in doubt: **a minimized window
+/// is not in the window list**. `CGWindowListCopyWindowInfo` is asked for
+/// `.optionOnScreenOnly`, a minimized window is not on screen, and measured
+/// end to end — `list_apps` drops to `windowCount: 0` and `observe` answers
+/// `target_missing` the moment `minimize_window` succeeds. There is nothing
+/// left for an unminimize to address.
+///
+/// Closing that needs the window list to carry off-screen windows, and the
+/// unfiltered list is not a drop-in: 213 layer-0 windows against 17 on screen, and
+/// `kCGWindowIsOnscreen` is absent from its entries, so there is no field to
+/// separate the two. The honest alternative — enumerate `AXWindows` per pid and
+/// match them back to `CGWindowID` — has no public API for that mapping, which
+/// is the actual piece of work. §14 carries it.
+///
+/// Until then `minimize_window` is a one-way door, and the host says so.
 public struct HostCapabilities: Codable, Equatable, Sendable {
     public var captureStream: Bool = false
     public var elementActions: [String] = [

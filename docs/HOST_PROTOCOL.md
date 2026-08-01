@@ -3061,6 +3061,35 @@ nowhere else.
   and cannot take it out, which is a real cost and is why this is written down
   here rather than left as an omission.
 
+  **A later measurement disagrees, and both are kept.** Writing `AXMinimized =
+  false` directly, then sampling the frontmost pid at 100 Hz for three seconds,
+  across Calculator, TextEdit and Preview: 900 samples, the foreground moved
+  zero times. The difference between the two is not established — the table
+  above was taken through the executor's whole dispatch path, including the
+  `observeAfter` that follows every dispatch, and the later probe writes the one
+  attribute and nothing else. Until that is resolved, the activation claim is
+  evidence rather than fact, and this section no longer rests on it.
+
+  **What the absence does rest on is that there is nothing left to address.** A
+  minimized window is not in the window list: `CGWindowListCopyWindowInfo` is
+  asked for `.optionOnScreenOnly` and a minimized window is not on screen.
+  Measured end to end — the moment `minimize_window` succeeds, `list_apps` for
+  that application reports `windowCount: 0` and `observe` answers
+  `target_missing`. An `unminimize_window` would need a `windowId`, and the
+  observation that would have carried one no longer exists.
+
+  Closing it means carrying off-screen windows in the list, and the unfiltered
+  `CGWindowListCopyWindowInfo` is not a drop-in: 213 layer-0 entries against 17
+  on screen, and `kCGWindowIsOnscreen` is absent from its entries, so there is
+  no field to tell the two apart. The alternative — enumerate `AXWindows` per
+  pid and match each back to its `CGWindowID` — has no public API for that
+  mapping. That mapping is the actual work, and it is the reason this is still
+  open rather than a small omission.
+
+  Until then `minimize_window` is a one-way door, and the tool description says
+  so in as many words: a model that minimises a window should know, before it
+  does, that only a person can bring it back.
+
   Three ways out, none taken. Advertise it and declare that it activates —
   rejected, because §5.7's own rule says a field that is a constant is not a
   field, and "always takes the foreground" is a constant. Restore the previous
