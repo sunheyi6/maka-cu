@@ -57,6 +57,34 @@ enum HostTargetSelector: Decodable, Equatable {
     }
 }
 
+/// §5.8 — how much of the menu bar to walk.
+///
+/// A menu bar is not one size. TextEdit's is 369 elements and 157 ms; its window
+/// is 16 elements and 58 ms. Asking for all of it on every observation makes the
+/// menu 94% of what the model reads and 90% of what the observation costs, to
+/// answer a question — "which menus are there" — that nine elements answer.
+///
+/// So the scope is named rather than assumed:
+///
+/// - `bar` walks the bar and its top-level items and stops. Nine elements, 5 ms.
+///   It is what an observation carries by default, because a model that cannot
+///   see the menu bar at all does not know to ask about it.
+/// - `menu` walks one named menu in full while still listing every other item,
+///   which is what a person does: you open 文件, you do not read all seven menus.
+/// - `all` walks everything, for a host that wants the whole tree in one call.
+struct HostMenuScope: Decodable {
+    enum Kind: String, Decodable {
+        case bar
+        case menu
+        case all
+    }
+
+    let scope: Kind
+    /// Required by `menu` and rejected for the other two, rather than ignored:
+    /// a `title` that silently does nothing reads as "there is no such menu".
+    let title: String?
+}
+
 struct HostObserveParams: Decodable {
     let session: String
     let target: HostTargetSelector
@@ -64,9 +92,8 @@ struct HostObserveParams: Decodable {
     let maxElements: Int?
     let maxDepth: Int?
     let maxTextChars: Int?
-    /// §5.8 — absent is `false`. The menu bar costs a walk of its own and most
-    /// observations do not need it, so it is asked for rather than assumed.
-    let menu: Bool?
+    /// §5.8 — absent walks no menu at all.
+    let menu: HostMenuScope?
 }
 
 struct HostPermissionsCheckParams: Decodable {
@@ -98,7 +125,7 @@ struct HostObserveAfter: Decodable {
     /// disabled to enabled. Without this the host would have to spend a whole
     /// second `observe` to see that, and that observe would supersede the frame
     /// the dispatch had just handed it.
-    let menu: Bool?
+    let menu: HostMenuScope?
 }
 
 struct HostDispatchElementParams: Decodable {

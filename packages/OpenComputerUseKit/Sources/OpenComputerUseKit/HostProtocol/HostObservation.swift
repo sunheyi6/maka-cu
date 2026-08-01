@@ -224,6 +224,19 @@ public func hostWalkTree(
     tokenPrefix: String,
     bounds: HostTreeWalkBounds,
     isMenu: Bool = false,
+    // Whether a node's subtree is walked at all. It decides descent only: the
+    // node itself is already emitted, and — this is the part that matters — the
+    // sibling numbering it is asked about is unaffected, because `siblingIndex`
+    // comes from `children.enumerated()` over the full child list either way.
+    //
+    // That distinction is not academic. Filtering a *child list* is what broke
+    // menu dispatch: the walk dropped the Apple menu before indexing and the
+    // dispatch-time probe did not, so every bar item recorded an index one below
+    // what dispatch recomputed and was refused `element_changed` on the first
+    // press. A predicate that only says "do not go deeper here" cannot
+    // reintroduce that, which is why the menu scope is expressed this way rather
+    // than by handing the walk a shorter list of menus.
+    expands: (HostAccessibilityNode, Int) -> Bool = { _, _ in true },
     now: () -> Date = Date.init
 ) -> HostTreeWalkResult {
     var elements: [HostObservedElement] = []
@@ -357,6 +370,14 @@ public func hostWalkTree(
         // the host has no way to see that from the wire.
         if !children.isEmpty, depth + 1 >= bounds.maxDepth {
             hitDepthBound = true
+            return
+        }
+
+        // Not a truncation: the caller asked for this shape, so neither
+        // `truncated` flag is raised. Saying "the tree was cut short" about a
+        // scope the host chose would put the host's own request in front of the
+        // model as a limitation of the machine.
+        guard expands(node, depth) else {
             return
         }
 

@@ -41,7 +41,7 @@ extension HostProtocolServer {
             session: params.session,
             target: params.target,
             includeImage: params.includeImage ?? true,
-            includeMenu: params.menu ?? false,
+            menuScope: params.menu,
             maxElements: params.maxElements ?? limits.maxElements,
             maxDepth: params.maxDepth ?? limits.maxDepth,
             maxTextChars: params.maxTextChars ?? limits.maxTextChars
@@ -66,7 +66,25 @@ extension HostProtocolServer {
         if let maxTextChars = params.maxTextChars, maxTextChars < 1 || maxTextChars > limits.maxTextChars {
             return HostRPCError.invalidParams("maxTextChars")
         }
+        if let menu = params.menu, let reason = hostMenuScopeRejection(menu) {
+            return reason
+        }
         return nil
+    }
+
+    /// §5.8 — `title` belongs to `menu` and to nothing else.
+    ///
+    /// Ignoring a `title` on `all` would be indistinguishable, from the host's
+    /// side, from a menu whose name it got wrong: both come back with the whole
+    /// tree. Ignoring a missing one on `menu` is worse — the answer is every bar
+    /// item and no contents, which reads exactly like "that menu is empty".
+    func hostMenuScopeRejection(_ menu: HostMenuScope) -> HostRPCError? {
+        switch menu.scope {
+        case .menu:
+            return (menu.title ?? "").isEmpty ? HostRPCError.invalidParams("menu.title") : nil
+        case .bar, .all:
+            return menu.title == nil ? nil : HostRPCError.invalidParams("menu.title")
+        }
     }
 
     func requireSession(id: Int, session: String) -> Bool {
@@ -84,7 +102,7 @@ extension HostProtocolServer {
         session: String,
         target: HostTargetSelector,
         includeImage: Bool,
-        includeMenu: Bool,
+        menuScope: HostMenuScope?,
         maxElements: Int,
         maxDepth: Int,
         maxTextChars: Int
@@ -188,16 +206,17 @@ extension HostProtocolServer {
         // The menu is also not what overruns `maxResponseBytes` — 500 elements
         // with no frame encode to about 125 KB against a 1 MB limit — so shrinking
         // the window is the whole of the remedy.
-        let menuWalk = includeMenu
-            ? walkMenuBar(
+        let menuWalk = menuScope.flatMap { scope in
+            walkMenuBar(
                 pid: resolved.pid,
                 processStartTime: startTime,
                 snapshotId: snapshotId,
+                scope: scope,
                 maxDepth: maxDepth,
                 maxTextChars: maxTextChars,
                 deadline: min(walkDeadline, Date(timeIntervalSinceNow: Double(limits.menuWalkCeilingMs) / 1000))
             )
-            : nil
+        }
 
         let walk = { (elementBudget: Int) -> HostTreeWalkResult in
             hostWalkTree(
@@ -307,6 +326,7 @@ extension HostProtocolServer {
         pid: pid_t,
         processStartTime: UInt64,
         snapshotId: String,
+        scope: HostMenuScope,
         maxDepth: Int,
         maxTextChars: Int,
         deadline: Date
@@ -329,11 +349,23 @@ extension HostProtocolServer {
             tokenPrefix: "\(snapshotId)_menu",
             bounds: HostTreeWalkBounds(
                 maxElements: limits.maxMenuElements,
-                maxDepth: maxDepth,
+                // `bar` stops one level below the bar, and stopping by depth is
+                // the walk's own bound, so `truncated.depth` comes back true. It
+                // is true: there is more menu below. The host says what it means.
+                maxDepth: scope.scope == .bar ? min(maxDepth, 2) : maxDepth,
                 maxTextChars: maxTextChars,
                 deadline: deadline
             ),
-            isMenu: true
+            isMenu: true,
+            // Depth 1 is a top-level bar item — the walk is rooted at the bar
+            // itself. Every one of them is still emitted; only the named one is
+            // opened.
+            expands: { node, depth in
+                guard scope.scope == .menu, depth == 1 else {
+                    return true
+                }
+                return node.title == scope.title || node.label == scope.title
+            }
         )
 
         // `focusedToken` is deliberately dropped. The snapshot has one focused
@@ -845,7 +877,7 @@ extension HostProtocolServer {
                 session: snapshot.session,
                 target: .window(pid: snapshot.pid, windowId: snapshot.windowId),
                 includeImage: observeAfter.includeImage,
-                includeMenu: observeAfter.menu ?? false,
+                menuScope: observeAfter.menu,
                 maxElements: limits.maxElements,
                 maxDepth: limits.maxDepth,
                 maxTextChars: limits.maxTextChars

@@ -31,11 +31,8 @@ final class HostMenuObservationTests: XCTestCase {
         let without = try harness.snapshot()
         XCTAssertNil(without["menu"], "a request that did not ask for the menu must not carry the key at all")
 
-        harness.send(observe(id: 4, menu: false))
-        XCTAssertNil(try harness.snapshot()["menu"], "`menu: false` is the same as omitting it")
-
-        harness.send(observe(id: 5, menu: true))
-        let menu = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any], "`menu: true` must produce the key")
+        harness.send(observe(id: 5, menu: #"{"scope":"all"}"#))
+        let menu = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any], "`scope: all` must produce the key")
         XCTAssertNotNil(menu["elements"])
         XCTAssertNotNil(menu["truncated"])
     }
@@ -49,7 +46,7 @@ final class HostMenuObservationTests: XCTestCase {
 
         let harness = ServerHarness(environment: environment)
         try harness.begin()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
 
         let menu = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any])
         XCTAssertEqual((menu["elements"] as? [[String: Any]])?.count, 0)
@@ -65,13 +62,121 @@ final class HostMenuObservationTests: XCTestCase {
 
         let harness = ServerHarness(environment: environment)
         try harness.begin()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
 
         let menu = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any])
         let elements = try XCTUnwrap(menu["elements"] as? [[String: Any]])
         XCTAssertEqual(elements.count, 1)
         XCTAssertEqual(elements[0]["role"] as? String, "AXMenuBar")
         XCTAssertNil(elements[0]["parentToken"] as? String, "the menu root has no parent")
+    }
+
+
+    // MARK: - §5.8 scope: how much menu a host is asking for
+
+    func testTheBarScopeStopsAtTheTopLevelItems() throws {
+        // What an observation carries by default, and the reason it can: on a
+        // real machine TextEdit's whole menu is 369 elements and 157 ms against a
+        // 16-element, 58 ms window — the menu would be 94% of what the model
+        // reads and 90% of what the observation costs, to answer "which menus are
+        // there". At this scope that answer is nine elements and 5 ms.
+        let harness = try menuHarness()
+        harness.send(observe(id: 3, menu: #"{"scope":"bar"}"#))
+
+        let menu = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any])
+        let elements = try XCTUnwrap(menu["elements"] as? [[String: Any]])
+        XCTAssertEqual(elements.map { $0["role"] as? String }, ["AXMenuBar", "AXMenuBarItem", "AXMenuBarItem"])
+        XCTAssertEqual(elements.compactMap { $0["title"] as? String }, ["File", "Edit"])
+        // Stopped by depth, and says so: there is more menu below, and a host
+        // that could not tell would present a bar as if it were the whole menu.
+        XCTAssertEqual((menu["truncated"] as? [String: Any])?["depth"] as? Bool, true)
+    }
+
+    func testTheMenuScopeOpensOneAndStillListsTheRest() throws {
+        // A person opens 文件; they do not read all seven menus. Listing the
+        // others is not a detail — a model that saw only the menu it asked for
+        // would have to ask again to learn what else there is.
+        let harness = try menuHarness()
+        harness.send(observe(id: 3, menu: #"{"scope":"menu","title":"File"}"#))
+
+        let menu = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any])
+        let elements = try XCTUnwrap(menu["elements"] as? [[String: Any]])
+        let titles = elements.compactMap { $0["title"] as? String }
+        XCTAssertEqual(titles, ["File", "New", "Export as PDF…", "Edit"])
+        XCTAssertFalse(
+            titles.contains("Undo"),
+            "the unopened menu's contents are what this scope exists not to send"
+        )
+        // Not truncation: the host asked for this shape. Reporting it as one
+        // would put the host's own request in front of the model as a limit of
+        // the machine.
+        XCTAssertEqual((menu["truncated"] as? [String: Any])?["depth"] as? Bool, false)
+        XCTAssertEqual((menu["truncated"] as? [String: Any])?["elements"] as? Bool, false)
+    }
+
+    func testAnElementsDigestIsTheSameWhicheverScopeSawIt() throws {
+        // The invariant that lets a host change scope between observations. A
+        // scope decides descent and nothing else: `siblingIndex` still comes from
+        // the full child list, `ancestorRoles` still from the live chain. Were
+        // that not so, a `bar` observation's tokens would be bound to digests the
+        // dispatch-time probe recomputes differently, and every press after a
+        // narrow observe would be refused `element_changed` — which is exactly
+        // the defect that shipped when the walk filtered a child list.
+        let harness = try menuHarness()
+
+        harness.send(observe(id: 3, menu: #"{"scope":"bar"}"#))
+        let narrow = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any])
+        harness.send(observe(id: 4, menu: #"{"scope":"all"}"#))
+        let wide = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any])
+
+        func digestsByTitle(_ menu: [String: Any]) -> [String: String] {
+            var out: [String: String] = [:]
+            for element in (menu["elements"] as? [[String: Any]]) ?? [] {
+                if let title = element["title"] as? String, let digest = element["digest"] as? String {
+                    out[title] = digest
+                }
+            }
+            return out
+        }
+
+        let narrowDigests = digestsByTitle(narrow)
+        let wideDigests = digestsByTitle(wide)
+        XCTAssertEqual(narrowDigests.keys.sorted(), ["Edit", "File"])
+        for (title, digest) in narrowDigests {
+            XCTAssertEqual(digest, wideDigests[title], "\(title) hashes differently depending on how much of the menu was walked")
+        }
+    }
+
+    func testAScopeThatNamesNothingIsRejectedRatherThanAnsweredWithEverything() throws {
+        // A `menu` scope with no title answers with every bar item and no
+        // contents, which reads exactly like "that menu is empty". A `title` on
+        // `all` is indistinguishable from a menu name the host got wrong: both
+        // come back with the whole tree. Neither is silently allowed.
+        let harness = try menuHarness()
+
+        for request in [
+            #"{"scope":"menu"}"#,
+            #"{"scope":"menu","title":""}"#,
+            #"{"scope":"bar","title":"File"}"#,
+            #"{"scope":"all","title":"File"}"#,
+        ] {
+            harness.send(observe(id: 3, menu: request))
+            let error = try XCTUnwrap(try harness.awaitResponse()["error"] as? [String: Any], "\(request) was accepted")
+            XCTAssertEqual(error["code"] as? Int, -32602, "\(request)")
+        }
+    }
+
+    func testANamedMenuThatIsNotThereComesBackAsTheBarWithNothingOpen() throws {
+        // Deliberately not an error. "There is no menu called that" is a fact
+        // about the application, and the bar it comes back with is the answer to
+        // the question the host should ask next; an RPC error would carry no
+        // menu at all and leave it guessing at spelling.
+        let harness = try menuHarness()
+        harness.send(observe(id: 3, menu: #"{"scope":"menu","title":"Format"}"#))
+
+        let menu = try XCTUnwrap(try harness.snapshot()["menu"] as? [String: Any])
+        let elements = try XCTUnwrap(menu["elements"] as? [[String: Any]])
+        XCTAssertEqual(elements.compactMap { $0["title"] as? String }, ["File", "Edit"])
     }
 
     // MARK: - Vector 58: the menu has its own budget, and stays out of the window's
@@ -86,10 +191,10 @@ final class HostMenuObservationTests: XCTestCase {
         // that cannot change while the window does.
         let harness = try menuHarness()
 
-        harness.send(observe(id: 3, menu: false))
+        harness.send(observe(id: 3, menu: nil))
         let without = try harness.snapshot()
 
-        harness.send(observe(id: 4, menu: true))
+        harness.send(observe(id: 4, menu: #"{"scope":"all"}"#))
         let with = try harness.snapshot()
 
         XCTAssertEqual(
@@ -125,7 +230,7 @@ final class HostMenuObservationTests: XCTestCase {
 
         let harness = ServerHarness(environment: environment)
         try harness.begin()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
 
         let snapshot = try harness.snapshot()
         let menu = try XCTUnwrap(snapshot["menu"] as? [String: Any])
@@ -157,7 +262,7 @@ final class HostMenuObservationTests: XCTestCase {
         // found and its digest matched, at the point a live Accessibility
         // reference is needed — and a fake has none.
         let harness = try menuHarness()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
         let snapshot = try harness.snapshot()
 
         let snapshotId = try XCTUnwrap(snapshot["snapshotId"] as? String)
@@ -186,7 +291,7 @@ final class HostMenuObservationTests: XCTestCase {
         // lookup would answer with whichever was inserted last — silently
         // dispatching at the wrong control.
         let harness = try menuHarness()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
         let snapshot = try harness.snapshot()
 
         let windowTokens = Set((snapshot["elements"] as? [[String: Any]] ?? []).compactMap { $0["token"] as? String })
@@ -212,7 +317,7 @@ final class HostMenuObservationTests: XCTestCase {
         // two, and this vector is what keeps anyone from deciding that a menu is
         // a special case that should skip it.
         let harness = try menuHarness()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
         let snapshot = try harness.snapshot()
 
         let snapshotId = try XCTUnwrap(snapshot["snapshotId"] as? String)
@@ -258,7 +363,7 @@ final class HostMenuObservationTests: XCTestCase {
 
         let harness = ServerHarness(environment: environment)
         try harness.begin()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
 
         let elements = try XCTUnwrap((try harness.snapshot()["menu"] as? [String: Any])?["elements"] as? [[String: Any]])
         let named = elements.dropFirst().map { ($0["title"] as? String, $0["label"] as? String) }
@@ -287,7 +392,7 @@ final class HostMenuObservationTests: XCTestCase {
 
         let harness = ServerHarness(environment: environment)
         try harness.begin()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
 
         let elements = try XCTUnwrap((try harness.snapshot()["menu"] as? [String: Any])?["elements"] as? [[String: Any]])
         let item = try XCTUnwrap(elements.last)
@@ -301,7 +406,7 @@ final class HostMenuObservationTests: XCTestCase {
         // nothing about menus costs no menu walk. A dispatch that asks gets the
         // same shape `observe` produces, because it is the same call.
         let harness = try menuHarness()
-        harness.send(observe(id: 3, menu: true))
+        harness.send(observe(id: 3, menu: #"{"scope":"all"}"#))
         let snapshot = try harness.snapshot()
         let snapshotId = try XCTUnwrap(snapshot["snapshotId"] as? String)
         let element = try XCTUnwrap((snapshot["elements"] as? [[String: Any]])?.first)
@@ -314,7 +419,7 @@ final class HostMenuObservationTests: XCTestCase {
             snapshotId: snapshotId,
             token: try XCTUnwrap(element["token"] as? String),
             digest: "not-the-recorded-digest",
-            observeAfterMenu: true
+            observeAfterMenu: #"{"scope":"all"}"#
         ))
         let refused = try harness.result()
         XCTAssertEqual((refused["error"] as? [String: Any])?["code"] as? String, "element_digest_mismatch")
@@ -368,6 +473,22 @@ final class HostMenuObservationTests: XCTestCase {
                         ),
                     ]
                 ),
+                // A second menu, so a scope that opens one can be told from a
+                // scope that opens everything. With a single menu the two are
+                // the same observation.
+                FakeNode(
+                    role: "AXMenuBarItem",
+                    title: "Edit",
+                    rawActionNames: ["AXPress"],
+                    children: [
+                        FakeNode(
+                            role: "AXMenu",
+                            children: [
+                                FakeNode(role: "AXMenuItem", title: "Undo", rawActionNames: ["AXPress", "AXPick"]),
+                            ]
+                        ),
+                    ]
+                ),
             ]
         )
         return environment
@@ -379,7 +500,9 @@ final class HostMenuObservationTests: XCTestCase {
         return harness
     }
 
-    private func observe(id: Int, menu: Bool?) -> String {
+    /// `menu` is the raw JSON value for the field, so a test can send a scope
+    /// the executor should reject as easily as one it should honour.
+    private func observe(id: Int, menu: String?) -> String {
         let field = menu.map { ",\"menu\":\($0)" } ?? ""
         return """
         {"jsonrpc":"2.0","id":\(id),"method":"observe","params":{"session":"s1",\
@@ -392,7 +515,7 @@ final class HostMenuObservationTests: XCTestCase {
         snapshotId: String,
         token: String,
         digest: String,
-        observeAfterMenu: Bool? = nil
+        observeAfterMenu: String? = nil
     ) -> String {
         let after = observeAfterMenu.map {
             ",\"observeAfter\":{\"includeImage\":false,\"settle\":\"none\",\"menu\":\($0)}"

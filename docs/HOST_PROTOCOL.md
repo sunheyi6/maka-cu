@@ -913,8 +913,15 @@ action start because a user can revoke at any time
 
 ### 5.8 The menu bar
 
-`observe` takes `menu: true` and answers with a second element array beside
+`observe` takes a `menu` scope and answers with a second element array beside
 `elements`:
+
+```json
+"menu": { "scope": "bar" }                    // the bar and its top-level items
+"menu": { "scope": "menu", "title": "文件" }   // one menu opened, the rest listed
+"menu": { "scope": "all" }                    // the whole tree
+```
+
 
 ```json
 { "snapshot": {
@@ -966,6 +973,70 @@ every settle sample — one Accessibility round trip per recorded element, per
 look — and a menu folded into it would make the same window digest differently
 depending on whether menus had been asked for, while charging every settle for
 elements that cannot change when the window does.
+
+#### Scope, because a menu bar is not one size
+
+A whole menu bar is larger than most windows. Measured on this machine:
+
+| | window | menu bar |
+|---|---|---|
+| TextEdit | 16 elements, 58 ms | 369 elements, 157 ms |
+| Calculator | 39 elements | 204 elements |
+
+Rendered for a model, TextEdit's observation goes from 215 tokens to 3,767 — the
+menu is 94% of what the model reads and 90% of what the observation costs, to
+answer a question that nine elements answer. `scope: "bar"` costs 5 ms and about
+50 tokens, which is why an observation can afford to carry it every time; and it
+must carry something, because a model that cannot see a menu bar at all does not
+know to ask about one.
+
+`scope: "menu"` still emits every top-level item and descends into the named one.
+Listing the others is not a detail: an answer containing only the menu that was
+asked for would cost a second observation to learn what else there is.
+
+**A scope decides descent and nothing else.** `siblingIndex` is still taken from
+the full child list and `ancestorRoles` from the live chain, so an element's
+digest does not depend on how much of the menu was walked, and a host may narrow
+or widen scope between observations without invalidating a binding. This is
+stated because the alternative has already shipped once: filtering a *child list*
+renumbers its siblings, which is precisely how the Apple-menu exclusion broke
+every menu dispatch (`changed: ["siblingIndex"]`) until both sides of §4.3 were
+made to share one function.
+
+`truncated.depth` is `true` for `scope: "bar"` — the walk did stop at a depth and
+there is more menu below. It is `false` for `scope: "menu"`, which is not a
+truncation but the shape the host asked for; reporting it as one would present
+the host's own request to the model as a limit of the machine.
+
+`title` belongs to `menu` and is `-32602` on the other two. Ignoring it on `all`
+would be indistinguishable from a menu name the host got wrong — both return the
+whole tree — and ignoring its absence on `menu` returns every bar item with no
+contents, which reads exactly like "that menu is empty". A `title` that names no
+menu is *not* an error: it answers with the bar, which is what the host needs in
+order to ask again.
+
+#### A disabled menu item is disabled, and a background application's are mostly disabled
+
+`AXPress` on a disabled menu item returns `kAXErrorSuccess` and does nothing.
+Measured on TextEdit, background: `文件 > 页面设置…` reports `enabled: false`,
+`AXPress` returns success, and no sheet appears. The same item with the
+application in front reports `enabled: true`, returns the same success, and opens
+the sheet. `AXPick` behaves identically. This is why §5.8 keeps the
+`element_disabled` guard: without it every such press would be reported `ok`.
+
+How much of a menu this affects is not marginal. TextEdit in the background:
+52 of 250 menu items enabled. The same application in front: 168. The 116 that
+change include `存储`, `存储为…`, `导出为PDF…`, `页面设置…`, `重新命名…` — the
+commands a task is usually about.
+
+The state is not stale and cannot be refreshed. AppKit validates menu items when
+a menu is about to be displayed, a background application's menu never is, and
+`AXPress` on its bar item does not open it (measured: pressed, `ok`, enabled
+count unchanged at 54, frontmost unchanged). There is no non-activating route to
+those commands — which is the same wall §14 records for main-menu key
+equivalents, reached from the other side. The menu bar makes those commands
+*visible* and does not make them *reachable*; a host that shows them to a model
+owes it that sentence.
 
 #### The Apple menu is not the application's menu
 
