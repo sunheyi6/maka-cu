@@ -140,6 +140,83 @@ public func hostDesktopSourceRect(windowFrame: CGRect, displayFrame: CGRect) -> 
     )
 }
 
+/// `SCShareableContent.current` enumerates every window and every application on
+/// the system, and `observe` was paying for that enumeration once per screenshot
+/// to use exactly one window out of it. Measured on this machine it is 100 to
+/// 285 ms — roughly half of what a window capture costs — and it is the half that
+/// has nothing to do with the window being captured.
+///
+/// So it is kept, and every use of it is checked against the window server
+/// before it is trusted. The check is the whole design: a stale `SCWindow`
+/// carries a stale `frame`, `SCContentFilter.contentRect` is derived from it, and
+/// `HostCapture` sizes its output buffer from that rectangle — so a cache that
+/// merely aged out on a timer would, inside its window, hand back an image of the
+/// wrong size declaring the wrong `scale`. That is the defect §5.3 was written
+/// after. Comparing the cached frame against `CGWindowListCopyWindowInfo` costs
+/// one window-server call for one window id and makes the failure unreachable
+/// rather than unlikely.
+enum HostShareableContentCache {
+    nonisolated(unsafe) private static var cached: SCShareableContent?
+
+    /// Content that is known to describe `windowId` as the window server
+    /// describes it right now, refetched when it does not.
+    static func content(matching windowId: CGWindowID) async throws -> SCShareableContent {
+        if let cached, isCurrent(cached, windowId: windowId) {
+            return cached
+        }
+
+        let fresh = try await SCShareableContent.current
+        cached = fresh
+        return fresh
+    }
+
+    /// Content whose record of `displayId` matches the display list right now.
+    static func content(matchingDisplay displayId: CGDirectDisplayID) async throws -> SCShareableContent {
+        if let cached, let display = cached.displays.first(where: { $0.displayID == displayId }),
+            display.frame == CGDisplayBounds(displayId) {
+            return cached
+        }
+
+        let fresh = try await SCShareableContent.current
+        cached = fresh
+        return fresh
+    }
+
+    /// Dropped whenever something is known to have changed underneath it, so the
+    /// next capture pays for a fetch instead of discovering the staleness.
+    static func invalidate() {
+        cached = nil
+    }
+
+    private static func isCurrent(_ content: SCShareableContent, windowId: CGWindowID) -> Bool {
+        guard
+            let window = content.windows.first(where: { $0.windowID == windowId }),
+            let live = liveFrame(of: windowId)
+        else {
+            return false
+        }
+
+        // Whole points. `SCWindow.frame` and `CGWindowListCopyWindowInfo` are the
+        // same space (§5.3) but disagree in the sub-pixel digits on scaled
+        // displays, which is the same tolerance `HostAX.window` matches on.
+        return abs(window.frame.origin.x - live.origin.x) < 1
+            && abs(window.frame.origin.y - live.origin.y) < 1
+            && abs(window.frame.width - live.width) < 1
+            && abs(window.frame.height - live.height) < 1
+    }
+
+    private static func liveFrame(of windowId: CGWindowID) -> CGRect? {
+        guard
+            let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowId) as? [[String: Any]],
+            let bounds = info.first?[kCGWindowBounds as String] as? NSDictionary
+        else {
+            return nil
+        }
+
+        return CGRect(dictionaryRepresentation: bounds)
+    }
+}
+
 public enum HostCapture {
     static let timeout: TimeInterval = 5
 
@@ -176,7 +253,7 @@ public enum HostCapture {
     public static func captureWindow(windowId: CGWindowID, scope: HostCaptureScope) -> Result<CGImage, HostDomainError> {
         do {
             let image = try BlockingAsyncBridge.run(timeout: timeout) {
-                let content = try await SCShareableContent.current
+                let content = try await HostShareableContentCache.content(matching: windowId)
                 guard let window = content.windows.first(where: { $0.windowID == windowId }) else {
                     return CGImage?.none
                 }
@@ -234,7 +311,7 @@ public enum HostCapture {
     public static func captureDisplay(displayId: CGDirectDisplayID) -> Result<CGImage, HostDomainError> {
         do {
             let image = try BlockingAsyncBridge.run(timeout: timeout) {
-                let content = try await SCShareableContent.current
+                let content = try await HostShareableContentCache.content(matchingDisplay: displayId)
                 guard let display = content.displays.first(where: { $0.displayID == displayId }) else {
                     return CGImage?.none
                 }

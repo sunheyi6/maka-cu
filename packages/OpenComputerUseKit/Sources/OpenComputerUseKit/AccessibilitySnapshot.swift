@@ -94,8 +94,8 @@ let screenshotResultMaxDimension: CGFloat = 1280
 let screenshotResultMinScale: CGFloat = 0.25
 private let windowVisibilityRecoveryDelay: TimeInterval = 0.7
 private let axWebAreaRole = "AXWebArea"
-private let axContentsAttribute = "AXContents"
-private let axVisibleChildrenAttribute = "AXVisibleChildren"
+let axContentsAttribute = "AXContents"
+let axVisibleChildrenAttribute = "AXVisibleChildren"
 private let anonymousActionTargetMaxWidth: CGFloat = 240
 private let anonymousActionTargetMaxHeight: CGFloat = 120
 
@@ -940,6 +940,24 @@ private struct TreeRenderer {
         return children
     }
 }
+
+/// Every attribute `childTraversalAttributes` can name, so a reader that wants
+/// them in one round trip has one list to ask for rather than a second copy of
+/// this function's body.
+///
+/// The two drifted apart the moment they were written separately: the batched
+/// reader listed three of these four, sent `AXContents` down its default branch
+/// and handed back `AXChildren` under its name. Finder's outline then reported
+/// its columns instead of its rows and grew from 156 elements to 240 — a tree of
+/// a different shape, deterministic, and invisible to every unit test, because
+/// the batched read itself was faithful and only the name it was filed under was
+/// wrong.
+let hostChildTraversalAttributeNames: [String] = [
+    kAXChildrenAttribute as String,
+    kAXRowsAttribute as String,
+    axContentsAttribute,
+    axVisibleChildrenAttribute,
+]
 
 func childTraversalAttributes(role: String?, hasRows: Bool, hasVisibleChildren: Bool) -> [String] {
     var attributes: [String] = []

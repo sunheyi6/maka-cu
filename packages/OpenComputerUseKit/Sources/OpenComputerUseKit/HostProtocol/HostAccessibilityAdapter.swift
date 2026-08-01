@@ -177,8 +177,81 @@ public func hostScreenIsLocked() -> Bool {
 
 // MARK: - Accessibility node adapter
 
+/// A key that lets an `AXUIElement` be a dictionary key. `CFEqual` and `CFHash`
+/// are the identity Accessibility itself uses, and they are what the walk
+/// already compares children with.
+struct HostAXElementKey: Hashable {
+    private let element: AXUIElement
+
+    init(_ element: AXUIElement) {
+        self.element = element
+    }
+
+    static func == (lhs: HostAXElementKey, rhs: HostAXElementKey) -> Bool {
+        CFEqual(lhs.element, rhs.element)
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(CFHash(element))
+    }
+}
+
+/// The §4.3 ancestor chains produced during one walk, kept so the walk pays for
+/// each one once.
+///
+/// `HostAX.ancestorRoles` climbs `AXParent` a level at a time and reads a role at
+/// each level: up to sixteen round trips, for every element, re-deriving a chain
+/// its own parent had already derived one call earlier. Against Finder that was
+/// half of the walk's Accessibility traffic.
+///
+/// The memo is keyed by element rather than by position in the traversal, which
+/// is what keeps it honest: an ancestor chain is a property of the element, and a
+/// child whose `AXParent` is not the node the walk descended from simply misses
+/// and climbs for itself. Nothing is assumed about the two agreeing.
+final class HostAXAncestryMemo {
+    private var chainsIncludingSelf: [HostAXElementKey: [String]] = [:]
+
+    /// The chain the walk would have read live for `element`, given its parent.
+    func ancestorRoles(of element: AXUIElement, parent: AXUIElement?) -> [String] {
+        guard let parent else {
+            return []
+        }
+
+        if let cached = chainsIncludingSelf[HostAXElementKey(parent)] {
+            return cached
+        }
+
+        // A miss still climbs, but what it climbed is by definition the parent's
+        // own chain-including-self, so the parent is filled in on the way past
+        // and this element's siblings hit.
+        let live = HostAX.ancestorRoles(of: element)
+        chainsIncludingSelf[HostAXElementKey(parent)] = live
+        return live
+    }
+
+    /// Records what this element's own children will need: its role in front of
+    /// its chain, capped and stopped exactly where `HostAX.ancestorRoles` caps and
+    /// stops.
+    func record(element: AXUIElement, role: String, ancestorRoles: [String]) {
+        let chain: [String]
+        if role == kAXWindowRole as String {
+            chain = [role]
+        } else {
+            chain = Array(([role] + ancestorRoles).prefix(8))
+        }
+        chainsIncludingSelf[HostAXElementKey(element)] = chain
+    }
+}
+
 /// Wraps one `AXUIElement` as a `HostAccessibilityNode`. The wrapper holds the
 /// element, which is what keeps the reference alive for the snapshot's lifetime.
+///
+/// Every attribute is read once, in one call, on first use. Before that the walk
+/// asked the node for `AXRole` four separate times — once for the wire, once for
+/// the digest, once to build its children's ancestor chain and once inside
+/// `children` — and each of those was an IPC into the observed process. Measured
+/// on this machine before the change: 28.5 to 37.7 Accessibility round trips per
+/// element, against twelve distinct attributes the wire actually carries.
 final class HostAXNode: HostAccessibilityNode {
     let element: AXUIElement
     /// The window this node's frame is expressed relative to, or `nil` for a node
@@ -200,67 +273,168 @@ final class HostAXNode: HostAccessibilityNode {
     /// and writes it into the protocol (§5.8) so it is a stated scope rather than
     /// a silent omission.
     private let dropsAppleMenu: Bool
+    private let ancestry: HostAXAncestryMemo
+    private var cached: Attributes?
 
     init(
         element: AXUIElement,
         windowBounds: CGRect?,
         focusedElement: AXUIElement?,
-        dropsAppleMenu: Bool = false
+        dropsAppleMenu: Bool = false,
+        ancestry: HostAXAncestryMemo = HostAXAncestryMemo()
     ) {
         self.element = element
         self.windowBounds = windowBounds
         self.focusedElement = focusedElement
         self.dropsAppleMenu = dropsAppleMenu
+        self.ancestry = ancestry
+    }
+
+    /// One element's answers, taken at one instant.
+    ///
+    /// That they are taken together is not only cheaper, it is more truthful than
+    /// what it replaces: thirty separate reads spread over a millisecond could
+    /// report a role from before a change and a value from after it, and the
+    /// digest §4.3 takes over them would describe an element that never existed.
+    struct Attributes {
+        var role: String
+        var subrole: String?
+        var axIdentifier: String?
+        var title: String?
+        var label: String?
+        var value: String?
+        var placeholder: String?
+        var enabled: Bool
+        var focusedFlag: Bool
+        var selected: Bool?
+        var frame: CGRect?
+        var parent: AXUIElement?
+        /// Keyed by the attribute that produced them, because
+        /// `childTraversalAttributes` names attributes and a lookup by name is
+        /// the only mapping that cannot quietly file one attribute's answer
+        /// under another's.
+        var childArrays: [String: [AXUIElement]]
+    }
+
+    /// The order is the contract between the request and the reply: the reply is
+    /// positional, so a name added here has to be read out at the same index.
+    static let batchedAttributeNames: [String] = [
+        kAXRoleAttribute as String,
+        kAXSubroleAttribute as String,
+        kAXIdentifierAttribute as String,
+        kAXTitleAttribute as String,
+        kAXDescriptionAttribute as String,
+        kAXValueAttribute as String,
+        "AXPlaceholderValue",
+        kAXEnabledAttribute as String,
+        kAXFocusedAttribute as String,
+        kAXSelectedAttribute as String,
+        kAXPositionAttribute as String,
+        kAXSizeAttribute as String,
+        kAXParentAttribute as String,
+    ] + hostChildTraversalAttributeNames
+
+    private static let childArrayStart = batchedAttributeNames.count - hostChildTraversalAttributeNames.count
+
+    private var attributes: Attributes {
+        if let cached {
+            return cached
+        }
+
+        let names = Self.batchedAttributeNames
+        // An element whose application refuses the batched call is read the old
+        // way rather than reported blank. A blank element is indistinguishable on
+        // the wire from an element that genuinely has nothing, and the model
+        // cannot act on either — so the slow path stays, and it is the fallback
+        // rather than the default.
+        let values = HostAX.attributes(element, names) ?? names.map { HostAX.attribute(element, $0) }
+
+        func string(_ index: Int) -> String? {
+            guard let text = values[index] as? String, !text.isEmpty else {
+                return nil
+            }
+            return text
+        }
+
+        func bool(_ index: Int) -> Bool? {
+            guard let value = values[index] else {
+                return nil
+            }
+            return (value as? NSNumber)?.boolValue
+        }
+
+        var childArrays: [String: [AXUIElement]] = [:]
+        for (offset, name) in hostChildTraversalAttributeNames.enumerated() {
+            childArrays[name] = values[Self.childArrayStart + offset] as? [AXUIElement] ?? []
+        }
+
+        let attributes = Attributes(
+            role: string(0) ?? "AXUnknown",
+            subrole: string(1),
+            axIdentifier: string(2),
+            title: string(3),
+            label: string(4),
+            value: values[5].flatMap(HostAX.stringLikeValue),
+            placeholder: string(6),
+            enabled: bool(7) ?? true,
+            focusedFlag: bool(8) ?? false,
+            selected: bool(9),
+            frame: HostAX.rect(position: values[10], size: values[11]),
+            parent: values[12].map { $0 as! AXUIElement },
+            childArrays: childArrays
+        )
+        cached = attributes
+        return attributes
     }
 
     var axElement: AXUIElement? { element }
 
     var role: String {
-        HostAX.string(element, kAXRoleAttribute) ?? "AXUnknown"
+        attributes.role
     }
 
     var subrole: String? {
-        HostAX.string(element, kAXSubroleAttribute)
+        attributes.subrole
     }
 
     var axIdentifier: String? {
-        HostAX.string(element, kAXIdentifierAttribute)
+        attributes.axIdentifier
     }
 
     var title: String? {
-        HostAX.string(element, kAXTitleAttribute)
+        attributes.title
     }
 
     var label: String? {
-        HostAX.string(element, kAXDescriptionAttribute)
+        attributes.label
     }
 
     var value: String? {
-        HostAX.stringLikeValue(element, kAXValueAttribute)
+        attributes.value
     }
 
     var placeholder: String? {
-        HostAX.string(element, "AXPlaceholderValue")
+        attributes.placeholder
     }
 
     var enabled: Bool {
-        HostAX.bool(element, kAXEnabledAttribute) ?? true
+        attributes.enabled
     }
 
     var focused: Bool {
         guard let focusedElement else {
-            return HostAX.bool(element, kAXFocusedAttribute) ?? false
+            return attributes.focusedFlag
         }
 
         return CFEqual(focusedElement, element)
     }
 
     var selected: Bool? {
-        HostAX.bool(element, kAXSelectedAttribute)
+        attributes.selected
     }
 
     var frameInWindow: CGRect? {
-        guard let windowBounds, let frame = HostAX.frame(element) else {
+        guard let windowBounds, let frame = attributes.frame else {
             return nil
         }
 
@@ -272,24 +446,113 @@ final class HostAXNode: HostAccessibilityNode {
     }
 
     var liveAncestorRoles: [String]? {
-        HostAX.ancestorRoles(of: element)
+        let roles = ancestry.ancestorRoles(of: element, parent: attributes.parent)
+        ancestry.record(element: element, role: attributes.role, ancestorRoles: roles)
+        return roles
     }
 
     var children: [HostAccessibilityNode] {
-        HostAX.traversedChildren(of: element, dropsAppleMenu: dropsAppleMenu)
-            .map {
-                HostAXNode(element: $0, windowBounds: windowBounds, focusedElement: focusedElement)
+        let attributes = attributes
+        let names = childTraversalAttributes(
+            role: attributes.role,
+            hasRows: !(attributes.childArrays[kAXRowsAttribute as String]?.isEmpty ?? true),
+            hasVisibleChildren: !(attributes.childArrays[axVisibleChildrenAttribute]?.isEmpty ?? true)
+        )
+
+        var result: [AXUIElement] = []
+        for name in names {
+            // A name the batch did not carry is read now rather than skipped.
+            // Skipping is what dropped `AXContents` the first time, and a
+            // dropped attribute costs a subtree without costing an error.
+            let values = attributes.childArrays[name] ?? HostAX.array(element, name)
+
+            for child in values where !result.contains(where: { CFEqual($0, child) }) {
+                result.append(child)
             }
+        }
+
+        return result
+            .filter { !dropsAppleMenu || !HostAX.isAppleMenu($0) }
+            .map {
+                HostAXNode(
+                    element: $0,
+                    windowBounds: windowBounds,
+                    focusedElement: focusedElement,
+                    ancestry: ancestry
+                )
+            }
+    }
+}
+
+/// A count of Accessibility round trips, which is the unit the tree walk's cost
+/// is actually denominated in — every read below crosses into the observed
+/// process, and on this machine one crossing measures 38 µs against an ordinary
+/// window and ten times that against a window hosted in another process.
+///
+/// It is here rather than in a test because the number a benchmark needs is how
+/// many crossings *the walk* made, and only the walk can count them. Wall clock
+/// alone cannot tell a walk that got slower from a machine that got busier;
+/// this can.
+///
+/// Deliberately not atomic. The executor reads Accessibility on one lane, the
+/// increment is a few nanoseconds against a 38 µs round trip, and a lock here
+/// would be a measurement that changed what it measured.
+enum HostAXTelemetry {
+    nonisolated(unsafe) static var roundTrips = 0
+
+    static func reset() {
+        roundTrips = 0
     }
 }
 
 enum HostAX {
     static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        HostAXTelemetry.roundTrips += 1
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else {
             return nil
         }
         return value
+    }
+
+    /// Every attribute the walk wants from one element, asked for once.
+    ///
+    /// `AXUIElementCopyAttributeValue` is one IPC per attribute, and the walk
+    /// reads twelve of them off every node — plus the same `AXRole` four separate
+    /// times, because four different callers each asked the node for it. Measured
+    /// on a background Calculator, 200 iterations: twelve attributes read one at a
+    /// time cost 453 µs, and the same twelve through this call cost 229 µs.
+    ///
+    /// Missing attributes come back as an `AXValue` of type `kAXValueAXErrorType`
+    /// rather than being absent, so the returned array is always parallel to
+    /// `names` and a caller reads position, never a count. Those placeholders are
+    /// mapped to `nil` here so the rest of the adapter sees exactly what a failed
+    /// single read would have given it.
+    static func attributes(_ element: AXUIElement, _ names: [String]) -> [CFTypeRef?]? {
+        HostAXTelemetry.roundTrips += 1
+        var raw: CFArray?
+        guard
+            AXUIElementCopyMultipleAttributeValues(
+                element,
+                names as CFArray,
+                AXCopyMultipleAttributeOptions(rawValue: 0),
+                &raw
+            ) == .success,
+            let values = raw as? [CFTypeRef],
+            values.count == names.count
+        else {
+            return nil
+        }
+
+        return values.map { value in
+            guard CFGetTypeID(value) == AXValueGetTypeID() else {
+                return value
+            }
+            // An `AXValue` is a real value for position and size, and a wrapped
+            // error for everything the element does not answer. Only the second
+            // is absence.
+            return AXValueGetType(value as! AXValue) == .axError ? nil : value
+        }
     }
 
     static func string(_ element: AXUIElement, _ name: String) -> String? {
@@ -306,6 +569,12 @@ enum HostAX {
             return nil
         }
 
+        return stringLikeValue(value)
+    }
+
+    /// The same conversion applied to a value already in hand, so the batched
+    /// read and the single read cannot disagree about what an `AXValue` means.
+    static func stringLikeValue(_ value: CFTypeRef) -> String? {
         if let text = value as? String {
             return text.isEmpty ? nil : text
         }
@@ -330,26 +599,30 @@ enum HostAX {
     }
 
     static func frame(_ element: AXUIElement) -> CGRect? {
+        rect(position: attribute(element, kAXPositionAttribute), size: attribute(element, kAXSizeAttribute))
+    }
+
+    /// The pair unboxed, so the batched read and the single read produce the
+    /// same rectangle from the same two `AXValue`s.
+    static func rect(position: CFTypeRef?, size: CFTypeRef?) -> CGRect? {
+        guard let position, let size else {
+            return nil
+        }
+
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
         guard
-            let positionValue = attribute(element, kAXPositionAttribute),
-            let sizeValue = attribute(element, kAXSizeAttribute)
+            AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+            AXValueGetValue(size as! AXValue, .cgSize, &extent)
         else {
             return nil
         }
 
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard
-            AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
-            AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
-        else {
-            return nil
-        }
-
-        return CGRect(origin: position, size: size)
+        return CGRect(origin: origin, size: extent)
     }
 
     static func actionNames(_ element: AXUIElement) -> [String] {
+        HostAXTelemetry.roundTrips += 1
         var actions: CFArray?
         guard AXUIElementCopyActionNames(element, &actions) == .success else {
             return []
