@@ -481,6 +481,66 @@ enum HostAX {
         return result == .success && settable.boolValue
     }
 
+    // MARK: Window geometry (§6.1)
+    //
+    // `frame` above reads both halves at once for the tree walk. Window
+    // management needs them apart: `move_window` writes only the origin and
+    // `resize_window` only the extent, and an executor that read the pair and
+    // wrote the pair back would move a window every time it was asked to resize
+    // one.
+    //
+    // `AXPosition` is in the same space `CGWindowListCopyWindowInfo` reports
+    // (§5.3) — measured across seventeen applications on a machine whose second
+    // display sits at `(-193, -1080)`, the two agreed to the point on every one,
+    // including the four windows with a negative origin. `HostAX.window` has in
+    // fact been relying on that agreement all along: it matches AX windows
+    // against the window list's frame because there is no public AX attribute
+    // carrying a `CGWindowID`.
+
+    static func point(_ element: AXUIElement, _ name: String) -> CGPoint? {
+        guard let value = attribute(element, name) else {
+            return nil
+        }
+
+        var point = CGPoint.zero
+        guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else {
+            return nil
+        }
+        return point
+    }
+
+    static func size(_ element: AXUIElement, _ name: String) -> CGSize? {
+        guard let value = attribute(element, name) else {
+            return nil
+        }
+
+        var size = CGSize.zero
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else {
+            return nil
+        }
+        return size
+    }
+
+    static func write(_ element: AXUIElement, _ name: String, point: CGPoint) -> AXError {
+        var value = point
+        guard let boxed = AXValueCreate(.cgPoint, &value) else {
+            return .failure
+        }
+        return AXUIElementSetAttributeValue(element, name as CFString, boxed)
+    }
+
+    static func write(_ element: AXUIElement, _ name: String, size: CGSize) -> AXError {
+        var value = size
+        guard let boxed = AXValueCreate(.cgSize, &value) else {
+            return .failure
+        }
+        return AXUIElementSetAttributeValue(element, name as CFString, boxed)
+    }
+
+    static func write(_ element: AXUIElement, _ name: String, flag: Bool) -> AXError {
+        AXUIElementSetAttributeValue(element, name as CFString, flag ? kCFBooleanTrue : kCFBooleanFalse)
+    }
+
     static func parent(of element: AXUIElement) -> AXUIElement? {
         guard let value = attribute(element, kAXParentAttribute) else {
             return nil

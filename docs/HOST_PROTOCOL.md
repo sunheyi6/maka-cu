@@ -674,7 +674,35 @@ conclusion drawn from it is wrong.
 | --- | --- |
 | `element.frame` | window-local logical points, origin at the window's top-left |
 | `snapshot.target.bounds`, `obscuringRects`, `displays[].logicalBounds` | screen logical points |
+| `dispatch.element`'s `move_window.position` and `resize_window.size` (§6.1) | screen logical points |
 | `image.widthPx` / `heightPx`, `displays[].sourceBoundsPx` | image pixels |
+
+**Screen logical points are CoreGraphics global display coordinates: y grows
+downward and the origin is the top-left of the *main* display.** They are not
+AppKit's. This has always been the space `snapshot.target.bounds` is in — it
+comes from `CGWindowListCopyWindowInfo` — and it is stated here because §6.1 now
+lets a caller write a position back, and the two spaces disagree by more than a
+sign on any machine with a second display. Measured on this one, whose second
+display sits above the first:
+
+| | display 1 (main) | display 2 |
+| --- | --- | --- |
+| `CGDisplayBounds` | `(0, 0, 1512, 982)` | `(-193, -1080, 1920, 1080)` |
+| `NSScreen.frame` | `(0, 0, 1512, 982)` | `(-193, 982, 1920, 1080)` |
+
+Same display, two origins 2062 points apart. A window moved to a y read off
+`NSScreen` lands on the wrong screen, and it lands there silently because both
+numbers are plausible.
+
+`AXPosition` is in the CoreGraphics space, not the AppKit one, and that is the
+fact `move_window` rests on. Measured across seventeen applications on this
+machine, `AXPosition` equalled `CGWindowListCopyWindowInfo`'s origin to the point
+on every one, including the four windows with a negative origin — iTerm2 at
+`(80, -1049)`, a Chrome window at `(-193, -1049)`, Terminal at `(775, -964)`,
+Music at `(277, -931)`. The executor was already relying on this without saying
+so: `HostAX.window(pid:windowId:bounds:)` matches AX windows against the window
+list's frame to within one point, because there is no public AX attribute
+carrying a `CGWindowID`.
 
 `image.scale` is `image.widthPx / target.bounds.width`, computed by the executor
 from the image it actually captured — not from `NSScreen.backingScaleFactor`.
@@ -906,7 +934,121 @@ call without a side table.
 { "kind": "select_text", "text": "hello" }
 { "kind": "secondary_action", "action": "show_menu" }
 { "kind": "scroll", "direction": "up" | "down" | "left" | "right", "pages": 1.0 }
+{ "kind": "move_window", "position": { "x": 220, "y": 164 } }
+{ "kind": "resize_window", "size": { "width": 800, "height": 600 } }
+{ "kind": "minimize_window" }
 ```
+
+#### Window management
+
+The last three address the window rather than something drawn in it. They are
+members of this union rather than a method of their own because the window is
+already addressable: the snapshot's tree is rooted at it, so it is the element at
+`depth == 0` and it already carries a token, a digest and a binding. A
+`window.move` method would have to re-derive all four, and pay §2's version and
+conformance cost, to arrive back where `dispatch.element` already is. What the
+union was missing is a member that carries geometry.
+
+The rules that follow are all consequences of the subject being the window:
+
+- **The target MUST be the snapshot root.** §5.3 puts `element.frame` in
+  window-local points and a window's own position in screen points; a non-root
+  target would put two spaces in one request field and leave the executor
+  guessing which it was handed. A non-root token is `element_not_actionable`.
+  Nothing usable is refused by this: `AXPosition` and `AXSize` are not settable
+  on ordinary controls — measured `false` on every Calculator button sampled — so
+  the rule only makes the refusal legible earlier.
+- **`occlusionPolicy` does not apply and is not consulted.** The check asks
+  whether the pixel about to be acted on belongs to somebody else, and these act
+  on no pixel: they move the window and everything drawn in it, sheet included. A
+  covered window is exactly the window a model wants to move, and an application
+  started by `apps.launch` begins at the bottom of the z-order — so applying
+  occlusion here would refuse window management on every freshly launched
+  application, which is the defect §6.1 already had to fix once for `same_app`.
+- **Not settable is refused, honestly.** The executor asks
+  `AXUIElementIsAttributeSettable` before it writes, and a `false` is
+  `element_not_actionable` — "the element does not expose the requested action".
+  This is not hypothetical: **Calculator's window advertises `AXSize` and will
+  not let anyone write it**, and the raw write comes back `kAXErrorFailure`,
+  which reads as a fault rather than as an answer. Measured across seventeen
+  applications, `AXPosition` was settable on all seventeen, `AXSize` on fourteen
+  (Calculator, the iOS Simulator and a system alert refused), and `AXMinimized`
+  on fifteen.
+- **The executor does not clamp, and does not validate a position against the
+  displays.** It writes what it was asked for, reads back what it got, and says
+  which of the three things happened. Three reasons, in order of weight. macOS
+  clamps already and to a rule that cannot be restated — measured, a request for
+  `(99999, 300)` came back `(1687, -52)`, both coordinates changed, and a request
+  for 10 × 10 came back 115 × 46 because the application has a minimum size. A
+  second clamp on top of that one would disagree with it. Off-screen is also a
+  legitimate request: negative coordinates are how the display above the main one
+  is named on a two-display machine, and a window parked off the edge is a thing
+  a model may reasonably want. And a refusal reads to a model as a bad argument,
+  which is the failure §6.5 documents at length — it sent one model round seven
+  times on `cmd+p`.
+- **`minimize_window` has no inverse in this version.** Restoring a minimized
+  window activates its application: measured on macOS 26.5 with no `AXMain` write
+  anywhere near it, `AXMinimized = false` on Calculator moved the foreground from
+  pid 774 to pid 30706 within 300 ms of the write, and TextEdit's did the same.
+  §6 forbids an action that brings its target to the front, and a capability the
+  host can read but never use is worse than a missing one, so `unminimize_window`
+  is absent rather than advertised-and-always-refused. §14 carries the
+  measurement and what closing it would cost.
+- **`raise` is not new and is not here.** A window's only Accessibility action is
+  `AXRaise` — measured, all seventeen advertised exactly `["AXRaise"]` and
+  nothing else — and it has always been reachable as
+  `{ "kind": "secondary_action", "action": "raise" }`. Measured, it does **not**
+  activate the application: raising a background Preview window moved it from
+  zIndex 22 to 24 and raising a background Stickies window moved it from 20 to
+  24, with the frontmost pid unchanged at 774 across both. It is also the
+  standing example of advertised-but-unreachable: **Calculator lists `AXRaise`
+  and answers it with `kAXErrorAttributeUnsupported`**, which §6.5 reports as
+  `outcome: "failed"`, `path: "ax_action"` — attempted, the OS said no.
+
+**A geometry write is finished when the window server agrees, not when the
+application acknowledges it.** The application answers `AXPosition` from its own
+idea of the window straight away; the window server is told afterwards. Measured,
+one write per row, polling the window list at 5 ms:
+
+| application | `AXPosition` read back | window server agreed |
+| --- | --- | --- |
+| Calculator | 11 ms | 26 ms |
+| TextEdit | 4 ms | 38 ms |
+| Google Chrome | 15 ms | 106 ms |
+| Visual Studio Code | 3 ms | 112 ms |
+| Obsidian | 16 ms | 172 ms |
+
+Everything else in this executor reads the window server: `observe` resolves its
+target out of `CGWindowListCopyWindowInfo`, and matches the AX window against
+that frame to within one point because there is no public AX attribute carrying a
+`CGWindowID`. So an executor that returned the instant the write was
+acknowledged would answer with a frame in which its own `observeAfter` cannot
+find the window — the list still reporting the old origin, the application
+already reporting the new one, no candidate within a point, and
+`postObservationError: window_gone` for a window in plain sight. The host's next
+`observe` would race the same way.
+
+The executor therefore waits for the window server, bounded at 1000 ms — 5.8×
+the slowest measured — and returns as soon as it agrees. Waiting the bound out
+is not an error and does not change the verdict: the dispatch is judged by the
+`AXPosition` readback either way, and a post-observation that then fails says so
+through `postObservationError`.
+
+For `minimize_window` the thing waited for is the window **leaving** the
+on-screen list, which is all the window server has to say about a minimized
+window. `observeAfter` then legitimately answers `postObservationError:
+window_gone`, and that is the truth rather than a race: the window is not on
+screen. The dispatch result beside it still reports the minimise as
+`outcome: "ok"` with `effect: "confirmed"`.
+
+**The attribute is read back after that wait, not before it**, and the verdict is
+taken from the second read. The three attributes do not answer at the same speed
+and the difference is not cosmetic: `AXPosition` is the new value within 3–16 ms
+of the write, and `AXMinimized` is not — measured, it still read `false` on the
+instant after a write that succeeded and a window that did minimise. An executor
+that judged on the first read answers `suspected_noop` for an action that plainly
+happened, which is the false noop §6.5 spends its length condemning, and it is
+what this executor did until vector 58's live half said so.
 
 `strictness` ∈ `"element" | "window"`:
 
@@ -1478,6 +1620,23 @@ Rules the executor MUST follow:
 - `set_value` MUST read the value back. Equal to the requested value →
   `confirmed` / `value_readback`. Equal to the *previous* value →
   `suspected_noop`. Anything else → `unverifiable`.
+- `move_window`, `resize_window` and `minimize_window` are judged the same way,
+  by reading back the attribute they wrote — `AXPosition`, `AXSize`,
+  `AXMinimized` — and under the same three arms, because the attribute written
+  **is** the subject of the action. Two things are worth stating about them
+  rather than leaving to the rule:
+
+  The comparison is at **whole logical points**, which is the resolution §4.3
+  already compares a frame at. Two resolutions for one rectangle is how an
+  executor ends up refusing a dispatch against a window nothing had moved.
+
+  The third arm is the ordinary case here, not the exception. macOS clamps —
+  measured, `(99999, 300)` came back `(1687, -52)` and a 10 × 10 resize came back
+  115 × 46 against the application's own minimum — and a clamped write is
+  `unverifiable` / `value_readback`. It is not `confirmed`, because the window is
+  not where it was asked to be; it is not `suspected_noop`, because it moved.
+  Where it actually landed is a fact about the window and is reported as one, in
+  the post-observation's `snapshot.target.bounds` — not smuggled into the verdict.
 - `select_text` MUST read `AXSelectedText` back → `selection_readback`.
 - `click` with `observeAfter.settle: "quiesce"` MAY report `confirmed` /
   `tree_delta` when the post-action window digest differs from the pre-action
@@ -1544,7 +1703,7 @@ Which method belongs to which action, in full:
 
 | method | dispatch | action |
 | --- | --- | --- |
-| `value_readback` | `dispatch.element` | `set_value` |
+| `value_readback` | `dispatch.element` | `set_value`, `move_window`, `resize_window`, `minimize_window` |
 | | `dispatch.key` | `kind: "type"` |
 | `selection_readback` | `dispatch.element` | `select_text` |
 | `tree_delta` | `dispatch.element` | `click`, `scroll` — with `settle: "quiesce"` |
@@ -2302,6 +2461,67 @@ Settling a window that is expensive to look at (§6.1):
     `waitedMs 2500` against 3674 ms, and `ceiling` on a window it had looked at
     once.
 
+Managing a window (§6.1):
+
+56. The three window actions are addressable only as the snapshot root, refuse an
+    attribute the application will not let anyone write, and reject a geometry
+    that is not one. A non-root token is `element_not_actionable`;
+    `resize_window` against **Calculator**, whose window advertises `AXSize` and
+    refuses to have it written, is `element_not_actionable` and **not** an
+    `ok: true` result — the executor asks `AXUIElementIsAttributeSettable` before
+    it writes rather than reporting the write's own `kAXErrorFailure` as a fault;
+    a non-finite `position`, or a negative extent in `size`, is `-32602` naming
+    the field. Its live half is the census: seventeen applications, `AXPosition`
+    settable on all seventeen, `AXSize` on fourteen, `AXMinimized` on fifteen,
+    and `AXPosition`/`AXSize` settable on no ordinary control.
+
+57. A window action is judged by the attribute it wrote, at whole logical points,
+    and the three arms are told apart. A move to a free position reads back equal
+    and is `confirmed` / `value_readback`; a move macOS clamps reads back as
+    neither the request nor the previous value and is `unverifiable` /
+    `value_readback`, never `confirmed` and never `suspected_noop`. The vector
+    that fails against an executor which reports the write's `AXError` as the
+    verdict: every one of the clamped cases returns `kAXErrorSuccess`. Its live
+    half uses the two clamps this machine actually produces — `(99999, 300)` →
+    `(1687, -52)`, and a 10 × 10 resize of TextEdit → 115 × 46 — and reads the
+    landing point out of the executor's own post-observation, because that is
+    where §6.1 says it is reported.
+
+58. No window action takes the foreground, and none returns before the window
+    server agrees with it. The live half asserts the frontmost pid unchanged
+    across every single dispatch, on a target launched in the background and
+    never activated, and it puts every window back where it found it. It then
+    dispatches `observe` immediately after a move and asserts the answer is a
+    snapshot whose `target.bounds` is the *new* origin — not `window_gone`.
+
+    That second half is the one an executor fails by being fast. The application
+    answers `AXPosition` in 3–16 ms and the window server catches up in
+    26–172 ms, and `observe` resolves its target out of the window list and then
+    matches the AX window against that frame to within a point. Returning on the
+    application's acknowledgement therefore hands back a frame in which the
+    executor's own `observeAfter` cannot find the window it just moved. It fails
+    hardest on Chromium and Electron, which are the slowest to propagate and the
+    windows a model is most likely to be asked to move.
+
+    The minimise arm is the third thing only a live half can see: it asserts
+    `effect: "confirmed"`, and the executor answered `suspected_noop` until the
+    readback was moved to after the wait, because `AXMinimized` still reads
+    `false` on the instant after a write that worked. No unit vector can produce
+    that — a fake element has no attribute to read stale — and the model's answer
+    to a `suspected_noop` is to send the request again.
+
+    It also asserts that `unminimize` is measured rather than assumed: the
+    restore the test has to perform anyway is done outside the protocol, and the
+    frontmost pid is asserted to have become the target's. That is the §14
+    finding, standing as a test rather than as a note.
+
+    `secondary_action: "raise"` is asserted in the same test and for the same
+    invariant: raising a background window moves it up the z-order — measured,
+    Preview 22 → 24 and Stickies 20 → 24 — with the frontmost pid unchanged.
+    Calculator is asserted separately because it advertises `AXRaise` and answers
+    `kAXErrorAttributeUnsupported`, which must arrive as `outcome: "failed"` with
+    `path: "ax_action"` rather than as an `ok` that did nothing.
+
 - **No tool schemas, no descriptions, no instructions.** `ToolDefinitions.swift`
   and `computerUseServerInstructions` do not survive. Maka's runtime owns every
   model-facing word, and a second copy in the executor is a second copy to drift.
@@ -2421,6 +2641,46 @@ nowhere else.
   question above — and it needs measuring on more than one application first.
   Both tables here are TextEdit on one machine, with one Calculator row beside
   them.
+
+- **A window cannot be restored from the Dock without activating its
+  application.** §6.1 ships `minimize_window` and no inverse, and the reason is
+  measured rather than assumed. Writing `AXMinimized = false` restores the
+  window *and* brings its application to the front, with no `AXMain` write
+  anywhere near it and against an application that was not frontmost to begin
+  with:
+
+  ```
+  Calculator  pid 30706   front 774   → minimize      774
+                                      → unminimize +0ms    774
+                                                   +300ms  30706
+                                                   +1500ms 30706
+  TextEdit    pid 93825   front 30706 → minimize      30706
+                                      → unminimize +0ms    30706
+                                                   +300ms  93825
+                                                   +1500ms 93825
+  ```
+
+  Minimising is the safe half and is measured so: the frontmost pid did not move
+  across either write, and it cannot — a minimise can only take a window *away*
+  from the front. What it does mean is that a model can put a window in the Dock
+  and cannot take it out, which is a real cost and is why this is written down
+  here rather than left as an omission.
+
+  Three ways out, none taken. Advertise it and declare that it activates —
+  rejected, because §5.7's own rule says a field that is a constant is not a
+  field, and "always takes the foreground" is a constant. Restore the previous
+  frontmost application afterwards — rejected, that is the executor taking the
+  foreground twice to hide taking it once. Or find a path that deminiaturises
+  without activating; `NSWindow.deminiaturize(_:)` is not one, and nothing else
+  has been measured. Whichever it is, it is a product decision about Maka's
+  invariant and not one the executor gets to make on its own.
+
+  Two smaller facts fell out of the same measurements and are settled rather than
+  open. `AXMain = true` does **not** take the foreground (measured on both
+  applications, frontmost pid unchanged), so it is not the mechanism here. And a
+  minimized window is still writable — `AXPosition` remained settable, the write
+  returned `kAXErrorSuccess`, and the readback moved — which is why
+  `minimize_window` does not have to be ordered against the geometry actions.
 
 - **The Electron/Chromium `element_released` rate is unmeasured.** §4.4 item 2
   states that tree-rebuilding applications can fail E1 on a control that is

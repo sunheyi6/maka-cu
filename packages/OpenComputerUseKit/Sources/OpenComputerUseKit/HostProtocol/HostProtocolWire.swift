@@ -520,9 +520,20 @@ public struct HostLimits: Codable, Equatable, Sendable {
 /// `mouse_down` / `mouse_up` are therefore not advertised — a half click has no
 /// target-bound form that survives the executor's own event source going away
 /// between the two halves — and `jpeg` waits for the capture stream that needs it.
+/// `unminimize_window` is absent for the same reason, and it is the one absence
+/// worth naming here because the action plainly exists on the machine. Writing
+/// `AXMinimized = false` restores the window and **activates its application**:
+/// measured on macOS 26.5 with no `AXMain` write anywhere near it, Calculator's
+/// pid took the foreground 300 ms after the write and TextEdit's did the same.
+/// §6.1 forbids an action that brings its target to the front, so the executor
+/// has no way to perform it and does not advertise one. §14 carries the
+/// measurement and what closing it would cost.
 public struct HostCapabilities: Codable, Equatable, Sendable {
     public var captureStream: Bool = false
-    public var elementActions: [String] = ["click", "set_value", "select_text", "secondary_action", "scroll"]
+    public var elementActions: [String] = [
+        "click", "set_value", "select_text", "secondary_action", "scroll",
+        "move_window", "resize_window", "minimize_window",
+    ]
     public var pointActions: [String] = [
         "move", "left_click", "right_click", "middle_click", "double_click",
         "triple_click", "drag", "scroll",
@@ -573,5 +584,24 @@ public struct HostPoint: Codable, Equatable, Sendable {
 
     public var cgPoint: CGPoint {
         CGPoint(x: x, y: y)
+    }
+}
+
+/// §6.1 — the extent half of a window frame, separate from `HostRect` because
+/// `resize_window` names a size and nothing else. Reusing `HostRect` with an
+/// origin the executor is required to ignore is the optional-bag shape the params
+/// structs already refuse: a field that is present and disregarded is a field the
+/// caller believes it set.
+public struct HostSize: Codable, Equatable, Sendable {
+    public let width: Double
+    public let height: Double
+
+    public init(width: Double, height: Double) {
+        self.width = width
+        self.height = height
+    }
+
+    public var cgSize: CGSize {
+        CGSize(width: width, height: height)
     }
 }

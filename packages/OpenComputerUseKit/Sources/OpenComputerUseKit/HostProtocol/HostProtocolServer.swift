@@ -163,6 +163,8 @@ extension HostElementAction: Decodable {
         case action
         case direction
         case pages
+        case position
+        case size
     }
 
     public init(from decoder: Decoder) throws {
@@ -189,6 +191,37 @@ extension HostElementAction: Decodable {
                 throw DecodingError.dataCorruptedError(forKey: .pages, in: container, debugDescription: "action.pages")
             }
             self = .scroll(direction: try container.decode(HostScrollDirection.self, forKey: .direction), pages: pages)
+        case "move_window":
+            // §6.1 — the executor does not clamp a window into a display, and
+            // there is therefore nothing here to validate a position against: a
+            // negative `y` is the ordinary way to name a display above the main
+            // one on this machine, and off-screen is a request macOS answers for
+            // itself. What is rejected is a number that is not a position.
+            //
+            // Unreachable through JSON, and kept anyway: `1e400` is not a
+            // representable `Double` and Foundation rejects the whole document
+            // rather than handing this an infinity. It stays for the reason
+            // `postKeyEvent`'s unreachable stroke guard stays — the alternative
+            // to refusing a non-finite position is writing one, and
+            // `AXValueCreate` would take it.
+            let position = try container.decode(HostPoint.self, forKey: .position)
+            guard position.x.isFinite, position.y.isFinite else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .position, in: container, debugDescription: "action.position")
+            }
+            self = .moveWindow(position)
+        case "resize_window":
+            // A negative extent is not a size. Zero is left alone: applications
+            // clamp it to their own minimum — measured, TextEdit answered a
+            // 10 × 10 request with 115 × 46 — and the readback is what says so.
+            let size = try container.decode(HostSize.self, forKey: .size)
+            guard size.width.isFinite, size.height.isFinite, size.width >= 0, size.height >= 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .size, in: container, debugDescription: "action.size")
+            }
+            self = .resizeWindow(size)
+        case "minimize_window":
+            self = .minimizeWindow
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "action.kind")
         }

@@ -14,6 +14,12 @@ public enum HostElementAction: Equatable, Sendable {
     case selectText(String)
     case secondaryAction(HostElementActionName)
     case scroll(direction: HostScrollDirection, pages: Double)
+    /// §6.1 — screen logical points, the space `snapshot.target.bounds` and
+    /// `displays[].logicalBounds` are already in. Not window-local: the window's
+    /// own origin is what is being written.
+    case moveWindow(HostPoint)
+    case resizeWindow(HostSize)
+    case minimizeWindow
 
     var requiredElementAction: HostElementActionName? {
         switch self {
@@ -27,6 +33,37 @@ public enum HostElementAction: Equatable, Sendable {
             return name
         case .setValue, .selectText, .scroll:
             return nil
+        case .moveWindow, .resizeWindow, .minimizeWindow:
+            // Written as an attribute, not performed as an action. `AXRaise` is
+            // the only action a window exposes — measured across seventeen
+            // applications on this machine, every one of them advertised exactly
+            // `["AXRaise"]` and nothing else — and it is already reachable as
+            // `secondary_action`.
+            return nil
+        }
+    }
+
+    /// §6.1 — whether the subject of this action is the window rather than
+    /// something drawn inside it.
+    ///
+    /// Two rules key off it and both are consequences of that one fact:
+    ///
+    /// - The target must be the snapshot root, because the window is the only
+    ///   element whose geometry this wire states in screen points (§5.3).
+    /// - Occlusion does not apply. The check asks whether the pixel about to be
+    ///   acted on belongs to somebody else, and a window action acts on no pixel:
+    ///   it moves the window and everything drawn in it, sheet included. A
+    ///   covered window is precisely the window a model wants to move, and an
+    ///   application started by `apps.launch` begins at the bottom of the z-order
+    ///   — so applying occlusion here would refuse window management on every
+    ///   freshly launched application, which is the defect §6.1 already had to
+    ///   fix once for `same_app`.
+    public var addressesTheWindowItself: Bool {
+        switch self {
+        case .moveWindow, .resizeWindow, .minimizeWindow:
+            return true
+        case .click, .setValue, .selectText, .secondaryAction, .scroll:
+            return false
         }
     }
 }

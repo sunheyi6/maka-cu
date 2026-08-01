@@ -327,7 +327,14 @@ extension HostProtocolServer {
             }
         }
 
-        if let frame = binding.observed.frame?.cgRect {
+        // §6.1 — occlusion asks whether the pixel about to be acted on belongs to
+        // somebody else. A window action acts on no pixel: it moves the window
+        // and everything drawn in it, sheet included, so a window with something
+        // stacked over it is exactly the window a model is asking to move.
+        // Applying the check here would also refuse window management on every
+        // application `apps.launch` started, because those begin at the bottom of
+        // the z-order — the defect §6.1 already had to fix once for `same_app`.
+        if !params.action.addressesTheWindowItself, let frame = binding.observed.frame?.cgRect {
             let center = CGPoint(
                 x: window.bounds.minX + frame.midX,
                 y: window.bounds.minY + frame.midY
@@ -364,6 +371,7 @@ extension HostProtocolServer {
             params.action,
             on: element,
             binding: binding,
+            window: window,
             settle: settleMode
         )
 
@@ -413,6 +421,7 @@ extension HostProtocolServer {
         _ action: HostElementAction,
         on element: AXUIElement,
         binding: HostElementBinding,
+        window: HostWindowInfo,
         settle: HostSettleMode
     ) -> PerformedAction {
         switch action {
@@ -504,7 +513,118 @@ extension HostProtocolServer {
                 ),
                 failure: nil
             )
+
+        case .moveWindow, .resizeWindow, .minimizeWindow:
+            return performWindowAction(action, on: element, binding: binding, window: window)
         }
+    }
+
+    /// §6.1 — the three actions whose subject is the window itself.
+    ///
+    /// One body for all three because the shape is one shape: check that the
+    /// target really is the window, check that the attribute is writable, read
+    /// what is there, write, read it back, wait for the window server, and judge
+    /// the action by the readback. Which attribute, and what a value looks like
+    /// as a string, is the only thing that differs, and it is decided once in
+    /// `hostWindowSubject(for:)`.
+    private func performWindowAction(
+        _ action: HostElementAction,
+        on element: AXUIElement,
+        binding: HostElementBinding,
+        window: HostWindowInfo
+    ) -> PerformedAction {
+        // §5.3 — the snapshot's tree is rooted at the window, so `depth == 0` is
+        // the window and nothing else is.
+        //
+        // Two reasons, and the second is the one that would break quietly. A
+        // window's position is the one geometry this wire states in *screen*
+        // points while every `element.frame` is window-local, so a non-root
+        // target would leave the executor guessing which space the request was
+        // in. And the wait below compares the *window's* frame, as the window
+        // server reports it, against the *element's* own readback: for anything
+        // but the window those are two different rectangles, so the wait could
+        // never agree, and every such call would spend the whole ceiling before
+        // answering with a verdict about one object and a wait about another.
+        //
+        // On this machine nothing else would get through anyway — `AXPosition`
+        // and `AXSize` were not settable on any ordinary control sampled — so
+        // this gate refuses nothing that would otherwise have worked. It is here
+        // to make the contract true by construction rather than by that accident.
+        guard binding.depth == 0 else {
+            return refused(.elementNotActionable)
+        }
+
+        guard let subject = hostWindowSubject(for: action) else {
+            return refused(.unsupportedAction)
+        }
+
+        // The honest refusal for Calculator, whose window advertises
+        // `AXSize` and will not let anyone write it. Asking first is what makes
+        // it `element_not_actionable` — an answer the model can act on — rather
+        // than a write that comes back `kAXErrorFailure` and reads as a fault.
+        guard HostAX.isSettable(element, subject.attribute) else {
+            return refused(.elementNotActionable)
+        }
+
+        let previous = subject.read(element)
+        guard subject.write(element) == .success else {
+            return failed(.dispatchRefused, path: .axAttribute)
+        }
+
+        // What the application reports straight away. For a geometry write this
+        // is already the new value, and it is what the window server has to catch
+        // up to.
+        let acknowledged = subject.read(element)
+
+        // §6.1 — the application answers immediately and the window server finds
+        // out afterwards (measured 26–172 ms). Everything downstream reads the
+        // window server, so returning before it agrees would hand the host a
+        // frame in which its own `observeAfter` cannot find the window.
+        hostAwaitWindowServerAgreement(
+            ceilingMs: hostWindowServerAgreementCeilingMs,
+            pollMs: hostWindowServerPollMs,
+            readback: acknowledged,
+            subject: subject,
+            sample: {
+                environment.onScreenWindows()
+                    .first { $0.pid == window.pid && $0.windowId == window.windowId }?
+                    .bounds
+            }
+        )
+
+        // The attribute is read again *after* the machine has caught up, and the
+        // verdict is taken from that read rather than from the first one.
+        //
+        // Not all three attributes answer at the same speed, and the difference
+        // is not cosmetic. `AXPosition` is the new value within 3–16 ms of the
+        // write. `AXMinimized` is not: measured, it still read `false` on the
+        // instant after a write that succeeded and the window did minimise, so
+        // an executor judging on the first read answers `suspected_noop` for an
+        // action that plainly happened — the exact false noop §6.5 spends its
+        // length condemning, and it was reported by this file's live half before
+        // this line existed.
+        let readback = subject.read(element) ?? acknowledged
+
+        // §6.5 — the same three arms `set_value` has, for the same reason: the
+        // attribute written *is* the subject of the action. The third arm is
+        // where the clamps land, and they are the ordinary case rather than the
+        // exception — measured, a request for `(99999, 300)` came back
+        // `(1687, -52)` and a request for 10 × 10 came back 115 × 46. Neither is
+        // `confirmed`: the window is not where it was asked to be. Neither is
+        // `suspected_noop`: it moved. Where it actually landed is a fact about
+        // the window, and it is reported as one — in the post-observation's
+        // `snapshot.target.bounds`.
+        return PerformedAction(
+            outcome: .ok,
+            path: .axAttribute,
+            tier: .ax,
+            verdict: hostEffectFromValueReadback(
+                requested: subject.requested,
+                previous: previous,
+                readback: readback
+            ),
+            failure: nil
+        )
     }
 
     private func performAXAction(
