@@ -13,7 +13,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const BINARY = '/Users/haoqing/Documents/Github/maka-cu/.build/release/OpenComputerUse';
+// Resolved from this repository rather than hardcoded, so the script works
+// from any checkout. `swift build -c release` produces it.
+const BINARY = new URL('../.build/release/OpenComputerUse', import.meta.url).pathname;
 const TARGET = process.argv[2] ?? 'Codex CUA Lab';
 const imageDir = mkdtempSync(join(tmpdir(), 'maka-cu-first-light-'));
 
