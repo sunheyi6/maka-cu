@@ -197,6 +197,146 @@ final class HostDispatchTests: XCTestCase {
         )
     }
 
+    func testADirectWebContentFrameOnlyReflowUsesTheTrustedRefetchedTarget() throws {
+        let oldFrame = HostRect(x: 20, y: 30, width: 120, height: 40)
+        let movedFrame = HostRect(x: 24, y: 34, width: 120, height: 40)
+        let webContentPid = hostTestPid + 1
+        let webContentStartTime = hostTestProcessStartTime + 10
+        let replacement = hostTestBinding(
+            token: "replacement",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                label: "Send",
+                frameInWindow: movedFrame.cgRect
+            ),
+            frame: movedFrame,
+            element: hostTestElement(pid: webContentPid),
+            dispatchPid: webContentPid,
+            dispatchProcessStartTime: webContentStartTime
+        )
+
+        var probe = FakeBindingProbe(
+            override: HostElementDigestInput(
+                role: "AXButton",
+                label: "Send",
+                frameInWindow: movedFrame.cgRect
+            )
+        )
+        probe.refetch = .unique(replacement)
+        probe.startTimes = [
+            hostTestPid: hostTestProcessStartTime,
+            webContentPid: webContentStartTime,
+        ]
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementFrame: oldFrame,
+            element: hostTestElement(pid: webContentPid),
+            dispatchPid: webContentPid,
+            dispatchProcessStartTime: webContentStartTime
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["outcome"] as? String, "ok")
+        XCTAssertEqual(result["path"] as? String, "skylight_pid")
+        XCTAssertEqual(harness.environment.pointEvents.posted.count, 1)
+        XCTAssertEqual(harness.environment.pointEvents.posted.first?.pid, webContentPid)
+    }
+
+    func testADirectWebContentFrameOnlyReflowFailsClosedWithoutOneReplacement() throws {
+        let oldFrame = HostRect(x: 20, y: 30, width: 120, height: 40)
+        let movedFrame = HostRect(x: 24, y: 34, width: 120, height: 40)
+        let webContentPid = hostTestPid + 1
+        let webContentStartTime = hostTestProcessStartTime + 10
+
+        for refetch in [HostBindingRefetchResult.missing, .ambiguous] {
+            var probe = FakeBindingProbe(
+                override: HostElementDigestInput(
+                    role: "AXButton",
+                    label: "Send",
+                    frameInWindow: movedFrame.cgRect
+                )
+            )
+            probe.refetch = refetch
+            probe.startTimes = [
+                hostTestPid: hostTestProcessStartTime,
+                webContentPid: webContentStartTime,
+            ]
+
+            var environment = FakeEnvironment()
+            environment.probe = probe
+            environment.windows = [hostTestWindow()]
+
+            let harness = ServerHarness(environment: environment)
+            try harness.begin()
+            let snapshot = hostTestSnapshot(
+                registry: harness.server.currentRegistry(),
+                session: "s1",
+                elementFrame: oldFrame,
+                element: hostTestElement(pid: webContentPid),
+                dispatchPid: webContentPid,
+                dispatchProcessStartTime: webContentStartTime
+            )
+            harness.install(snapshot)
+
+            harness.send(dispatchElement(snapshot: snapshot))
+            XCTAssertEqual(try errorCode(harness.awaitResult()), "element_changed")
+            XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty)
+        }
+    }
+
+    func testANativeFrameOnlyChangeStillFailsClosed() throws {
+        let oldFrame = HostRect(x: 20, y: 30, width: 120, height: 40)
+        let movedFrame = HostRect(x: 24, y: 34, width: 120, height: 40)
+        var probe = FakeBindingProbe(
+            override: HostElementDigestInput(
+                role: "AXButton",
+                label: "Send",
+                frameInWindow: movedFrame.cgRect
+            )
+        )
+        probe.refetch = .unique(
+            hostTestBinding(
+                token: "replacement",
+                digestInput: HostElementDigestInput(
+                    role: "AXButton",
+                    label: "Send",
+                    frameInWindow: movedFrame.cgRect
+                ),
+                frame: movedFrame,
+                element: hostTestElement()
+            )
+        )
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementFrame: oldFrame,
+            element: hostTestElement()
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+        XCTAssertEqual(try errorCode(harness.awaitResult()), "element_changed")
+        XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty)
+    }
+
     func testAnAmbiguousRefetchFailsClosed() throws {
         var probe = FakeBindingProbe()
         probe.alive = false

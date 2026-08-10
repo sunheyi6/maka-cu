@@ -651,16 +651,25 @@ func hostTestSnapshot(
     enabled: Bool = true,
     elementFrame: HostRect? = nil,
     element: AXUIElement? = nil,
-    elementActions: [HostElementActionName] = [.press]
+    elementActions: [HostElementActionName] = [.press],
+    dispatchPid: pid_t? = nil,
+    dispatchProcessStartTime: UInt64? = nil
 ) -> HostSnapshot {
     let id = registry.nextSnapshotId()
     let binding = hostTestBinding(
         token: "el_\(id)_0",
-        digestInput: HostElementDigestInput(role: "AXButton", label: "Send"),
+        digestInput: HostElementDigestInput(
+            role: "AXButton",
+            label: "Send",
+            frameInWindow: elementFrame?.cgRect
+        ),
         enabled: enabled,
         frame: elementFrame,
         element: element,
-        actions: elementActions
+        actions: elementActions,
+        dispatchPid: dispatchPid ?? hostTestPid,
+        dispatchProcessStartTime:
+            dispatchProcessStartTime ?? hostTestProcessStartTime
     )
 
     let windowDigest = hostWindowDigest(
