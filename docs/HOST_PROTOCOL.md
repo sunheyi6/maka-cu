@@ -1346,6 +1346,15 @@ renderer-owned element with equal role, stable identifier/name, compatible
 actions and frame within two points, the mirror is omitted. Ambiguous and
 non-leaf mirrors remain visible.
 
+Web layout may move a renderer-owned AX object after observation while the
+retained reference remains live. If E3 reports exactly `changed: ["frame"]`,
+dispatch may run the same unique identity-preserving refetch used for a released
+reference. The replacement must retain host and renderer process generations
+and semantic identity; role, name/identifier, actions, ancestors, or sibling
+identity changes still fail closed. Native AX bindings do not receive this
+exception. A unique direct WebContent replacement continues through the trusted
+renderer click path rather than falling back to AXPress.
+
 A left click on a renderer-owned element uses the host window's exact
 `CGWindowID`, a single private `SLEventPostToPid` channel, and the existing
 synthetic-target-focus lifetime. WindowServer performs the renderer hop. The
@@ -1651,8 +1660,10 @@ Separated:
   for it. Almost always the host pairing a token from one snapshot with a digest
   from another.
 - `element_changed` — both the token and the echo are right, and the element
-  itself moved on since observe. This is the only one of the three that describes
-  the world; the other two describe the host.
+  itself moved on since observe. A frame-only change may be recovered only by a
+  unique identity-preserving refetch; every other changed-field set is refused.
+  This is the only one of the three that describes the world; the other two
+  describe the host.
 
 The first two are host bookkeeping faults, so re-sending the same request against
 the same frame cannot help and the host MUST NOT do it. Both still map to

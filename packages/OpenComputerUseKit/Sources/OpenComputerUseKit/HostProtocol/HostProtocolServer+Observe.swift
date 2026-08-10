@@ -496,7 +496,15 @@ extension HostProtocolServer {
         var effectiveBinding = binding
         var promotedToWebContent = false
         if let failure = hostVerifyBinding(binding, probe: probe) {
-            guard failure.code == .elementReleased else {
+            // Renderer layout can move a still-live AX object between observe
+            // and dispatch. Only a frame-only change may use the same strict,
+            // unique identity-preserving refetch as a released reference.
+            let frameOnlyWebContentChange =
+                binding.dispatchPid != binding.pid
+                &&
+                failure.code == .elementChanged
+                && failure.detail == .changed([.frame])
+            guard failure.code == .elementReleased || frameOnlyWebContentChange else {
                 refuse(failure)
                 return
             }
@@ -504,6 +512,8 @@ extension HostProtocolServer {
             switch probe.uniqueRefetch(binding) {
             case .unique(let replacement):
                 effectiveBinding = replacement
+                promotedToWebContent =
+                    replacement.dispatchPid != replacement.pid
             case .missing:
                 refuse(failure)
                 return
