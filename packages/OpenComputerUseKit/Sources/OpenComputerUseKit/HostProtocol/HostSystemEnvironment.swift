@@ -40,6 +40,16 @@ public protocol HostSystemEnvironment {
     /// directly makes that field unassertable — which is how it went unnoticed
     /// that the field was answered from a value frozen at executor start.
     func frontmostApplicationPid() -> pid_t?
+    /// Restore the application that held the foreground before a target-owned
+    /// action activated itself. Never used to activate the target.
+    func restoreFrontmostApplication(pid: pid_t) -> Bool
+    /// Give a background target synthetic active state without changing the
+    /// real frontmost application. Optional because the SPI may be unavailable.
+    func beginSyntheticTargetFocus(
+        pid: pid_t,
+        windowId: CGWindowID
+    ) -> SkyLightSyntheticFocusContext?
+    func endSyntheticTargetFocus(_ context: SkyLightSyntheticFocusContext) -> Bool
     /// The unique WebKit WebContent process in the host app's coalition.
     func webContentProcess(pid: pid_t) -> pid_t?
     /// §5.7 — `apps.launch`. Resolves the request to a running application,
@@ -121,6 +131,34 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
 
     public func frontmostApplicationPid() -> pid_t? {
         LiveApplicationInventory.frontmostApplicationPid()
+    }
+
+    public func restoreFrontmostApplication(pid: pid_t) -> Bool {
+        guard let application = NSRunningApplication(processIdentifier: pid) else {
+            return false
+        }
+        return application.activate(options: [.activateAllWindows])
+    }
+
+    public func beginSyntheticTargetFocus(
+        pid: pid_t,
+        windowId: CGWindowID
+    ) -> SkyLightSyntheticFocusContext? {
+        try? SkyLightSPI.shared.beginSyntheticTargetFocus(
+            targetPID: pid,
+            targetWindowID: windowId
+        )
+    }
+
+    public func endSyntheticTargetFocus(
+        _ context: SkyLightSyntheticFocusContext
+    ) -> Bool {
+        do {
+            try SkyLightSPI.shared.endSyntheticTargetFocus(context)
+            return true
+        } catch {
+            return false
+        }
     }
 
     public func webContentProcess(pid: pid_t) -> pid_t? {

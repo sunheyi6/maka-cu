@@ -8,7 +8,7 @@ struct SkyLightActivationCommand: Equatable {
     let focused: Bool
 }
 
-struct SkyLightSyntheticFocusContext {
+public struct SkyLightSyntheticFocusContext {
     let deactivateTarget: SkyLightActivationCommand
 }
 
