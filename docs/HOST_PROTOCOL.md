@@ -560,6 +560,13 @@ the z-order, and the host that tried to pre-resolve an app string against
 Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
 `limits`. A value above the limit is `-32602`, not a silent clamp.
 
+When the window server already lists a window but Accessibility has not exposed
+its matching `AXWindow` / `AXSheet` yet, the executor retries that exact
+PID/window/frame match for 250 ms before returning `window_gone`. A window absent
+from the window inventory is still refused immediately. This covers the normal
+creation race after a press opens a sheet or secondary AppKit window without
+turning exact targeting into a fallback to another window.
+
 **Result**
 
 ```json
@@ -2041,6 +2048,22 @@ Rules the executor MUST follow:
 - A bare `AXUIElementPerformAction` returning `.success` is **not** confirmation.
   It yields `effect: "unverifiable"`, `verification.method: "action_result"`.
   `AXPress` succeeding means the message was accepted, not that anything moved.
+- A single left press, `press`, or `cancel` may create or close a window while
+  `AXUIElementPerformAction` is still returning `cannotComplete`. The executor
+  may upgrade that otherwise-unknown result to `ok` only when the exact set of
+  on-screen window IDs owned by the target PID changes in two consecutive
+  samples within 5 seconds, below the host's 20-second request deadline. The result reports
+  `confirmed / action_result`; a
+  requested post-observation of a closed target still reports `window_gone`.
+  Double/triple click, value/text/scroll and window actions never use this
+  recovery; without a stable topology change they remain `outcome_unknown`.
+- The executor records the frontmost PID immediately before a delivered element
+  action. If the target PID makes itself frontmost, the executor restores that
+  exact previous PID. It does not intervene when the user moved to a third
+  application, and it never activates the target. Activation completion and
+  WindowServer z-order propagation are asynchronous, so neither rewrites the
+  business outcome; the independent live foreground sentinel verifies this
+  safety property.
 - `set_value` MUST read the value back. Equal to the requested value →
   `confirmed` / `value_readback`. Equal to the *previous* value →
   `suspected_noop`. Anything else → `unverifiable`.

@@ -12,6 +12,33 @@ import XCTest
 /// every test green. The binding is the reason this protocol exists; these are
 /// the tests that turn red when it goes.
 final class HostDispatchTests: XCTestCase {
+    func testOnlySinglePressLikeActionsMayConfirmByChangingWindowTopology() {
+        XCTAssertTrue(hostUnknownActionMayChangeWindowTopology(.click(button: .left, count: 1)))
+        XCTAssertTrue(hostUnknownActionMayChangeWindowTopology(.secondaryAction(.press)))
+        XCTAssertTrue(hostUnknownActionMayChangeWindowTopology(.secondaryAction(.cancel)))
+
+        XCTAssertFalse(hostUnknownActionMayChangeWindowTopology(.click(button: .left, count: 2)))
+        XCTAssertFalse(hostUnknownActionMayChangeWindowTopology(.click(button: .right, count: 1)))
+        XCTAssertFalse(hostUnknownActionMayChangeWindowTopology(.setValue("x")))
+        XCTAssertFalse(hostUnknownActionMayChangeWindowTopology(.scroll(direction: .down, pages: 1)))
+    }
+
+    func testForegroundRestoreOnlyTargetsThePreviousAppAfterTargetActivation() {
+        XCTAssertEqual(
+            hostForegroundPidToRestore(previousPid: 41, currentPid: 52, targetPid: 52),
+            41
+        )
+        XCTAssertNil(
+            hostForegroundPidToRestore(previousPid: 41, currentPid: 63, targetPid: 52),
+            "a user switch to a third app must not be overwritten"
+        )
+        XCTAssertNil(
+            hostForegroundPidToRestore(previousPid: 52, currentPid: 52, targetPid: 52),
+            "an already-frontmost target has no prior foreground to restore"
+        )
+        XCTAssertNil(hostForegroundPidToRestore(previousPid: nil, currentPid: 52, targetPid: 52))
+    }
+
     // MARK: - The four declared fields on the refusal arm (§1.1, §6.5)
 
     func testEveryRefusalCarriesTheFourDeclaredFieldsAndTheirFixedPairing() throws {

@@ -145,11 +145,24 @@ extension HostProtocolServer {
             resolved = match
         }
 
-        guard let windowElement = environment.windowElement(
+        var windowElement = environment.windowElement(
             pid: resolved.pid,
             windowId: resolved.windowId,
             bounds: resolved.bounds
-        ) else {
+        )
+        if windowElement == nil {
+            let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+            repeat {
+                Thread.sleep(forTimeInterval: 0.01)
+                windowElement = environment.windowElement(
+                    pid: resolved.pid,
+                    windowId: resolved.windowId,
+                    bounds: resolved.bounds
+                )
+            } while windowElement == nil
+                && ProcessInfo.processInfo.systemUptime < deadline
+        }
+        guard let windowElement else {
             return .failure(HostDomainError(.windowGone))
         }
 
@@ -607,14 +620,35 @@ extension HostProtocolServer {
         }
 
         let settleMode = params.observeAfter?.settle ?? HostSettleMode.none
+        let frontmostBefore = environment.frontmostApplicationPid()
+        let windowIdsBefore = Set(
+            environment.onScreenWindows()
+                .filter { $0.pid == snapshot.pid }
+                .map(\.windowId)
+        )
         cancellations.markDispatched(id: id)
-        let performed = performElementAction(
+        let attempted = performElementAction(
             params.action,
             on: element,
             binding: effectiveBinding,
             window: window,
             settle: settleMode
         )
+        var performed =
+            attempted.outcome == .unknown
+                && hostUnknownActionMayChangeWindowTopology(params.action)
+                && windowTopologyChanged(
+                    pid: snapshot.pid,
+                    previousWindowIds: windowIdsBefore
+                )
+            ? confirmedWindowTopologyChange(attempted)
+            : attempted
+        if performed.outcome == .ok || performed.outcome == .unknown {
+            restoreForegroundIfTargetTookIt(
+               previousPid: frontmostBefore,
+               targetPid: snapshot.pid
+            )
+        }
 
         if performed.outcome != .ok, let failure = performed.failure {
             // §4.1 — a refused dispatch does not spend its snapshot; the host may
@@ -710,12 +744,26 @@ extension HostProtocolServer {
                 // a coordinate click it did not ask for.
                 return refused(.elementNotActionable)
             }
-            return performAXAction(required, on: element, binding: binding, repeatCount: count, settle: settle)
+            return performAXActionWithSyntheticFocus(
+                required,
+                on: element,
+                binding: binding,
+                window: window,
+                repeatCount: count,
+                settle: settle
+            )
 
         case .secondaryAction(let name):
             // §6.5 — `secondary_action` gets `action_result` only. There is
             // nothing generic to read back.
-            return performAXAction(name, on: element, binding: binding, repeatCount: 1, settle: .none)
+            return performAXActionWithSyntheticFocus(
+                name,
+                on: element,
+                binding: binding,
+                window: window,
+                repeatCount: 1,
+                settle: .none
+            )
 
         case .scroll(let direction, let pages):
             let name: HostElementActionName
@@ -1125,6 +1173,36 @@ extension HostProtocolServer {
         )
     }
 
+    private func performAXActionWithSyntheticFocus(
+        _ name: HostElementActionName,
+        on element: AXUIElement,
+        binding: HostElementBinding,
+        window: HostWindowInfo,
+        repeatCount: Int,
+        settle: HostSettleMode
+    ) -> PerformedAction {
+        let context = environment.beginSyntheticTargetFocus(
+            pid: binding.pid,
+            windowId: window.windowId
+        )
+        let result = performAXAction(
+            name,
+            on: element,
+            binding: binding,
+            repeatCount: repeatCount,
+            settle: settle
+        )
+        guard let context else {
+            return result
+        }
+        guard environment.endSyntheticTargetFocus(context) else {
+            return result.outcome == .refused || result.outcome == .failed
+                ? result
+                : unknownOutcome(path: result.path, tier: result.tier)
+        }
+        return result
+    }
+
     /// §6.5 — `refused` means nothing was dispatched, so it always reports
     /// `path: none`; the tier travels anyway, because it is the tier the executor
     /// would have used.
@@ -1155,14 +1233,70 @@ extension HostProtocolServer {
         )
     }
 
-    private func unknownOutcome() -> PerformedAction {
+    private func unknownOutcome(
+        path: HostDispatchPath = .axAction,
+        tier: HostDispatchTier = .ax
+    ) -> PerformedAction {
         PerformedAction(
             outcome: .unknown,
-            path: .axAction,
-            tier: .ax,
+            path: path,
+            tier: tier,
             verdict: hostEffectFromActionResult(),
             failure: HostDomainError(.outcomeUnknown)
         )
+    }
+
+    private func confirmedWindowTopologyChange(
+        _ attempted: PerformedAction
+    ) -> PerformedAction {
+        PerformedAction(
+            outcome: .ok,
+            path: attempted.path,
+            tier: attempted.tier,
+            verdict: HostEffectVerdict(
+                effect: .confirmed,
+                verification: HostVerification(method: .actionResult, observedChange: true)
+            ),
+            failure: nil
+        )
+    }
+
+    private func windowTopologyChanged(
+        pid: pid_t,
+        previousWindowIds: Set<CGWindowID>
+    ) -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        var consecutiveChangedSamples = 0
+        repeat {
+            let currentWindowIds = Set(
+                environment.onScreenWindows()
+                    .filter { $0.pid == pid }
+                    .map(\.windowId)
+            )
+            consecutiveChangedSamples =
+                currentWindowIds == previousWindowIds
+                ? 0
+                : consecutiveChangedSamples + 1
+            if consecutiveChangedSamples >= 2 {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        return false
+    }
+
+    private func restoreForegroundIfTargetTookIt(
+        previousPid: pid_t?,
+        targetPid: pid_t
+    ) {
+        guard let previousPid = hostForegroundPidToRestore(
+            previousPid: previousPid,
+            currentPid: environment.frontmostApplicationPid(),
+            targetPid: targetPid
+        ) else {
+            return
+        }
+        _ = environment.restoreFrontmostApplication(pid: previousPid)
     }
 
     /// Common tail for all three dispatch methods: spend the frame the request

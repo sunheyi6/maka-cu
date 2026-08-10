@@ -167,6 +167,35 @@ final class HostObserveContractTests: XCTestCase {
         XCTAssertEqual((difference["changes"] as? [[String: Any]])?.count, 0)
     }
 
+    func testObserveWaitsForANewWindowsAccessibilityElement() throws {
+        let pid = getpid()
+        let appId = "pid:\(pid)"
+        var environment = FakeEnvironment()
+        environment.apps = [
+            HostRunningApp(appId: appId, pid: pid, name: "Fixture", running: true),
+        ]
+        environment.windows = [
+            hostTestWindow(windowId: 91, pid: pid, appId: appId),
+        ]
+        environment.windowElements.sequence = [
+            nil,
+            hostTestElement(pid: pid),
+        ]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        harness.send(observe(app: appId))
+
+        let snapshot = try XCTUnwrap(
+            try harness.awaitResult()["snapshot"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            (snapshot["target"] as? [String: Any])?["windowId"] as? UInt32,
+            91
+        )
+        XCTAssertEqual(harness.environment.windowElements.reads, 2)
+    }
+
     func testObserveRefusalsDoNotCarryTheDispatchFields() throws {
         // §1.1 — no other method's `ok: false` arm carries them: `observe`
         // dispatched nothing, so an `outcome` on it would be a field with no

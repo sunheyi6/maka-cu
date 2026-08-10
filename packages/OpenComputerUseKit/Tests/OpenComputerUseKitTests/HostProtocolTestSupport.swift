@@ -313,6 +313,8 @@ final class FrontmostApplicationLog {
     var pid: pid_t?
     var sequence: [pid_t?] = []
     private(set) var reads = 0
+    private(set) var restoreRequests: [pid_t] = []
+    var restoreSucceeds = true
 
     func read() -> pid_t? {
         lock.lock()
@@ -322,6 +324,34 @@ final class FrontmostApplicationLog {
             return pid
         }
 
+        return sequence.removeFirst()
+    }
+
+    func restore(_ pid: pid_t) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        restoreRequests.append(pid)
+        guard restoreSucceeds else {
+            return false
+        }
+        self.pid = pid
+        return true
+    }
+}
+
+final class WindowElementLog {
+    private let lock = NSLock()
+    var fallback: AXUIElement?
+    var sequence: [AXUIElement?] = []
+    private(set) var reads = 0
+
+    func read() -> AXUIElement? {
+        lock.lock()
+        defer { lock.unlock() }
+        reads += 1
+        guard !sequence.isEmpty else {
+            return fallback
+        }
         return sequence.removeFirst()
     }
 }
@@ -343,7 +373,11 @@ struct FakeEnvironment: HostSystemEnvironment {
     /// element is touched. The `dispatch.key` vectors that need a real
     /// `AXUIElement` use `hostTestElement`.
     var focused: AXUIElement?
-    var windowElement: AXUIElement?
+    var windowElements = WindowElementLog()
+    var windowElement: AXUIElement? {
+        get { windowElements.fallback }
+        nonmutating set { windowElements.fallback = newValue }
+    }
     /// §5.8 — the menu bar tree, or `nil` for an application with no menu bar.
     /// Left `nil` by default so an observation that did not ask for the menu is
     /// the same test it always was.
@@ -364,6 +398,12 @@ struct FakeEnvironment: HostSystemEnvironment {
 
     func runningApps() -> [HostRunningApp] { inventory.read() }
     func frontmostApplicationPid() -> pid_t? { frontmost.read() }
+    func restoreFrontmostApplication(pid: pid_t) -> Bool { frontmost.restore(pid) }
+    func beginSyntheticTargetFocus(
+        pid: pid_t,
+        windowId: CGWindowID
+    ) -> SkyLightSyntheticFocusContext? { nil }
+    func endSyntheticTargetFocus(_ context: SkyLightSyntheticFocusContext) -> Bool { true }
     func webContentProcess(pid: pid_t) -> pid_t? { webContentPid }
     func onScreenWindows() -> [HostWindowInfo] { windows }
 
@@ -371,7 +411,9 @@ struct FakeEnvironment: HostSystemEnvironment {
         launches.record(query, budget)
     }
 
-    func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? { windowElement }
+    func windowElement(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? {
+        windowElements.read()
+    }
     func menuBarNode(pid: pid_t) -> HostAccessibilityNode? { menuBar }
     func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool { focusRequests.record(element) }

@@ -68,6 +68,30 @@ public enum HostElementAction: Equatable, Sendable {
     }
 }
 
+func hostUnknownActionMayChangeWindowTopology(_ action: HostElementAction) -> Bool {
+    switch action {
+    case .click(.left, 1), .secondaryAction(.press), .secondaryAction(.cancel):
+        return true
+    case .click, .setValue, .selectText, .secondaryAction, .scroll,
+         .moveWindow, .resizeWindow, .minimizeWindow:
+        return false
+    }
+}
+
+func hostForegroundPidToRestore(
+    previousPid: pid_t?,
+    currentPid: pid_t?,
+    targetPid: pid_t
+) -> pid_t? {
+    guard let previousPid,
+          previousPid != targetPid,
+          currentPid == targetPid
+    else {
+        return nil
+    }
+    return previousPid
+}
+
 public enum HostPointAction: Equatable, Sendable {
     case move
     case leftClick(count: Int)
