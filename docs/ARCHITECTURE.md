@@ -55,6 +55,7 @@
 ### 3. Service 层
 
 - host protocol 自己实现 observe 与 dispatch：`observe` 产出结构化的 AX 树 + element token，`dispatch.*` 只对 token 指名的那个元素执行指名的那个动作。它不复用 `ComputerUseService` 的 index 定址入口——把协议接到 index 上就等于把协议存在的理由接回来了。
+- `{kind: "app"}` 按 window inventory 的前到后顺序选择当前 sheet/窗口；`{kind: "window"}` 严格按 PID + window ID。AppKit sheet 在 CGWindow 侧是独立窗口、在 AX 侧是主窗口的 `AXSheet` / `AXDrawer` child，匹配顺序固定为 direct AXWindow 后 child sheet。
 - host protocol 会同时绑定宿主 app 与真实 input-owner 的 PID/start time。WKWebView/WebContent 通过动态解析 `_AXUIElementGetActualPid` 识别；冷启动时用 XNU resource + jetsam coalition 的唯一 WebContent 关系做 readiness gate，首轮没有 `AXWebArea` 时等待 250ms 后重读一次。
 - observation 会删除被唯一真实 WebContent 元素遮蔽的叶子 accessibility mirror；歧义或非叶子 mirror 保留。WebContent 左键点击使用 host window 的精确 `CGWindowID` 和单通道 private SkyLight 事件，WindowServer 完成 renderer hop，不再走会产生 `isTrusted=false` 的 AX/JavaScript mirror。
 - retained AX 引用失效后只允许同一 host/renderer 进程世代内的唯一 identity-preserving refetch；missing 与 ambiguous 分别拒绝为 `element_released` / `element_changed`。

@@ -528,6 +528,12 @@ match when the caller had sent only one (§5.2).
 
 `app` is an `appId` (§5.1). `{ "kind": "app" }` resolves to the app's frontmost
 usable window and is ambiguous by design; `{ "kind": "window" }` is exact.
+The frontmost inventory entry may be an AppKit sheet. `CGWindowList` reports a
+sheet as a window, while Accessibility exposes it as an `AXSheet`/`AXDrawer`
+child of the main `AXWindow`; the executor first matches ordinary AX windows by
+frame, then matches those child roles by the same frame. It does not query a
+fictional `AXSheets` attribute. Exact window targeting never falls back to the
+main window when the requested secondary or sheet window cannot be matched.
 Optional `app` *and* optional `windowId` in one object is how a real-machine
 failure happened: the contract said "app **or** window\_id" while the harness
 required both to match, so a compliant model could not pass. A tagged union

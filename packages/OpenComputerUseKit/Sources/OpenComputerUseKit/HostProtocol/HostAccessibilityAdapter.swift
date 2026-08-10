@@ -64,6 +64,21 @@ public struct HostWindowInfo: Equatable, Sendable {
     public let displayId: String?
 }
 
+func hostFirstWindowCandidate<Element>(
+    _ candidates: [(element: Element, frame: CGRect?)],
+    matching bounds: CGRect
+) -> Element? {
+    candidates.first { candidate in
+        guard let frame = candidate.frame else {
+            return false
+        }
+        return abs(frame.origin.x - bounds.origin.x) < 1
+            && abs(frame.origin.y - bounds.origin.y) < 1
+            && abs(frame.width - bounds.width) < 1
+            && abs(frame.height - bounds.height) < 1
+    }?.element
+}
+
 public enum HostWindowInventory {
     /// Front-to-back. `zIndex` counts down from the window count so it is
     /// strictly decreasing and never ties — the host resolves occlusion with it.
@@ -843,17 +858,10 @@ enum HostAX {
         // matched by its frame against the one the window list reported. Bounds
         // are compared at whole-point resolution because AX and CGWindowList
         // disagree in the sub-pixel digits on scaled displays.
-        let matchesReportedFrame = { (candidate: AXUIElement) -> Bool in
-            guard let frame = frame(candidate) else {
-                return false
-            }
-            return abs(frame.origin.x - bounds.origin.x) < 1
-                && abs(frame.origin.y - bounds.origin.y) < 1
-                && abs(frame.width - bounds.width) < 1
-                && abs(frame.height - bounds.height) < 1
-        }
-
-        if let matched = windows.first(where: matchesReportedFrame) {
+        if let matched = hostFirstWindowCandidate(
+            windows.map { ($0, frame($0)) },
+            matching: bounds
+        ) {
             return matched
         }
 
@@ -873,15 +881,15 @@ enum HostAX {
         // modal open: CGWindowList reported two windows, `AXWindows` reported
         // one, "AXSheets" reported zero, and `AXChildren` had the `AXSheet`
         // sitting in it at exactly the frame the window list had named.
-        for window in windows {
-            for child in array(window, kAXChildrenAttribute)
-            where sheetLikeRoles.contains(string(child, kAXRoleAttribute) ?? "")
-                && matchesReportedFrame(child) {
-                return child
+        let sheets = windows.flatMap { window in
+            array(window, kAXChildrenAttribute).filter {
+                sheetLikeRoles.contains(string($0, kAXRoleAttribute) ?? "")
             }
         }
-
-        return nil
+        return hostFirstWindowCandidate(
+            sheets.map { ($0, frame($0)) },
+            matching: bounds
+        )
     }
 
     /// Roles that CGWindowList reports as a window of their own while
