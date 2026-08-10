@@ -128,6 +128,45 @@ final class HostObserveContractTests: XCTestCase {
         )
     }
 
+    func testSecondObservationCarriesNoChangeDifferenceAgainstFirstSnapshot() throws {
+        let pid = getpid()
+        let appId = "pid:\(pid)"
+        var environment = FakeEnvironment()
+        environment.apps = [
+            HostRunningApp(appId: appId, pid: pid, name: "Fixture", running: true),
+        ]
+        environment.windows = [
+            hostTestWindow(
+                windowId: 81,
+                pid: pid,
+                appId: appId,
+                bounds: CGRect(x: 50, y: 50, width: 800, height: 600),
+                title: "Stable",
+                zIndex: 3
+            ),
+        ]
+        environment.windowElement = hostTestElement(pid: pid)
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+
+        harness.send(observe(app: appId))
+        let first = try XCTUnwrap(
+            try harness.awaitResult()["snapshot"] as? [String: Any]
+        )
+        XCTAssertNil(first["difference"])
+        let firstId = try XCTUnwrap(first["snapshotId"] as? String)
+
+        harness.send(observe(app: appId))
+        let second = try XCTUnwrap(
+            try harness.awaitResult()["snapshot"] as? [String: Any]
+        )
+        let difference = try XCTUnwrap(second["difference"] as? [String: Any])
+        XCTAssertEqual(difference["baseSnapshotId"] as? String, firstId)
+        XCTAssertEqual(difference["presentation"] as? String, "no-change")
+        XCTAssertEqual((difference["changes"] as? [[String: Any]])?.count, 0)
+    }
+
     func testObserveRefusalsDoNotCarryTheDispatchFields() throws {
         // §1.1 — no other method's `ok: false` arm carries them: `observe`
         // dispatched nothing, so an `outcome` on it would be a field with no

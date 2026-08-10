@@ -352,6 +352,20 @@ dictionary. It MUST NOT parse an index out of a token and re-walk the tree. An
 index-derived token that survives a tree rebuild is precisely the defect being
 removed.
 
+Each element also carries a non-negative integer `stableId`. This is presentation
+identity across revisions of the same `(session, pid, windowId)`, not dispatch
+identity:
+
+- the first observation assigns ids in depth-first tree order;
+- a later observation gives structurally matched nodes their previous ids;
+- a new node receives an id greater than every id in the baseline revision;
+- removed ids are not reassigned inside that revision chain.
+
+The host may expose `stableId` as the short model-facing element id, but it MUST
+map that id back to the fresh snapshot's `token` before dispatch. Quoting a
+stable id to `dispatch.element`, or resolving it against a later tree without
+the current token, would recreate the index bug under a different name.
+
 ### 4.3 What "the same element" means
 
 A token resolves to the same element at dispatch time if and only if all three
@@ -585,7 +599,16 @@ Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
     ],
     "obscuringRects": [ { "x": 300, "y": 100, "width": 400, "height": 300 } ],
     "elements": [ … ],
-    "truncated": { "elements": false, "depth": false }
+    "truncated": { "elements": false, "depth": false },
+    "difference": {
+      "baseSnapshotId": "snap_4e2c99…",
+      "presentation": "difference",
+      "changes": [
+        { "kind": "remove", "path": [0, 2], "stableId": 7, "token": null },
+        { "kind": "update", "path": [0, 3], "stableId": 9, "token": "el_9b41…" }
+      ],
+      "removedStableIdRanges": [ { "start": 7, "end": 8 } ]
+    }
   }
 }
 ```
@@ -606,6 +629,7 @@ the window list is read.
 ```json
 {
   "token": "el_7f3ab2…",
+  "stableId": 12,
   "parentToken": "el_1b0c55…",
   "depth": 4,
   "role": "AXButton",
@@ -627,6 +651,9 @@ the window list is read.
 
 - `parentToken` is `null` for the root. `null` and absent are the same on the
   wire; the executor SHOULD emit `null` for clarity.
+- `stableId` follows §4.2. It is required on snapshots produced by this
+  executor, while hosts MAY accept its absence from an older executor and fall
+  back to snapshot-local ordering for compatibility.
 - **`title` is `AXTitle` and `label` is `AXDescription`, and they are two
   fields.** Which one an element names itself with is the application's choice,
   not a shape the host may assume: measured on a background Calculator, 23 of 35
@@ -689,6 +716,42 @@ bound it raised was not the one that fired. What the wire must never do is stay
 silent: a short tree returned as `{ "elements": false, "depth": false }` tells
 the host it has seen the whole window, and every "the control is not there"
 conclusion drawn from it is wrong.
+
+### 5.2.1 Observation revisions
+
+`snapshot.difference` is absent when no earlier snapshot of the same
+`(session, pid, windowId)` can serve as a baseline. Otherwise it describes the
+window tree's revision against `baseSnapshotId`. The full current `elements`
+array is still present and authoritative; the difference is a bounded rendering
+hint, never a patch the host must apply to reconstruct the tree.
+
+`presentation` is a closed set:
+
+- `no-change`: no effective accessibility change; `changes` and
+  `removedStableIdRanges` are empty.
+- `difference`: render the declared changes instead of repeating the whole tree.
+- `full`: the difference would take more lines than the full tree, so render the
+  full current `elements` array.
+
+`changes` is ordered lexicographically by zero-based sibling `path`, then by
+`remove < insert < update`. An insert or update carries the current snapshot's
+token; a removal carries no token because that element is not dispatchable.
+Removed stable ids are also compressed into inclusive
+`removedStableIdRanges`, so a host can retire a contiguous run in one line.
+
+Matching is sibling-scoped and structural. Matched nodes inherit their stable
+ids even when fresh snapshot tokens change; new ids begin after the baseline's
+maximum. A spent snapshot remains eligible as the next difference baseline,
+because mutation consumes dispatch authority, not the executor's knowledge of
+what the host just saw. Expired and evicted snapshots are never baselines.
+
+The difference covers the window tree only. Menu observations retain their own
+scope and continue to travel as the full `snapshot.menu` payload.
+
+Hosts SHOULD render differences only for the immediate post-action observation.
+An explicit user/model `observe` SHOULD render the full authoritative tree even
+when the executor supplies a difference, so asking to look again never returns
+only a delta whose base may no longer be in model context.
 
 ### 5.3 Coordinate spaces, declared once
 
@@ -2477,6 +2540,19 @@ Frame binding:
    changed; `strictness: "element"` does not.
 8. A refused dispatch leaves the snapshot `live`; an `outcome_unknown` spends it.
 9. Snapshot ids from two executor generations never collide.
+
+Observation revisions:
+
+9a. The first observation assigns depth-first stable ids; a later observation
+    with fresh tokens preserves ids for structurally matched nodes and gives new
+    nodes ids above the previous maximum.
+9b. A spent snapshot remains the next difference baseline, while expired and
+    evicted snapshots do not.
+9c. Empty effective change produces `presentation: "no-change"`; insert/update
+    changes carry current tokens; removals carry no token and their stable ids
+    are compressed into inclusive ranges.
+9d. A difference whose rendered line count exceeds the full tree selects
+    `presentation: "full"`.
 
 Declared schema:
 

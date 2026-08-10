@@ -8,6 +8,7 @@ import Foundation
 
 public struct HostObservedElement: Codable, Equatable, Sendable {
     public let token: String
+    public let stableId: Int?
     public let parentToken: String?
     public let depth: Int
     public let role: String
@@ -141,6 +142,7 @@ public struct HostSnapshotPayload: Codable, Equatable, Sendable {
     public let obscuringRects: [HostRect]
     public let elements: [HostObservedElement]
     public let truncated: HostSnapshotTruncation
+    public let difference: HostObservationDifferencePayload?
     /// §5.8 — absent when the host did not ask for the menu bar, so "we did not
     /// look" and "we looked and there is nothing" are different reads. Every
     /// other optional here is `null`-when-absent because absence is a fact about
@@ -371,6 +373,7 @@ public func hostWalkTree(
 
         let observed = HostObservedElement(
             token: selfToken,
+            stableId: nil,
             parentToken: parentToken,
             depth: depth,
             role: node.role,

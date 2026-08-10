@@ -39,6 +39,7 @@ public final class HostSnapshot {
     public let windowDigest: String
     public let payload: HostSnapshotPayload
     public let bindings: [String: HostElementBinding]
+    let observationRevision: HostObservationRevision
     /// The image file this snapshot owns. §8 ties the file's lifetime to the
     /// snapshot's, so it is deleted the moment the snapshot leaves the live set.
     public let imagePath: String?
@@ -53,7 +54,8 @@ public final class HostSnapshot {
         windowDigest: String,
         payload: HostSnapshotPayload,
         bindings: [HostElementBinding],
-        imagePath: String?
+        imagePath: String?,
+        observationRevision: HostObservationRevision? = nil
     ) {
         self.id = id
         self.session = session
@@ -64,6 +66,10 @@ public final class HostSnapshot {
         self.payload = payload
         self.bindings = Dictionary(uniqueKeysWithValues: bindings.map { ($0.token, $0) })
         self.imagePath = imagePath
+        self.observationRevision = observationRevision
+            ?? hostAssignRootStableIds(
+                hostObservationRevision(from: payload.elements)
+            )
     }
 
     /// §4.2 — exact string match in a per-snapshot dictionary. Never an index
@@ -291,6 +297,21 @@ public final class HostSnapshotRegistry {
         }
 
         return .success(snapshot)
+    }
+
+    func latestDifferenceBaseline(
+        session: String,
+        pid: pid_t,
+        windowId: CGWindowID
+    ) -> HostSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions[session]?.snapshots.last {
+            $0.pid == pid
+                && $0.windowId == windowId
+                && $0.state != .expired
+                && $0.state != .evicted
+        }
     }
 
     /// §4.1 — a dispatch that returned `ok:true` with a mutating method, or

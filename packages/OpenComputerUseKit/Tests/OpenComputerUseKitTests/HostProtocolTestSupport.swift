@@ -575,6 +575,7 @@ func hostTestBinding(
         element: element,
         observed: HostObservedElement(
             token: token,
+            stableId: nil,
             parentToken: nil,
             depth: 1,
             role: digestInput.role,
@@ -648,6 +649,7 @@ func hostTestSnapshot(
         obscuringRects: [],
         elements: [binding.observed],
         truncated: HostSnapshotTruncation(elements: false, depth: false),
+        difference: nil,
         menu: nil
     )
 
@@ -713,6 +715,7 @@ func hostTestWalkedSnapshot(
         obscuringRects: [],
         elements: walk.elements,
         truncated: walk.truncated,
+        difference: nil,
         menu: nil
     )
 

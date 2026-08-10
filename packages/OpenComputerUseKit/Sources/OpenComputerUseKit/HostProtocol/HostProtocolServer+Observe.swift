@@ -274,12 +274,34 @@ extension HostProtocolServer {
 
         let obscuring = HostWindowInventory.obscuringRects(above: resolved, in: windows).map(HostRect.init)
         let displays = HostWindowInventory.displays()
+        let previousSnapshot = currentRegistry().latestDifferenceBaseline(
+            session: session,
+            pid: resolved.pid,
+            windowId: resolved.windowId
+        )
 
         let fitted = hostFitResponse(
             maxElements: maxElements,
             limitBytes: limits.maxResponseBytes
-        ) { budget -> (payload: (HostSnapshotPayload, HostTreeWalkResult), encoded: Data) in
-            let result = hostRemovingShadowedWebMirrors(walk(budget))
+        ) { budget -> (payload: (HostSnapshotPayload, HostTreeWalkResult, HostObservationRevision), encoded: Data) in
+            let rawResult = hostRemovingShadowedWebMirrors(walk(budget))
+            let currentRevision = hostObservationRevision(from: rawResult.elements)
+            let appendResult = previousSnapshot.map {
+                hostAppendObservationRevision(
+                    previous: $0.observationRevision,
+                    current: currentRevision
+                )
+            }
+            let revision = appendResult?.revision
+                ?? hostAssignRootStableIds(currentRevision)
+            let result = hostApplyingStableIds(rawResult, revision: revision)
+            let difference = appendResult.map {
+                hostObservationDifferencePayload(
+                    baseSnapshotId: previousSnapshot!.id,
+                    appendResult: $0,
+                    fullLineCount: result.elements.count
+                )
+            }
             let windowDigest = hostWindowDigest(
                 elementDigests: result.elements.map(\.digest),
                 bounds: resolved.bounds,
@@ -308,11 +330,12 @@ extension HostProtocolServer {
                 obscuringRects: obscuring,
                 elements: result.elements,
                 truncated: result.truncated,
+                difference: difference,
                 menu: menuWalk?.observation
             )
 
             let encoded = (try? HostProtocolCodec.encoder.encode(payload)) ?? Data()
-            return ((payload, result), encoded)
+            return ((payload, result, revision), encoded)
         }
 
         switch fitted {
@@ -322,7 +345,7 @@ extension HostProtocolServer {
             }
             return .failure(error)
         case .success(let fit):
-            let (payload, walkResult) = fit.payload
+            let (payload, walkResult, observationRevision) = fit.payload
             return .success(
                 HostSnapshot(
                     id: snapshotId,
@@ -337,7 +360,8 @@ extension HostProtocolServer {
                     // lookup §4.2 allows. Their tokens cannot collide with the
                     // window's: the two walks are given different prefixes.
                     bindings: walkResult.bindings + (menuWalk?.bindings ?? []),
-                    imagePath: image?.path
+                    imagePath: image?.path,
+                    observationRevision: observationRevision
                 )
             )
         }

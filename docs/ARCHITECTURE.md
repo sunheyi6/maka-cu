@@ -51,10 +51,13 @@
 - 握手带回 executor 版本、capabilities 和全部 limits。host 不允许硬编码 executor 负责执行的边界，因为过去两侧各写一份、谁都发现不了漂移。
 - 并发按 lane 组织：`control`、`target:<pid>:<windowId>`、`misc`、`capture:<streamId>`。同 lane 严格 FIFO，跨 lane 并发；所以同一窗口的 dispatch 永远不会超过产出它 snapshot 的 observe，而未来的 capture 长轮询也不会挡住 dispatch。
 - 每个 snapshot id 都带一个 128-bit 的 per-process nonce。executor 重启后，上一代的 id 一定 `snapshot_unknown`，不会静默命中新状态。
+- 每个窗口 observation 还维护一条 executor 内部 revision：首轮按 DFS 分配非负 `stableId`，后续 sibling-scoped 结构匹配继承旧 id，新元素从历史最大值之后继续分配。`stableId` 只用于模型展示与差分，真实 dispatch 仍映射回当前 snapshot 的 opaque token。
+- 同一 session/window 的后续 snapshot 可带 `difference`：空变化标为 `no-change`，有效变化按 path 与 remove/insert/update 顺序输出，删除 id 压缩为 range；差分行数大于完整树时标为 `full`。完整 `elements` 始终随 snapshot 返回，runtime 只在动作后的 observation 渲染差分，显式 observe 继续显示完整树。
 
 ### 3. Service 层
 
 - host protocol 自己实现 observe 与 dispatch：`observe` 产出结构化的 AX 树 + element token，`dispatch.*` 只对 token 指名的那个元素执行指名的那个动作。它不复用 `ComputerUseService` 的 index 定址入口——把协议接到 index 上就等于把协议存在的理由接回来了。
+- mutation 消费 snapshot 的 dispatch authority，但 spent snapshot 的 revision 仍可作为下一次 post-action observation 的差分基线；expired/evicted snapshot 不参与。这样动作后的模型输入可以只写有效变化，又不放宽 single-use snapshot 合同。
 - `{kind: "app"}` 按 window inventory 的前到后顺序选择当前 sheet/窗口；`{kind: "window"}` 严格按 PID + window ID。AppKit sheet 在 CGWindow 侧是独立窗口、在 AX 侧是主窗口的 `AXSheet` / `AXDrawer` child，匹配顺序固定为 direct AXWindow 后 child sheet。
 - host protocol 会同时绑定宿主 app 与真实 input-owner 的 PID/start time。WKWebView/WebContent 通过动态解析 `_AXUIElementGetActualPid` 识别；冷启动时用 XNU resource + jetsam coalition 的唯一 WebContent 关系做 readiness gate，首轮没有 `AXWebArea` 时等待 250ms 后重读一次。
 - observation 会删除被唯一真实 WebContent 元素遮蔽的叶子 accessibility mirror；歧义或非叶子 mirror 保留。WebContent 左键点击使用 host window 的精确 `CGWindowID` 和单通道 private SkyLight 事件，WindowServer 完成 renderer hop，不再走会产生 `isTrusted=false` 的 AX/JavaScript mirror。
