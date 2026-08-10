@@ -16,5 +16,5 @@
 | Linux runtime | C | 已新增独立 Go binary，通过 Python GI / AT-SPI2 暴露同样 9 个 tools、MCP server 和 `call --calls`；Ubuntu GNOME VM 已跑通 `list_apps`、MCP tools list 和 Text Editor 8-tool sequence，并已接入 npm bundled artifact 分发，但截图在 GNOME Wayland 下仍只能 best-effort，coordinate input 也不是通用后台模型。 | 补 Linux fixture、可重复 smoke runner、portal/compositor screenshot 路径，以及更原生的 Go D-Bus/libatspi bridge。 |
 | 架构文档 | B | 顶层结构、fixture bridge、app 模式和验证路径已经落文档。 | 后续补 release artifact、code signing / notarization 和 host 集成方式。 |
 | 测试 | B | `swift test` 覆盖绑定/refetch/path/readback；共享 CUA Lab 已重复验证 OOP trusted event、slider、scroll、前台稳定与 stale 零误点。 | 把共享 CUA Lab 的 WebContent matrix 收进可选 CI/live runner，并增加更多真实 Electron app 录制回归。 |
-| 可观测性 | C | 已有 `doctor`、`snapshot`、smoke 输出，以及一组仓库内留档的官方 `computer-use` / 本仓库实现对比样本。 | 补统一日志级别、失败上下文和 release artifact 里的诊断信息，把一次性样本收敛成可重复采集流程。 |
+| 可观测性 | B | `doctor --json` 已覆盖协议/版本、TCC、锁屏、SkyLight、actual-PID SPI、coalition、签名/hardened runtime 与 readiness；另有 snapshot、smoke 和对比样本。 | 补统一日志级别、notarization/staple 诊断与 release artifact 自检。 |
 | 安全 | B | 已明确本地-only、权限边界和 fixture test bridge 的作用域，并将内置 denylist 收缩到密码管理器。 | 增加 session approval 和更清楚的敏感 app policy，避免策略长期硬编码在仓库里。 |

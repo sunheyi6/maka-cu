@@ -36,6 +36,7 @@
 ### 1. App Mode 层
 
 - `OpenComputerUse` 默认 app 模式会拉起 `PermissionOnboardingApp`。
+- `doctor` 默认输出人类可读的协议、权限、锁屏、native capability、签名与 readiness；`doctor --json` 输出 side-effect-free 结构化报告，`--no-onboarding` 可禁止 text mode 拉起 UI。
 - app bundle 以 `LSUIElement` agent-style 形态运行，默认不在 Dock 暴露常驻图标，但仍可按需显示权限窗口。
 - 终端 CLI 不再通过 LaunchServices 把自己重新拉起成 app agent。macOS 通过 responsibility chain 归属 TCC 授权，被 LaunchServices 重新拉起的 helper 会拿到自己的归属和自己的弹窗；embedded executor 需要的恰恰相反，必须继承 host 的 Accessibility 授权，所以 host 直接把它当子进程 spawn。
 - 主窗口负责渲染 `Accessibility` / `Screen & System Audio Recording` 两类权限卡片、`Allow` / `Done` 状态和 relaunch 后的状态收敛；当两项权限都已完成时会自动关闭，不再要求用户手动退出。
@@ -150,6 +151,7 @@
 - 对比样本：`artifacts/tool-comparisons/20260417-focus-behavior/`
 - 手工诊断：
   - `open-computer-use doctor`
+  - `open-computer-use doctor --json`
   - `open-computer-use snapshot <app>`
   - `open-computer-use list-apps`
   - `open-computer-use host`（读 stdin 的 `maka.cu/2` host protocol server）

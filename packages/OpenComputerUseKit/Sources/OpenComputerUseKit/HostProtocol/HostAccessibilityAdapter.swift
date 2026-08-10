@@ -22,6 +22,10 @@ private let hostAXGetActualPid: HostAXGetActualPid? = {
     return unsafeBitCast(symbol, to: HostAXGetActualPid.self)
 }()
 
+public func hostActualPidSPIAvailable() -> Bool {
+    hostAXGetActualPid != nil
+}
+
 /// Everything in this file talks to macOS. It is kept apart from the protocol
 /// logic so the lifecycle, binding and path rules stay testable without a
 /// desktop, and so this is the only place to look when Accessibility behaviour

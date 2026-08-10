@@ -38,6 +38,18 @@ rather than a divergence that has to be re-merged forever.
 
 Improvements to the shared accessibility layer belong upstream, not here.
 
+## Diagnostics
+
+```bash
+open-computer-use doctor
+open-computer-use doctor --json
+```
+
+Text mode reports protocol, permissions, lock state, native WebContent/SkyLight
+capabilities, code signing, and readiness. It opens onboarding when permissions
+are missing. `--json` is side-effect free and emits the same information as one
+stable JSON object; add `--no-onboarding` to text mode for automation.
+
 ## Attribution
 
 - Forked from `iFurySt/open-codex-computer-use` at `a265277` (v0.3.0,

@@ -120,6 +120,10 @@ enum LiveApplicationInventory {
         return matches.count == 1 ? matches[0] : nil
     }
 
+    static func coalitionProbeAvailable(pid: pid_t = getpid()) -> Bool {
+        coalitionInfo(pid: pid) != nil
+    }
+
     private static func coalitionInfo(pid: pid_t) -> CoalitionInfo? {
         var info = CoalitionInfo()
         let read = withUnsafeMutablePointer(to: &info) { pointer in
