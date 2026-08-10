@@ -75,16 +75,27 @@ final class FakeNode: HostAccessibilityNode {
 struct FakeBindingProbe: HostElementBindingProbe {
     var alive = true
     var startTime: UInt64? = hostTestProcessStartTime
+    var startTimes: [pid_t: UInt64] = [:]
+    var actualPidOverride: pid_t?
     var override: HostElementDigestInput?
+    var refetch: HostBindingRefetchResult = .missing
+    var webContentEquivalent: HostElementBinding?
 
     init(override: HostElementDigestInput? = nil) {
         self.override = override
     }
 
     func isReferenceAlive(_ binding: HostElementBinding) -> Bool { alive }
-    func processStartTime(pid: pid_t) -> UInt64? { startTime }
+    func processStartTime(pid: pid_t) -> UInt64? { startTimes[pid] ?? startTime }
+    func actualPid(_ binding: HostElementBinding) -> pid_t? {
+        actualPidOverride ?? binding.dispatchPid
+    }
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
         override ?? binding.digestInput
+    }
+    func uniqueRefetch(_ binding: HostElementBinding) -> HostBindingRefetchResult { refetch }
+    func uniqueWebContentEquivalent(_ binding: HostElementBinding) -> HostElementBinding? {
+        webContentEquivalent
     }
 }
 
@@ -130,13 +141,15 @@ final class FakeRecomputingProbe: HostElementBindingProbe {
 /// a refusal posted nothing at all.
 final class PointEventLog {
     private let lock = NSLock()
-    private(set) var posted: [(action: HostPointAction, point: CGPoint, path: HostDispatchPath)] = []
+    private(set) var posted: [
+        (action: HostPointAction, point: CGPoint, pid: pid_t, path: HostDispatchPath)
+    ] = []
     /// When set, the post throws — the executor's "attempted, the OS said no".
     var failure: Error?
 
-    func record(action: HostPointAction, point: CGPoint, path: HostDispatchPath) throws {
+    func record(action: HostPointAction, point: CGPoint, pid: pid_t, path: HostDispatchPath) throws {
         lock.lock()
-        posted.append((action: action, point: point, path: path))
+        posted.append((action: action, point: point, pid: pid, path: path))
         lock.unlock()
 
         if let failure {
@@ -319,6 +332,7 @@ struct FakeEnvironment: HostSystemEnvironment {
     var screenCaptureGranted = true
     var inventory = AppInventoryLog()
     var frontmost = FrontmostApplicationLog()
+    var webContentPid: pid_t?
     var apps: [HostRunningApp] {
         get { inventory.apps }
         nonmutating set { inventory.apps = newValue }
@@ -350,6 +364,7 @@ struct FakeEnvironment: HostSystemEnvironment {
 
     func runningApps() -> [HostRunningApp] { inventory.read() }
     func frontmostApplicationPid() -> pid_t? { frontmost.read() }
+    func webContentProcess(pid: pid_t) -> pid_t? { webContentPid }
     func onScreenWindows() -> [HostWindowInfo] { windows }
 
     func launchApp(_ query: String, waitFor budget: TimeInterval) -> Result<HostRunningApp, HostDomainError> {
@@ -369,11 +384,26 @@ struct FakeEnvironment: HostSystemEnvironment {
         pid: pid_t,
         path: HostDispatchPath
     ) throws {
-        try pointEvents.record(action: action, point: point, path: path)
+        try pointEvents.record(action: action, point: point, pid: pid, path: path)
     }
 
     func postKeyEvent(_ action: HostKeyAction, pid: pid_t) throws {
         try keyEvents.record(action)
+    }
+
+    func postWebContentClick(
+        at screenPoint: CGPoint,
+        windowPoint: CGPoint,
+        window: HostWindowInfo,
+        dispatchPid: pid_t,
+        count: Int
+    ) throws {
+        try pointEvents.record(
+            action: .leftClick(count: count),
+            point: screenPoint,
+            pid: dispatchPid,
+            path: .skylightPid
+        )
     }
 }
 
@@ -528,7 +558,10 @@ func hostTestBinding(
     digestInput: HostElementDigestInput,
     enabled: Bool = true,
     frame: HostRect? = nil,
-    element: AXUIElement? = nil
+    element: AXUIElement? = nil,
+    actions: [HostElementActionName] = [.press],
+    dispatchPid: pid_t = hostTestPid,
+    dispatchProcessStartTime: UInt64 = hostTestProcessStartTime
 ) -> HostElementBinding {
     HostElementBinding(
         token: token,
@@ -536,6 +569,8 @@ func hostTestBinding(
         depth: 1,
         pid: hostTestPid,
         processStartTime: hostTestProcessStartTime,
+        dispatchPid: dispatchPid,
+        dispatchProcessStartTime: dispatchProcessStartTime,
         digestInput: digestInput,
         element: element,
         observed: HostObservedElement(
@@ -553,7 +588,7 @@ func hostTestBinding(
             focused: false,
             selected: nil,
             frame: frame,
-            actions: [.press],
+            actions: actions,
             digest: hostElementDigest(digestInput),
             truncated: []
         )
@@ -572,7 +607,8 @@ func hostTestSnapshot(
     image: HostImageReference? = nil,
     enabled: Bool = true,
     elementFrame: HostRect? = nil,
-    element: AXUIElement? = nil
+    element: AXUIElement? = nil,
+    elementActions: [HostElementActionName] = [.press]
 ) -> HostSnapshot {
     let id = registry.nextSnapshotId()
     let binding = hostTestBinding(
@@ -580,7 +616,8 @@ func hostTestSnapshot(
         digestInput: HostElementDigestInput(role: "AXButton", label: "Send"),
         enabled: enabled,
         frame: elementFrame,
-        element: element
+        element: element,
+        actions: elementActions
     )
 
     let windowDigest = hostWindowDigest(

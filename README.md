@@ -20,8 +20,8 @@ all three, and has semantics upstream does not:
   against a freshly taken snapshot at action time
 - the full Anthropic `computer_20251124` action contract, because Maka serves
   models that emit it; upstream is shaped for Codex's own tool surface
-- Electron and Chromium targets driven through page identity and DOM read-back
-  rather than through accessibility alone
+- WebContent/renderer elements bound to their real process generation, with
+  unique stale refetch and a trusted background window-event path
 
 So what is taken is the executor: the accessibility snapshot, the dispatch core,
 input synthesis, the SkyLight background-click path, and app discovery. What is

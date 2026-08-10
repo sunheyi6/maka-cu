@@ -527,6 +527,25 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual(surprising.verification.method, .valueReadback)
     }
 
+    func testNumericValueReadbackTreatsEquivalentNumberSpellingsAsEqual() {
+        let confirmed = hostEffectFromValueReadback(
+            requested: "42",
+            previous: "25",
+            readback: "42.0",
+            comparesNumerically: true
+        )
+        XCTAssertEqual(confirmed.effect, .confirmed)
+        XCTAssertTrue(confirmed.verification.observedChange)
+
+        let noop = hostEffectFromValueReadback(
+            requested: "42",
+            previous: "25.0",
+            readback: "25",
+            comparesNumerically: true
+        )
+        XCTAssertEqual(noop.effect, .suspectedNoop)
+    }
+
     func testClickWithoutSettlingNeverClaimsConfirmationFromATreeDelta() {
         let unsettled = hostEffectFromTreeDelta(
             settle: .none,

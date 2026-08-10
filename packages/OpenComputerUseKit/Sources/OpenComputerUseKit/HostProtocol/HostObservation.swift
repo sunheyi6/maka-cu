@@ -155,6 +155,10 @@ public struct HostSnapshotPayload: Codable, Equatable, Sendable {
 /// without a live desktop. The Accessibility adapter lives in `HostAXNode`.
 public protocol HostAccessibilityNode: AnyObject {
     var axElement: AXUIElement? { get }
+    /// The process that receives input for this element. For ordinary AppKit
+    /// elements this is the application pid; for a WKWebView/Chromium subtree it
+    /// may be the out-of-process WebContent/renderer pid.
+    var actualPid: pid_t? { get }
     var role: String { get }
     var subrole: String? { get }
     var axIdentifier: String? { get }
@@ -183,6 +187,10 @@ public protocol HostAccessibilityNode: AnyObject {
     var children: [HostAccessibilityNode] { get }
 }
 
+public extension HostAccessibilityNode {
+    var actualPid: pid_t? { nil }
+}
+
 public struct HostTreeWalkBounds: Equatable, Sendable {
     public let maxElements: Int
     public let maxDepth: Int
@@ -206,6 +214,42 @@ public struct HostTreeWalkResult {
     public let bindings: [HostElementBinding]
     public let truncated: HostSnapshotTruncation
     public let focusedToken: String?
+}
+
+/// Remove a leaf accessibility mirror when the same snapshot contains exactly
+/// one renderer-owned WebContent element with the same semantic identity and
+/// geometry. The renderer element keeps its original token and parent.
+///
+/// Non-leaf mirrors are retained because removing one would orphan its children.
+/// Ambiguous matches are retained so dispatch can fail closed rather than hide
+/// evidence that the tree is ambiguous.
+public func hostRemovingShadowedWebMirrors(
+    _ result: HostTreeWalkResult
+) -> HostTreeWalkResult {
+    let parentTokens = Set(result.bindings.compactMap(\.parentToken))
+    var replacements: [String: String] = [:]
+
+    for binding in result.bindings
+    where binding.dispatchPid == binding.pid && !parentTokens.contains(binding.token) {
+        let matches = result.bindings.filter {
+            $0.token != binding.token
+                && hostIsWebContentEquivalent(recorded: binding, candidate: $0)
+        }
+        if matches.count == 1, let replacement = matches.first {
+            replacements[binding.token] = replacement.token
+        }
+    }
+
+    guard !replacements.isEmpty else {
+        return result
+    }
+
+    return HostTreeWalkResult(
+        elements: result.elements.filter { replacements[$0.token] == nil },
+        bindings: result.bindings.filter { replacements[$0.token] == nil },
+        truncated: result.truncated,
+        focusedToken: result.focusedToken.flatMap { replacements[$0] ?? $0 }
+    )
 }
 
 /// Breadth-agnostic depth-first walk. Nodes are numbered in traversal order, and
@@ -246,6 +290,7 @@ public func hostWalkTree(
     var hitDepthBound = false
     var hitTimeBound = false
     var nextIndex = 0
+    var processStartTimes: [pid_t: UInt64] = [pid: processStartTime]
 
     func token(for index: Int) -> String {
         "el_\(tokenPrefix)_\(index)"
@@ -344,6 +389,19 @@ public func hostWalkTree(
             truncated: truncatedFields
         )
 
+        let reportedActualPid = node.actualPid ?? pid
+        let dispatchStartTime: UInt64?
+        if let cached = processStartTimes[reportedActualPid] {
+            dispatchStartTime = cached
+        } else {
+            let measured = hostProcessStartTime(pid: reportedActualPid)
+            if let measured {
+                processStartTimes[reportedActualPid] = measured
+            }
+            dispatchStartTime = measured
+        }
+        let dispatchPid = dispatchStartTime == nil ? pid : reportedActualPid
+
         elements.append(observed)
         bindings.append(
             HostElementBinding(
@@ -352,6 +410,8 @@ public func hostWalkTree(
                 depth: depth,
                 pid: pid,
                 processStartTime: processStartTime,
+                dispatchPid: dispatchPid,
+                dispatchProcessStartTime: dispatchStartTime ?? processStartTime,
                 digestInput: digestInput,
                 element: node.axElement,
                 observed: observed,

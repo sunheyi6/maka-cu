@@ -427,13 +427,13 @@ than none.
    than a guess by either side.
 
 2. **Tree-rebuilding applications.** Chromium and Electron web areas mint fresh
-   `AXUIElement`s per query. There E1 can fail on a control that is visibly still
-   present and unchanged. This is a **false refusal**, not a false accept, and it
-   is why `element_released` is its own code: the correct host response is to
-   re-observe, not to tell the user the control vanished.
-   `maka-cu` already carries Electron-specific click handling
-   (`ComputerUseService.swift:372-413`), which is evidence that this app class is
-   the hard one — but the invalidation rate has not been measured. See §14.
+   `AXUIElement`s per query. When E1 fails, the executor performs one bounded
+   fresh walk and accepts a replacement only when it is unique, belongs to the
+   same host and renderer process generations, has the same role/subrole, and
+   preserves either the stable AX identifier or the full name/value/action
+   signature. Geometry, ancestor wrappers and sibling position may change.
+   Missing remains `element_released`; more than one match is
+   `element_changed`. The old token is never reinterpreted as an index.
 
 3. **Identity is not reachability.** All three checks pass on an element behind a
    sheet, in a hidden tab, or on another Space. Occlusion is a separate check
@@ -1250,6 +1250,50 @@ call without a side table.
 { "kind": "minimize_window" }
 ```
 
+#### WebContent and renderer elements
+
+The retained binding records both the host application process generation and
+the element's actual input-owner process generation. On macOS the latter is read
+through the dynamically resolved `_AXUIElementGetActualPid` SPI; if it names a
+WebContent/renderer process, a PID reuse or renderer restart is
+`process_replaced`.
+
+A fresh WKWebView may publish its XPC process before its AX subtree. The executor
+uses XNU `PROC_PIDCOALITIONINFO` to require one WebKit WebContent process sharing
+both resource and jetsam coalition IDs with the host. When that unique process
+exists and the first walk has no `AXWebArea`, observe waits 250 ms and walks once
+more. This is readiness evidence only: process name alone never selects an
+element.
+
+When the same snapshot contains a leaf host accessibility mirror and exactly one
+renderer-owned element with equal role, stable identifier/name, compatible
+actions and frame within two points, the mirror is omitted. Ambiguous and
+non-leaf mirrors remain visible.
+
+A left click on a renderer-owned element uses the host window's exact
+`CGWindowID`, a single private `SLEventPostToPid` channel, and the existing
+synthetic-target-focus lifetime. WindowServer performs the renderer hop. The
+public `CGEvent.postToPid` duplicate used by the general Chromium compatibility
+recipe is disabled on this path, so one request produces one down/up pair.
+The result declares `tier: "coordinate-background"` and
+`path: "skylight_pid"`. No AXPress or JavaScript `.click()` fallback follows a
+failure.
+
+#### Numeric value and scroll semantics
+
+`set_value` preserves the live AX scalar type. A numeric control that advertises
+both increment and decrement is changed through those actions, not by a bare
+attribute write that can alter the displayed value without running the
+application callback. The executor measures one step, requires the target to be
+an exact bounded number of steps away, and reverses the probe step before
+failing when it is not.
+
+`scroll` prefers the element's `AXScroll*ByPage` action. If that action is
+advertised but refused before delivery, the executor next presses the matching
+`AXIncrementPage` / `AXDecrementPage` descendant. Only when neither semantic
+route exists does it use the PID-bound wheel path. Partial or unknown AX delivery
+never falls through.
+
 #### Window management
 
 The last three address the window rather than something drawn in it. They are
@@ -1595,7 +1639,7 @@ became expressible when refusals started carrying `path` (§1.1).
 | `ax_attribute` | `AXUIElementSetAttributeValue` | always |
 | `ax_select` | set `AXSelectedChildren` on the containing list | always |
 | `cg_event_pid` | `CGEventPostToPid` — target-bound, no cursor warp | always |
-| `skylight_pid` | `SLEventPostToPid` — background window path | always |
+| `skylight_pid` | `SLEventPostToPid` — background window path, including WebContent-aware host-window routing | always |
 | `cg_event_global` | `CGEventPost` — **moves the system cursor** | only when `allowGlobalPointer: true` |
 | `none` | nothing was dispatched | refusals |
 

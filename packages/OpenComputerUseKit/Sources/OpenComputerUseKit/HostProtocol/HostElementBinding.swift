@@ -264,9 +264,38 @@ public protocol HostElementBindingProbe {
     func isReferenceAlive(_ binding: HostElementBinding) -> Bool
     /// E2 — the recorded pid still exists with the recorded start time.
     func processStartTime(pid: pid_t) -> UInt64?
+    /// The input owner right now. This differs from `binding.pid` for
+    /// out-of-process WebContent/renderer elements.
+    func actualPid(_ binding: HostElementBinding) -> pid_t?
     /// E3 — the digest inputs as they are right now, or `nil` when the element
     /// can no longer be read at all.
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput?
+    /// A dead retained AX reference may be replaced only by one fresh element
+    /// in the same process generation with identity-preserving semantics.
+    func uniqueRefetch(_ binding: HostElementBinding) -> HostBindingRefetchResult
+    /// A host-process accessibility mirror may be promoted to one real
+    /// WebContent element when semantic identity and geometry agree uniquely.
+    func uniqueWebContentEquivalent(_ binding: HostElementBinding) -> HostElementBinding?
+}
+
+public extension HostElementBindingProbe {
+    func actualPid(_ binding: HostElementBinding) -> pid_t? {
+        binding.dispatchPid
+    }
+
+    func uniqueRefetch(_ binding: HostElementBinding) -> HostBindingRefetchResult {
+        .missing
+    }
+
+    func uniqueWebContentEquivalent(_ binding: HostElementBinding) -> HostElementBinding? {
+        nil
+    }
+}
+
+public enum HostBindingRefetchResult {
+    case unique(HostElementBinding)
+    case missing
+    case ambiguous
 }
 
 /// One element of one snapshot, with everything the binding check needs.
@@ -276,6 +305,10 @@ public final class HostElementBinding {
     public let depth: Int
     public let pid: pid_t
     public let processStartTime: UInt64
+    /// The process that must receive input for this element. It equals `pid` for
+    /// native controls and names WebContent/renderer for a real OOP web element.
+    public let dispatchPid: pid_t
+    public let dispatchProcessStartTime: UInt64
     public let digestInput: HostElementDigestInput
     public let digest: String
     /// Retained for the life of the snapshot. `nil` only in tests and fixtures.
@@ -297,6 +330,8 @@ public final class HostElementBinding {
         depth: Int,
         pid: pid_t,
         processStartTime: UInt64,
+        dispatchPid: pid_t? = nil,
+        dispatchProcessStartTime: UInt64? = nil,
         digestInput: HostElementDigestInput,
         element: AXUIElement?,
         observed: HostObservedElement,
@@ -307,6 +342,8 @@ public final class HostElementBinding {
         self.depth = depth
         self.pid = pid
         self.processStartTime = processStartTime
+        self.dispatchPid = dispatchPid ?? pid
+        self.dispatchProcessStartTime = dispatchProcessStartTime ?? processStartTime
         self.digestInput = digestInput
         self.digest = hostElementDigest(digestInput)
         self.element = element
@@ -330,6 +367,15 @@ public func hostVerifyBinding(
         return HostDomainError(.processReplaced)
     }
 
+    guard
+        let actualPid = probe.actualPid(binding),
+        actualPid == binding.dispatchPid,
+        let dispatchStartTime = probe.processStartTime(pid: actualPid),
+        dispatchStartTime == binding.dispatchProcessStartTime
+    else {
+        return HostDomainError(.processReplaced)
+    }
+
     guard let current = probe.currentDigestInput(binding) else {
         return HostDomainError(.elementReleased)
     }
@@ -340,4 +386,99 @@ public func hostVerifyBinding(
     }
 
     return nil
+}
+
+/// A host-side accessibility mirror and a renderer-owned element are equivalent
+/// only when a model could not distinguish them by stable identity or geometry.
+/// The renderer candidate is still required to be unique by the caller.
+public func hostIsWebContentEquivalent(
+    recorded: HostElementBinding,
+    candidate: HostElementBinding
+) -> Bool {
+    guard recorded.dispatchPid == recorded.pid else {
+        return false
+    }
+    let rendererOwned =
+        candidate.dispatchPid != recorded.pid
+        || candidate.digestInput.role == "AXWebArea"
+        || candidate.digestInput.ancestorRoles.contains("AXWebArea")
+    guard rendererOwned else {
+        return false
+    }
+    guard recorded.observed.role == candidate.observed.role else {
+        return false
+    }
+
+    let recordedIdentifier = recorded.observed.axIdentifier
+    let candidateIdentifier = candidate.observed.axIdentifier
+    let identifiersAgree =
+        recordedIdentifier != nil
+        && candidateIdentifier != nil
+        && recordedIdentifier == candidateIdentifier
+
+    let recordedName = recorded.observed.label ?? recorded.observed.title
+    let candidateName = candidate.observed.label ?? candidate.observed.title
+    let namesAgree =
+        recordedName != nil
+        && candidateName != nil
+        && recordedName == candidateName
+
+    guard identifiersAgree || namesAgree else {
+        return false
+    }
+
+    guard let recordedFrame = recorded.observed.frame?.cgRect,
+          let candidateFrame = candidate.observed.frame?.cgRect
+    else {
+        return false
+    }
+
+    let frameTolerance = 2.0
+    let framesAgree =
+        abs(recordedFrame.minX - candidateFrame.minX) <= frameTolerance
+        && abs(recordedFrame.minY - candidateFrame.minY) <= frameTolerance
+        && abs(recordedFrame.width - candidateFrame.width) <= frameTolerance
+        && abs(recordedFrame.height - candidateFrame.height) <= frameTolerance
+    guard framesAgree else {
+        return false
+    }
+
+    return Set(recorded.observed.actions).isSubset(of: Set(candidate.observed.actions))
+}
+
+/// The one refetch allowed after a retained AX reference is released.
+///
+/// Geometry, ancestors and sibling position may move when Electron rebuilds a
+/// renderer tree. Process generation, role and semantic identity may not. A
+/// stable AX identifier is sufficient when unique; without one, the complete
+/// name/value/action signature must remain equal.
+public func hostIsIdentityPreservingRefetch(
+    recorded: HostElementBinding,
+    candidate: HostElementBinding
+) -> Bool {
+    guard recorded.pid == candidate.pid,
+          recorded.processStartTime == candidate.processStartTime,
+          recorded.dispatchPid == candidate.dispatchPid,
+          recorded.dispatchProcessStartTime == candidate.dispatchProcessStartTime,
+          recorded.digestInput.role == candidate.digestInput.role,
+          recorded.digestInput.subrole == candidate.digestInput.subrole
+    else {
+        return false
+    }
+
+    if let identifier = recorded.digestInput.axIdentifier {
+        return !identifier.isEmpty && candidate.digestInput.axIdentifier == identifier
+    }
+
+    let hasStableName =
+        recorded.digestInput.title != nil
+        || recorded.digestInput.label != nil
+    guard hasStableName else {
+        return false
+    }
+
+    return recorded.digestInput.title == candidate.digestInput.title
+        && recorded.digestInput.label == candidate.digestInput.label
+        && recorded.digestInput.valueDigest == candidate.digestInput.valueDigest
+        && recorded.digestInput.sortedActionNames == candidate.digestInput.sortedActionNames
 }

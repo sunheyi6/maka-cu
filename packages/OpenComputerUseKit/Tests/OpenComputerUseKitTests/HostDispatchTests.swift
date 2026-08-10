@@ -136,6 +136,314 @@ final class HostDispatchTests: XCTestCase {
         }
     }
 
+    func testAReleasedReferenceUsesOnlyAUniqueIdentityPreservingRefetch() throws {
+        let digestInput = HostElementDigestInput(role: "AXButton", label: "Send")
+        let replacement = hostTestBinding(
+            token: "replacement",
+            digestInput: digestInput,
+            enabled: false,
+            element: hostTestElement()
+        )
+
+        var probe = FakeBindingProbe()
+        probe.alive = false
+        probe.refetch = .unique(replacement)
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: hostTestElement()
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+        XCTAssertEqual(
+            try errorCode(harness.awaitResult()),
+            "element_disabled",
+            "the unique replacement was used; the dead retained reference was not"
+        )
+    }
+
+    func testAnAmbiguousRefetchFailsClosed() throws {
+        var probe = FakeBindingProbe()
+        probe.alive = false
+        probe.refetch = .ambiguous
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: hostTestElement()
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+        XCTAssertEqual(try errorCode(harness.awaitResult()), "element_changed")
+        XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty)
+    }
+
+    func testAUniqueWebContentEquivalentReplacesAHostMirror() throws {
+        let frame = HostRect(x: 20, y: 30, width: 120, height: 40)
+        let webContent = hostTestBinding(
+            token: "web-content",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: frame.cgRect,
+                actionNames: ["press"]
+            ),
+            enabled: false,
+            frame: frame,
+            element: hostTestElement(pid: hostTestPid + 1),
+            dispatchPid: hostTestPid + 1
+        )
+
+        var probe = FakeBindingProbe()
+        probe.webContentEquivalent = webContent
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementFrame: frame,
+            element: hostTestElement()
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+        XCTAssertEqual(
+            try errorCode(harness.awaitResult()),
+            "element_disabled",
+            "dispatch used the renderer-owned equivalent"
+        )
+    }
+
+    func testWebContentClickUsesHostWindowAndRendererPid() throws {
+        let frame = HostRect(x: 20, y: 30, width: 120, height: 40)
+        let webContent = hostTestBinding(
+            token: "web-content",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: frame.cgRect,
+                actionNames: ["press"],
+                ancestorRoles: ["AXGroup", "AXWebArea"]
+            ),
+            frame: frame,
+            element: hostTestElement(pid: hostTestPid + 1),
+            dispatchPid: hostTestPid + 1
+        )
+
+        var probe = FakeBindingProbe()
+        probe.webContentEquivalent = webContent
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementFrame: frame,
+            element: hostTestElement()
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+        let result = try harness.awaitResult()
+
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["path"] as? String, "skylight_pid")
+        XCTAssertEqual(result["tier"] as? String, "coordinate-background")
+        let posted = try XCTUnwrap(harness.environment.pointEvents.posted.first)
+        XCTAssertEqual(posted.pid, hostTestPid + 1)
+        XCTAssertEqual(posted.path, .skylightPid)
+        XCTAssertEqual(posted.point, CGPoint(x: 80, y: 50))
+    }
+
+    func testWebContentEquivalenceRequiresIdentityGeometryAndUniquenessInputs() {
+        let frame = HostRect(x: 20, y: 30, width: 120, height: 40)
+        let recorded = hostTestBinding(
+            token: "host",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: frame.cgRect,
+                actionNames: ["press"]
+            ),
+            frame: frame
+        )
+        let renderer = hostTestBinding(
+            token: "renderer",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: frame.cgRect,
+                actionNames: ["press"]
+            ),
+            frame: frame,
+            dispatchPid: hostTestPid + 1
+        )
+        let rendererBeforePidDiscovery = hostTestBinding(
+            token: "renderer-delayed",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: frame.cgRect,
+                actionNames: ["press"],
+                ancestorRoles: ["AXGroup", "AXWebArea", "AXScrollArea"]
+            ),
+            frame: frame
+        )
+        let wrongFrame = hostTestBinding(
+            token: "wrong",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: CGRect(x: 300, y: 30, width: 120, height: 40),
+                actionNames: ["press"]
+            ),
+            frame: HostRect(x: 300, y: 30, width: 120, height: 40),
+            dispatchPid: hostTestPid + 1
+        )
+
+        XCTAssertTrue(hostIsWebContentEquivalent(recorded: recorded, candidate: renderer))
+        XCTAssertTrue(
+            hostIsWebContentEquivalent(recorded: recorded, candidate: rendererBeforePidDiscovery)
+        )
+        XCTAssertFalse(hostIsWebContentEquivalent(recorded: recorded, candidate: wrongFrame))
+    }
+
+    func testObservationRemovesOnlyAUniqueLeafMirrorShadowedByWebContent() {
+        let frame = HostRect(x: 20, y: 30, width: 120, height: 40)
+        let mirror = hostTestBinding(
+            token: "mirror",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: frame.cgRect,
+                actionNames: ["press"]
+            ),
+            frame: frame
+        )
+        let webContent = hostTestBinding(
+            token: "web",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "submit",
+                label: "Send",
+                frameInWindow: frame.cgRect,
+                actionNames: ["press", "show_menu"],
+                ancestorRoles: ["AXGroup", "AXWebArea"]
+            ),
+            frame: frame,
+            actions: [.press, .showMenu],
+            dispatchPid: hostTestPid + 1
+        )
+        let result = HostTreeWalkResult(
+            elements: [mirror.observed, webContent.observed],
+            bindings: [mirror, webContent],
+            truncated: HostSnapshotTruncation(elements: false, depth: false),
+            focusedToken: mirror.token
+        )
+
+        let filtered = hostRemovingShadowedWebMirrors(result)
+        XCTAssertEqual(filtered.elements.map(\.token), [webContent.token])
+        XCTAssertEqual(filtered.bindings.map(\.token), [webContent.token])
+        XCTAssertEqual(filtered.focusedToken, webContent.token)
+    }
+
+    func testRefetchAllowsReflowButNeverCrossesProcessGenerationOrSemanticIdentity() {
+        let recorded = hostTestBinding(
+            token: "old",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "stable-target",
+                label: "Send",
+                frameInWindow: CGRect(x: 10, y: 10, width: 80, height: 30),
+                actionNames: ["press"],
+                siblingIndex: 2
+            )
+        )
+        let moved = hostTestBinding(
+            token: "new",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "stable-target",
+                label: "Send",
+                frameInWindow: CGRect(x: 200, y: 40, width: 80, height: 30),
+                actionNames: ["press"],
+                ancestorRoles: ["AXGroup", "AXWindow"],
+                siblingIndex: 7
+            )
+        )
+        let wrongIdentifier = hostTestBinding(
+            token: "wrong",
+            digestInput: HostElementDigestInput(
+                role: "AXButton",
+                axIdentifier: "different-target",
+                label: "Send",
+                actionNames: ["press"]
+            )
+        )
+        let replacedRenderer = hostTestBinding(
+            token: "renderer",
+            digestInput: moved.digestInput,
+            dispatchPid: hostTestPid + 1,
+            dispatchProcessStartTime: hostTestProcessStartTime + 1
+        )
+
+        XCTAssertTrue(hostIsIdentityPreservingRefetch(recorded: recorded, candidate: moved))
+        XCTAssertFalse(hostIsIdentityPreservingRefetch(recorded: recorded, candidate: wrongIdentifier))
+        XCTAssertFalse(hostIsIdentityPreservingRefetch(recorded: recorded, candidate: replacedRenderer))
+    }
+
+    func testRendererPidAndStartTimeArePartOfTheBinding() {
+        let binding = hostTestBinding(
+            token: "web",
+            digestInput: HostElementDigestInput(role: "AXButton", label: "Send"),
+            dispatchPid: hostTestPid + 1,
+            dispatchProcessStartTime: hostTestProcessStartTime + 10
+        )
+
+        var changedPid = FakeBindingProbe()
+        changedPid.actualPidOverride = hostTestPid + 2
+        XCTAssertEqual(hostVerifyBinding(binding, probe: changedPid)?.code, .processReplaced)
+
+        var changedStart = FakeBindingProbe()
+        changedStart.actualPidOverride = hostTestPid + 1
+        changedStart.startTimes = [
+            hostTestPid: hostTestProcessStartTime,
+            hostTestPid + 1: hostTestProcessStartTime + 11,
+        ]
+        XCTAssertEqual(hostVerifyBinding(binding, probe: changedStart)?.code, .processReplaced)
+    }
+
     func testWindowStrictnessRefusesOnAChangeElsewhereInTheWindowAndElementStrictnessDoesNot() throws {
         // Vector 7. The probe answers for the target element unchanged, but the
         // window digest is recomputed over the whole recorded element set, so a
@@ -344,6 +652,38 @@ final class HostDispatchTests: XCTestCase {
         )
     }
 
+    func testElementScrollFallsBackToTheBoundPidWithoutUsingGlobalInput() throws {
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementFrame: HostRect(x: 10, y: 20, width: 100, height: 80),
+            element: hostTestElement(),
+            elementActions: [.scrollDown]
+        )
+        harness.install(snapshot)
+
+        harness.send(
+            dispatchElement(
+                snapshot: snapshot,
+                action: #"{"kind":"scroll","direction":"down","pages":0.5}"#
+            )
+        )
+        let result = try harness.awaitResult()
+
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["path"] as? String, "cg_event_pid")
+        XCTAssertEqual(result["tier"] as? String, "coordinate-background")
+        let posted = try XCTUnwrap(harness.environment.pointEvents.posted.first)
+        XCTAssertEqual(posted.pid, hostTestPid)
+        XCTAssertEqual(posted.path, .cgEventPid)
+        XCTAssertEqual(posted.action, .scroll(direction: .down, pages: 0.5))
+    }
+
     func testAnAttemptedPointDispatchTheOSRejectedIsFailedNotRefused() throws {
         var environment = FakeEnvironment()
         environment.windows = [hostTestWindow()]
@@ -501,7 +841,8 @@ final class HostDispatchTests: XCTestCase {
         token: String? = nil,
         digest: String? = nil,
         strictness: String = "element",
-        occlusionPolicy: String = "none"
+        occlusionPolicy: String = "none",
+        action: String = #"{"kind":"click","button":"left","count":1}"#
     ) -> String {
         nextId += 1
         let element = snapshot.payload.elements[0]
@@ -510,7 +851,7 @@ final class HostDispatchTests: XCTestCase {
         "session":"s1","snapshotId":"\(snapshot.id)","toolCallId":"call_1",\
         "elementToken":"\(token ?? element.token)","expectElementDigest":"\(digest ?? element.digest)",\
         "strictness":"\(strictness)","occlusionPolicy":"\(occlusionPolicy)",\
-        "action":{"kind":"click","button":"left","count":1}}}
+        "action":\(action)}}
         """
     }
 
