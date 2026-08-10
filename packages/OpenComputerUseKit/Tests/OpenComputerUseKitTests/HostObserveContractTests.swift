@@ -53,6 +53,120 @@ final class HostObserveContractTests: XCTestCase {
         XCTAssertEqual(try errorCode(harness.awaitResult()), "app_not_found", "exact match, not case-folded")
     }
 
+    func testAppTargetChoosesFrontmostSheetAndWindowTargetRemainsExact() throws {
+        let pid = getpid()
+        let appId = "pid:\(pid)"
+        let sheet = hostTestWindow(
+            windowId: 72,
+            pid: pid,
+            appId: appId,
+            bounds: CGRect(x: 100, y: 100, width: 360, height: 150),
+            title: "Sheet",
+            zIndex: 9
+        )
+        let main = hostTestWindow(
+            windowId: 71,
+            pid: pid,
+            appId: appId,
+            bounds: CGRect(x: 50, y: 50, width: 800, height: 600),
+            title: "Main",
+            zIndex: 3
+        )
+
+        var environment = FakeEnvironment()
+        environment.apps = [
+            HostRunningApp(appId: appId, pid: pid, name: "Fixture", running: true),
+        ]
+        environment.windows = [sheet, main]
+        environment.windowElement = hostTestElement(pid: pid)
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+
+        harness.send(observe(app: appId))
+        let appSnapshot = try XCTUnwrap(
+            try harness.awaitResult()["snapshot"] as? [String: Any]
+        )
+        let appTarget = try XCTUnwrap(appSnapshot["target"] as? [String: Any])
+        XCTAssertEqual(appTarget["windowId"] as? UInt32, sheet.windowId)
+
+        harness.send(
+            """
+            {"jsonrpc":"2.0","id":22,"method":"observe","params":{\
+            "session":"s1","target":{"kind":"window","pid":\(pid),"windowId":\(main.windowId)},\
+            "includeImage":false}}
+            """
+        )
+        let exactSnapshot = try XCTUnwrap(
+            try harness.awaitResult()["snapshot"] as? [String: Any]
+        )
+        let exactTarget = try XCTUnwrap(exactSnapshot["target"] as? [String: Any])
+        XCTAssertEqual(exactTarget["windowId"] as? UInt32, main.windowId)
+    }
+
+    func testWindowFrameMatchingFindsSheetCandidateWithoutChangingDirectPriority() {
+        let target = CGRect(x: 100, y: 100, width: 360, height: 150)
+        let direct = [
+            (element: "main", frame: CGRect(x: 50, y: 50, width: 800, height: 600)),
+        ]
+        let sheets = [
+            (element: "sheet", frame: CGRect(x: 100.4, y: 99.6, width: 360, height: 150)),
+        ]
+
+        XCTAssertNil(hostFirstWindowCandidate(direct, matching: target))
+        XCTAssertEqual(
+            hostFirstWindowCandidate(direct + sheets, matching: target),
+            "sheet"
+        )
+        XCTAssertEqual(
+            hostFirstWindowCandidate(
+                [(element: "direct", frame: target)] + sheets,
+                matching: target
+            ),
+            "direct",
+            "an ordinary AXWindow match remains preferred over a child sheet"
+        )
+    }
+
+    func testSecondObservationCarriesNoChangeDifferenceAgainstFirstSnapshot() throws {
+        let pid = getpid()
+        let appId = "pid:\(pid)"
+        var environment = FakeEnvironment()
+        environment.apps = [
+            HostRunningApp(appId: appId, pid: pid, name: "Fixture", running: true),
+        ]
+        environment.windows = [
+            hostTestWindow(
+                windowId: 81,
+                pid: pid,
+                appId: appId,
+                bounds: CGRect(x: 50, y: 50, width: 800, height: 600),
+                title: "Stable",
+                zIndex: 3
+            ),
+        ]
+        environment.windowElement = hostTestElement(pid: pid)
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+
+        harness.send(observe(app: appId))
+        let first = try XCTUnwrap(
+            try harness.awaitResult()["snapshot"] as? [String: Any]
+        )
+        XCTAssertNil(first["difference"])
+        let firstId = try XCTUnwrap(first["snapshotId"] as? String)
+
+        harness.send(observe(app: appId))
+        let second = try XCTUnwrap(
+            try harness.awaitResult()["snapshot"] as? [String: Any]
+        )
+        let difference = try XCTUnwrap(second["difference"] as? [String: Any])
+        XCTAssertEqual(difference["baseSnapshotId"] as? String, firstId)
+        XCTAssertEqual(difference["presentation"] as? String, "no-change")
+        XCTAssertEqual((difference["changes"] as? [[String: Any]])?.count, 0)
+    }
+
     func testObserveRefusalsDoNotCarryTheDispatchFields() throws {
         // §1.1 — no other method's `ok: false` arm carries them: `observe`
         // dispatched nothing, so an `outcome` on it would be a field with no

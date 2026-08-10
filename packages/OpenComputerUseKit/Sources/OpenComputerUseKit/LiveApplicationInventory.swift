@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import Darwin
 import Foundation
 
 /// The running applications and the frontmost one, asked of the machine on every
@@ -39,6 +40,14 @@ import Foundation
 /// list, 2.1 ms for the frontmost owner. The cached reads were 0.5 ms and 0.0 ms,
 /// so this is the same order of magnitude, not one slower.
 enum LiveApplicationInventory {
+    private struct CoalitionInfo {
+        var resource: UInt64 = 0
+        var jetsam: UInt64 = 0
+        var reserved1: UInt64 = 0
+        var reserved2: UInt64 = 0
+        var reserved3: UInt64 = 0
+    }
+
     /// Every pid the kernel currently knows about. `proc_listpids` is a syscall,
     /// so it cannot be stale, and it is the only enumeration here that does not
     /// route through AppKit's notification cache.
@@ -85,6 +94,60 @@ enum LiveApplicationInventory {
     /// what `NSWorkspace.shared.runningApplications` covered and nothing more.
     static func runningApplications() -> [NSRunningApplication] {
         processIdentifiers().compactMap(NSRunningApplication.init(processIdentifier:))
+    }
+
+    /// A WKWebView content process belongs to the same resource and jetsam
+    /// coalitions as its host. Both ids are required and the result must be
+    /// unique; process name alone is never enough.
+    static func uniqueWebContentProcess(for hostPid: pid_t) -> pid_t? {
+        guard let hostCoalition = coalitionInfo(pid: hostPid),
+              hostCoalition.resource != 0,
+              hostCoalition.jetsam != 0
+        else {
+            return nil
+        }
+
+        let matches = processIdentifiers().filter { pid in
+            guard pid != hostPid,
+                  processPath(pid: pid).hasSuffix("/com.apple.WebKit.WebContent"),
+                  let candidate = coalitionInfo(pid: pid)
+            else {
+                return false
+            }
+            return candidate.resource == hostCoalition.resource
+                && candidate.jetsam == hostCoalition.jetsam
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    static func coalitionProbeAvailable(pid: pid_t = getpid()) -> Bool {
+        coalitionInfo(pid: pid) != nil
+    }
+
+    private static func coalitionInfo(pid: pid_t) -> CoalitionInfo? {
+        var info = CoalitionInfo()
+        let read = withUnsafeMutablePointer(to: &info) { pointer in
+            proc_pidinfo(
+                pid,
+                20, // PROC_PIDCOALITIONINFO from XNU's proc_info_private.h.
+                0,
+                pointer,
+                Int32(MemoryLayout<CoalitionInfo>.size)
+            )
+        }
+        return read == MemoryLayout<CoalitionInfo>.size ? info : nil
+    }
+
+    private static func processPath(pid: pid_t) -> String {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let count = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard count > 0 else {
+            return ""
+        }
+        let bytes = buffer.prefix(Int(count)).prefix { $0 != 0 }.map {
+            UInt8(bitPattern: $0)
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// The pid that owns the frontmost ordinary window.

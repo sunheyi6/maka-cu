@@ -4,6 +4,28 @@ import CoreGraphics
 import Darwin
 import Foundation
 
+private typealias HostAXGetActualPid = @convention(c) (
+    AXUIElement,
+    UnsafeMutablePointer<pid_t>
+) -> AXError
+
+private let hostAXGetActualPid: HostAXGetActualPid? = {
+    guard let handle = dlopen(
+        "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
+        RTLD_LAZY | RTLD_LOCAL
+    ) else {
+        return nil
+    }
+    guard let symbol = dlsym(handle, "_AXUIElementGetActualPid") else {
+        return nil
+    }
+    return unsafeBitCast(symbol, to: HostAXGetActualPid.self)
+}()
+
+public func hostActualPidSPIAvailable() -> Bool {
+    hostAXGetActualPid != nil
+}
+
 /// Everything in this file talks to macOS. It is kept apart from the protocol
 /// logic so the lifecycle, binding and path rules stay testable without a
 /// desktop, and so this is the only place to look when Accessibility behaviour
@@ -40,6 +62,21 @@ public struct HostWindowInfo: Equatable, Sendable {
     public let zIndex: Int
     public let onScreen: Bool
     public let displayId: String?
+}
+
+func hostFirstWindowCandidate<Element>(
+    _ candidates: [(element: Element, frame: CGRect?)],
+    matching bounds: CGRect
+) -> Element? {
+    candidates.first { candidate in
+        guard let frame = candidate.frame else {
+            return false
+        }
+        return abs(frame.origin.x - bounds.origin.x) < 1
+            && abs(frame.origin.y - bounds.origin.y) < 1
+            && abs(frame.width - bounds.width) < 1
+            && abs(frame.height - bounds.height) < 1
+    }?.element
 }
 
 public enum HostWindowInventory {
@@ -445,6 +482,10 @@ final class HostAXNode: HostAccessibilityNode {
         HostAX.actionNames(element)
     }
 
+    var actualPid: pid_t? {
+        HostAX.actualPid(of: element)
+    }
+
     var liveAncestorRoles: [String]? {
         let roles = ancestry.ancestorRoles(of: element, parent: attributes.parent)
         ancestry.record(element: element, role: attributes.role, ancestorRoles: roles)
@@ -506,6 +547,12 @@ enum HostAXTelemetry {
 }
 
 enum HostAX {
+    struct PreparedValueWrite {
+        let value: CFTypeRef
+        let requestedReadback: String
+        let comparesNumerically: Bool
+    }
+
     static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         HostAXTelemetry.roundTrips += 1
         var value: CFTypeRef?
@@ -588,6 +635,55 @@ enum HostAX {
         }
 
         return nil
+    }
+
+    /// Preserve the target attribute's scalar type. AppKit sliders reject a
+    /// `CFString` even when it contains a valid number; text fields require that
+    /// same string and booleans require a real `CFBoolean`.
+    static func preparedValueWrite(_ requested: String, for element: AXUIElement) -> PreparedValueWrite? {
+        guard let current = attribute(element, kAXValueAttribute) else {
+            return PreparedValueWrite(
+                value: requested as CFString,
+                requestedReadback: requested,
+                comparesNumerically: false
+            )
+        }
+
+        if CFGetTypeID(current) == CFBooleanGetTypeID() {
+            switch requested.lowercased() {
+            case "true", "1":
+                return PreparedValueWrite(
+                    value: kCFBooleanTrue,
+                    requestedReadback: "true",
+                    comparesNumerically: false
+                )
+            case "false", "0":
+                return PreparedValueWrite(
+                    value: kCFBooleanFalse,
+                    requestedReadback: "false",
+                    comparesNumerically: false
+                )
+            default:
+                return nil
+            }
+        }
+
+        if current is NSNumber {
+            guard let number = Double(requested), number.isFinite else {
+                return nil
+            }
+            return PreparedValueWrite(
+                value: NSNumber(value: number),
+                requestedReadback: requested,
+                comparesNumerically: true
+            )
+        }
+
+        return PreparedValueWrite(
+            value: requested as CFString,
+            requestedReadback: requested,
+            comparesNumerically: false
+        )
     }
 
     static func bool(_ element: AXUIElement, _ name: String) -> Bool? {
@@ -684,6 +780,53 @@ enum HostAX {
         return pid
     }
 
+    /// The process that implements this accessibility object. Public
+    /// `AXUIElementGetPid` reports the host application for every node in a
+    /// WKWebView tree; this SPI reports the WebContent/renderer pid for the
+    /// renderer-owned descendants.
+    static func actualPid(of element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        guard let hostAXGetActualPid,
+              hostAXGetActualPid(element, &pid) == .success,
+              pid > 0
+        else {
+            return self.pid(of: element)
+        }
+        return pid
+    }
+
+    static func pageScrollButton(
+        in element: AXUIElement,
+        direction: HostScrollDirection
+    ) -> AXUIElement? {
+        let wantedSubrole: String
+        switch direction {
+        case .down, .right:
+            wantedSubrole = "AXIncrementPage"
+        case .up, .left:
+            wantedSubrole = "AXDecrementPage"
+        }
+
+        var queue = children(of: element)
+        var visited = Set<HostAXElementKey>()
+        var examined = 0
+        while !queue.isEmpty, examined < 128 {
+            let candidate = queue.removeFirst()
+            let key = HostAXElementKey(candidate)
+            guard visited.insert(key).inserted else {
+                continue
+            }
+            examined += 1
+
+            if string(candidate, kAXSubroleAttribute) == wantedSubrole,
+               actionNames(candidate).contains(kAXPressAction as String) {
+                return candidate
+            }
+            queue.append(contentsOf: children(of: candidate))
+        }
+        return nil
+    }
+
     static func window(pid: pid_t, windowId: CGWindowID, bounds: CGRect) -> AXUIElement? {
         let application = AXUIElementCreateApplication(pid)
 
@@ -715,17 +858,10 @@ enum HostAX {
         // matched by its frame against the one the window list reported. Bounds
         // are compared at whole-point resolution because AX and CGWindowList
         // disagree in the sub-pixel digits on scaled displays.
-        let matchesReportedFrame = { (candidate: AXUIElement) -> Bool in
-            guard let frame = frame(candidate) else {
-                return false
-            }
-            return abs(frame.origin.x - bounds.origin.x) < 1
-                && abs(frame.origin.y - bounds.origin.y) < 1
-                && abs(frame.width - bounds.width) < 1
-                && abs(frame.height - bounds.height) < 1
-        }
-
-        if let matched = windows.first(where: matchesReportedFrame) {
+        if let matched = hostFirstWindowCandidate(
+            windows.map { ($0, frame($0)) },
+            matching: bounds
+        ) {
             return matched
         }
 
@@ -745,15 +881,15 @@ enum HostAX {
         // modal open: CGWindowList reported two windows, `AXWindows` reported
         // one, "AXSheets" reported zero, and `AXChildren` had the `AXSheet`
         // sitting in it at exactly the frame the window list had named.
-        for window in windows {
-            for child in array(window, kAXChildrenAttribute)
-            where sheetLikeRoles.contains(string(child, kAXRoleAttribute) ?? "")
-                && matchesReportedFrame(child) {
-                return child
+        let sheets = windows.flatMap { window in
+            array(window, kAXChildrenAttribute).filter {
+                sheetLikeRoles.contains(string($0, kAXRoleAttribute) ?? "")
             }
         }
-
-        return nil
+        return hostFirstWindowCandidate(
+            sheets.map { ($0, frame($0)) },
+            matching: bounds
+        )
     }
 
     /// Roles that CGWindowList reports as a window of their own while
@@ -942,8 +1078,13 @@ enum HostAX {
 /// with, because a probe that assembles the §4.3 field list itself is a second
 /// copy of that list — and the two copies have drifted twice now, each time
 /// refusing dispatches against elements nothing had touched.
-struct HostAXBindingProbe: HostElementBindingProbe {
+final class HostAXBindingProbe: HostElementBindingProbe {
     let windowBounds: CGRect
+    private let limits = HostLimits()
+
+    init(windowBounds: CGRect) {
+        self.windowBounds = windowBounds
+    }
 
     func isReferenceAlive(_ binding: HostElementBinding) -> Bool {
         guard let element = binding.element else {
@@ -954,6 +1095,13 @@ struct HostAXBindingProbe: HostElementBindingProbe {
 
     func processStartTime(pid: pid_t) -> UInt64? {
         hostProcessStartTime(pid: pid)
+    }
+
+    func actualPid(_ binding: HostElementBinding) -> pid_t? {
+        guard let element = binding.element else {
+            return nil
+        }
+        return HostAX.actualPid(of: element)
     }
 
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
@@ -980,5 +1128,91 @@ struct HostAXBindingProbe: HostElementBindingProbe {
             ancestorRoles: node.liveAncestorRoles ?? [],
             siblingIndex: HostAX.siblingIndex(of: element)
         )
+    }
+
+    func uniqueRefetch(_ binding: HostElementBinding) -> HostBindingRefetchResult {
+        let matches = refreshedBindings(for: binding).filter {
+            hostIsIdentityPreservingRefetch(recorded: binding, candidate: $0)
+        }
+        switch matches.count {
+        case 0:
+            return .missing
+        case 1:
+            return .unique(matches[0])
+        default:
+            return .ambiguous
+        }
+    }
+
+    func uniqueWebContentEquivalent(_ binding: HostElementBinding) -> HostElementBinding? {
+        guard binding.dispatchPid == binding.pid else {
+            return nil
+        }
+
+        let deadline = Date(
+            timeIntervalSinceNow: Double(limits.treeWalkCeilingMs) / 1000
+        )
+        for attempt in 0..<3 {
+            let matches = refreshedBindings(for: binding, deadline: deadline).filter {
+                hostIsWebContentEquivalent(recorded: binding, candidate: $0)
+            }
+            if matches.count == 1, let match = matches.first, match.dispatchPid != binding.pid {
+                return match
+            }
+            if matches.count > 1 {
+                return nil
+            }
+            if attempt < 2 {
+                Thread.sleep(forTimeInterval: 0.075)
+            }
+        }
+        return nil
+    }
+
+    private func refreshedBindings(
+        for binding: HostElementBinding,
+        deadline: Date? = nil
+    ) -> [HostElementBinding] {
+        let root: HostAXNode
+        if binding.isMenu {
+            guard let menu = HostAX.menuBar(pid: binding.pid) else {
+                return []
+            }
+            root = HostAXNode(
+                element: menu,
+                windowBounds: nil,
+                focusedElement: nil,
+                dropsAppleMenu: true
+            )
+        } else {
+            guard let window = HostAX.window(pid: binding.pid, windowId: 0, bounds: windowBounds) else {
+                return []
+            }
+            root = HostAXNode(
+                element: window,
+                windowBounds: windowBounds,
+                focusedElement: HostAX.focusedElement(pid: binding.pid)
+            )
+        }
+
+        guard let startTime = hostProcessStartTime(pid: binding.pid) else {
+            return []
+        }
+
+        return hostWalkTree(
+            root: root,
+            pid: binding.pid,
+            processStartTime: startTime,
+            tokenPrefix: "refetch",
+            bounds: HostTreeWalkBounds(
+                maxElements: binding.isMenu ? limits.maxMenuElements : limits.maxElements,
+                maxDepth: limits.maxDepth,
+                maxTextChars: limits.maxTextChars,
+                deadline: deadline ?? Date(
+                    timeIntervalSinceNow: Double(limits.treeWalkCeilingMs) / 1000
+                )
+            ),
+            isMenu: binding.isMenu
+        ).bindings
     }
 }

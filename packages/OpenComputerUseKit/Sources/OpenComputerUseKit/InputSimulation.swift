@@ -108,7 +108,8 @@ enum InputSimulation {
         windowBounds: CGRect,
         windowID: CGWindowID,
         clickCount: Int,
-        pid: pid_t
+        pid: pid_t,
+        postsPublicEvent: Bool = true
     ) throws {
         try SkyClickDispatcher.click(
             target: SkyClickTarget(
@@ -116,7 +117,8 @@ enum InputSimulation {
                 windowPoint: windowPoint,
                 windowBounds: windowBounds,
                 windowID: windowID,
-                pid: pid
+                pid: pid,
+                postsPublicEvent: postsPublicEvent
             ),
             clickCount: clickCount
         )

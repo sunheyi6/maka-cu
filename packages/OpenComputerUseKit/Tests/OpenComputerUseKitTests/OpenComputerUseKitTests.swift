@@ -18,6 +18,105 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["host", "--help"]), .help(command: "host"))
     }
 
+    func testDoctorCLISeparatesMachineReadableOutputFromOnboarding() throws {
+        XCTAssertEqual(
+            try parseOpenComputerUseCLI(arguments: ["doctor"]),
+            .doctor(format: .text, launchOnboarding: true)
+        )
+        XCTAssertEqual(
+            try parseOpenComputerUseCLI(arguments: ["doctor", "--json"]),
+            .doctor(format: .json, launchOnboarding: false)
+        )
+        XCTAssertEqual(
+            try parseOpenComputerUseCLI(arguments: ["doctor", "--no-onboarding"]),
+            .doctor(format: .text, launchOnboarding: false)
+        )
+        XCTAssertEqual(
+            try parseOpenComputerUseCLI(
+                arguments: ["doctor", "--no-onboarding", "--json"]
+            ),
+            .doctor(format: .json, launchOnboarding: false)
+        )
+    }
+
+    func testDoctorCLIRejectsUnknownOptions() {
+        XCTAssertThrowsError(
+            try parseOpenComputerUseCLI(arguments: ["doctor", "--verbose"])
+        ) { error in
+            XCTAssertEqual(
+                error as? OpenComputerUseCLIError,
+                OpenComputerUseCLIError(
+                    message: "Unknown doctor option: --verbose",
+                    helpCommand: "doctor"
+                )
+            )
+        }
+    }
+
+    func testDoctorReadinessFailsClosedAndEncodesStableJSON() throws {
+        let report = DoctorDiagnostics.make(
+            permissionDiagnostics: PermissionDiagnostics(
+                accessibilityTrusted: true,
+                screenCaptureGranted: false
+            ),
+            screenLocked: true,
+            skyLightAvailable: true,
+            skyLightMissingSymbols: [],
+            actualPidSPIAvailable: true,
+            coalitionProbeAvailable: true,
+            signature: DoctorDiagnostics.Signature(
+                kind: "adhoc",
+                identifier: "com.example.maka-cu",
+                teamIdentifier: nil,
+                hardenedRuntime: false
+            ),
+            executablePath: "/tmp/maka-cu",
+            version: "0.3.0",
+            buildCommit: "abc123"
+        )
+
+        XCTAssertTrue(report.readiness.hostProtocol)
+        XCTAssertFalse(report.readiness.metadataObservation)
+        XCTAssertFalse(report.readiness.screenshotObservation)
+        XCTAssertFalse(report.readiness.trustedWebContentClick)
+        XCTAssertTrue(report.renderedText.contains("screenLocked=true"))
+
+        let encoded = try report.encodedJSON()
+        let decoded = try JSONDecoder().decode(
+            DoctorDiagnostics.self,
+            from: Data(encoded.utf8)
+        )
+        XCTAssertEqual(decoded, report)
+        XCTAssertTrue(encoded.contains(#""protocolVersion" : "maka.cu/2""#))
+    }
+
+    func testDoctorTrustedWebReadinessRequiresEveryNativeFence() {
+        let report = DoctorDiagnostics.make(
+            permissionDiagnostics: PermissionDiagnostics(
+                accessibilityTrusted: true,
+                screenCaptureGranted: true
+            ),
+            screenLocked: false,
+            skyLightAvailable: true,
+            skyLightMissingSymbols: [],
+            actualPidSPIAvailable: true,
+            coalitionProbeAvailable: true,
+            signature: DoctorDiagnostics.Signature(
+                kind: "signed",
+                identifier: "com.example.maka-cu",
+                teamIdentifier: "TEAM",
+                hardenedRuntime: true
+            ),
+            executablePath: "/tmp/maka-cu",
+            version: "0.3.0",
+            buildCommit: "abc123"
+        )
+
+        XCTAssertTrue(report.readiness.metadataObservation)
+        XCTAssertTrue(report.readiness.screenshotObservation)
+        XCTAssertTrue(report.readiness.trustedWebContentClick)
+    }
+
     func testCLIRecognizesTurnEndedNotifyPayload() throws {
         let payload = #"{"type":"agent-turn-complete","turn-id":"12345"}"#
 

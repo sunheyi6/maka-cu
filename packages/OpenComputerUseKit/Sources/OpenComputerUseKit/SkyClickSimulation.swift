@@ -8,6 +8,23 @@ struct SkyClickTarget {
     let windowBounds: CGRect
     let windowID: CGWindowID
     let pid: pid_t
+    let postsPublicEvent: Bool
+
+    init(
+        screenPoint: CGPoint,
+        windowPoint: CGPoint,
+        windowBounds: CGRect,
+        windowID: CGWindowID,
+        pid: pid_t,
+        postsPublicEvent: Bool = true
+    ) {
+        self.screenPoint = screenPoint
+        self.windowPoint = windowPoint
+        self.windowBounds = windowBounds
+        self.windowID = windowID
+        self.pid = pid
+        self.postsPublicEvent = postsPublicEvent
+    }
 }
 
 enum SkyClickEventKind: Equatable, Sendable {
@@ -183,7 +200,9 @@ enum SkyClickDispatcher {
                 // path preserves AppKit compatibility. This is one dispatch policy,
                 // not a retry after an observed failure.
                 try spi.postToPid(event, pid: target.pid)
-                event.postToPid(target.pid)
+                if target.postsPublicEvent {
+                    event.postToPid(target.pid)
+                }
 
                 if step.delayAfter > 0 {
                     Thread.sleep(forTimeInterval: step.delayAfter)

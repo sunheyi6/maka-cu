@@ -6,12 +6,17 @@ public enum OpenComputerUseCLICommand: Equatable {
     /// the Maka host owns every model-facing word, so there is no second,
     /// model-shaped surface here to drift from it.
     case host
-    case doctor
+    case doctor(format: DoctorOutputFormat = .text, launchOnboarding: Bool = true)
     case listApps
     case snapshot(app: String, textLimit: SnapshotTextLimit = .defaults, treeLimits: AccessibilityTreeLimits = .defaults)
     case turnEnded(payload: String?)
     case help(command: String?)
     case version
+}
+
+public enum DoctorOutputFormat: Equatable {
+    case text
+    case json
 }
 
 public struct OpenComputerUseCLIError: LocalizedError, Equatable {
@@ -52,7 +57,7 @@ public func parseOpenComputerUseCLI(arguments: [String]) throws -> OpenComputerU
     case "host":
         return try parseSimpleCommand(name: "host", arguments: Array(arguments.dropFirst()), result: .host)
     case "doctor":
-        return try parseSimpleCommand(name: "doctor", arguments: Array(arguments.dropFirst()), result: .doctor)
+        return try parseDoctor(arguments: Array(arguments.dropFirst()))
     case "list-apps":
         return try parseSimpleCommand(name: "list-apps", arguments: Array(arguments.dropFirst()), result: .listApps)
     case "turn-ended":
@@ -80,7 +85,7 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
 
         Commands:
           host                 Speak the maka.cu/2 host protocol over stdio.
-          doctor               Print permission status and launch onboarding if needed.
+          doctor               Print runtime diagnostics and launch onboarding if needed.
           list-apps            Print running or recently used apps.
           snapshot <app>       Print the current accessibility snapshot for an app.
           turn-ended           Notify the running MCP process that the host turn ended.
@@ -107,10 +112,16 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
     case "doctor":
         return """
         Usage:
-          open-computer-use doctor
+          open-computer-use doctor [--json] [--no-onboarding]
 
-        Print the current Accessibility and Screen Recording permission state.
-        If permissions are missing, this also launches the onboarding app.
+        Print protocol, permission, lock-screen, native capability, and code-signing diagnostics.
+
+        Options:
+          --json               Emit one machine-readable JSON object.
+          --no-onboarding      Never launch the permission onboarding app.
+
+        Text mode launches onboarding when permissions are missing unless
+        --no-onboarding is supplied. JSON mode never launches UI.
         """
     case "list-apps":
         return """
@@ -165,6 +176,35 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
         \(openComputerUseHelpText())
         """
     }
+}
+
+private func parseDoctor(arguments: [String]) throws -> OpenComputerUseCLICommand {
+    if arguments.count == 1, let option = arguments.first, option == "-h" || option == "--help" {
+        return .help(command: "doctor")
+    }
+
+    var format = DoctorOutputFormat.text
+    var launchOnboarding = true
+    for argument in arguments {
+        switch argument {
+        case "--json":
+            format = .json
+            launchOnboarding = false
+        case "--no-onboarding":
+            launchOnboarding = false
+        case "-h", "--help":
+            throw OpenComputerUseCLIError(
+                message: "doctor help must be requested as `open-computer-use doctor --help`",
+                helpCommand: "doctor"
+            )
+        default:
+            throw OpenComputerUseCLIError(
+                message: "Unknown doctor option: \(argument)",
+                helpCommand: "doctor"
+            )
+        }
+    }
+    return .doctor(format: format, launchOnboarding: launchOnboarding)
 }
 
 private func parseSimpleCommand(

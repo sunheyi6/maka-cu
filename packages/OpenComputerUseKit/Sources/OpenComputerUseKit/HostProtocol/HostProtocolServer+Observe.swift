@@ -218,8 +218,9 @@ extension HostProtocolServer {
             )
         }
 
+        var checkedWebContentReadiness = false
         let walk = { (elementBudget: Int) -> HostTreeWalkResult in
-            hostWalkTree(
+            var result = hostWalkTree(
                 root: HostAXNode(
                     element: windowElement,
                     windowBounds: resolved.bounds,
@@ -235,6 +236,33 @@ extension HostProtocolServer {
                     deadline: walkDeadline
                 )
             )
+            if !checkedWebContentReadiness {
+                checkedWebContentReadiness = true
+                let hasWebArea = result.elements.contains { $0.role == "AXWebArea" }
+                if !hasWebArea, self.environment.webContentProcess(pid: resolved.pid) != nil {
+                    // A fresh WKWebView can publish its XPC process before its AX
+                    // subtree. The first walk is what wakes that bridge; one
+                    // bounded reread keeps the host mirror out of the model.
+                    Thread.sleep(forTimeInterval: 0.25)
+                    result = hostWalkTree(
+                        root: HostAXNode(
+                            element: windowElement,
+                            windowBounds: resolved.bounds,
+                            focusedElement: focusedElement
+                        ),
+                        pid: resolved.pid,
+                        processStartTime: startTime,
+                        tokenPrefix: snapshotId,
+                        bounds: HostTreeWalkBounds(
+                            maxElements: elementBudget,
+                            maxDepth: maxDepth,
+                            maxTextChars: maxTextChars,
+                            deadline: walkDeadline
+                        )
+                    )
+                }
+            }
+            return result
         }
 
         let selectedText = focusedElement
@@ -246,12 +274,34 @@ extension HostProtocolServer {
 
         let obscuring = HostWindowInventory.obscuringRects(above: resolved, in: windows).map(HostRect.init)
         let displays = HostWindowInventory.displays()
+        let previousSnapshot = currentRegistry().latestDifferenceBaseline(
+            session: session,
+            pid: resolved.pid,
+            windowId: resolved.windowId
+        )
 
         let fitted = hostFitResponse(
             maxElements: maxElements,
             limitBytes: limits.maxResponseBytes
-        ) { budget -> (payload: (HostSnapshotPayload, HostTreeWalkResult), encoded: Data) in
-            let result = walk(budget)
+        ) { budget -> (payload: (HostSnapshotPayload, HostTreeWalkResult, HostObservationRevision), encoded: Data) in
+            let rawResult = hostRemovingShadowedWebMirrors(walk(budget))
+            let currentRevision = hostObservationRevision(from: rawResult.elements)
+            let appendResult = previousSnapshot.map {
+                hostAppendObservationRevision(
+                    previous: $0.observationRevision,
+                    current: currentRevision
+                )
+            }
+            let revision = appendResult?.revision
+                ?? hostAssignRootStableIds(currentRevision)
+            let result = hostApplyingStableIds(rawResult, revision: revision)
+            let difference = appendResult.map {
+                hostObservationDifferencePayload(
+                    baseSnapshotId: previousSnapshot!.id,
+                    appendResult: $0,
+                    fullLineCount: result.elements.count
+                )
+            }
             let windowDigest = hostWindowDigest(
                 elementDigests: result.elements.map(\.digest),
                 bounds: resolved.bounds,
@@ -280,11 +330,12 @@ extension HostProtocolServer {
                 obscuringRects: obscuring,
                 elements: result.elements,
                 truncated: result.truncated,
+                difference: difference,
                 menu: menuWalk?.observation
             )
 
             let encoded = (try? HostProtocolCodec.encoder.encode(payload)) ?? Data()
-            return ((payload, result), encoded)
+            return ((payload, result, revision), encoded)
         }
 
         switch fitted {
@@ -294,7 +345,7 @@ extension HostProtocolServer {
             }
             return .failure(error)
         case .success(let fit):
-            let (payload, walkResult) = fit.payload
+            let (payload, walkResult, observationRevision) = fit.payload
             return .success(
                 HostSnapshot(
                     id: snapshotId,
@@ -309,7 +360,8 @@ extension HostProtocolServer {
                     // lookup §4.2 allows. Their tokens cannot collide with the
                     // window's: the two walks are given different prefixes.
                     bindings: walkResult.bindings + (menuWalk?.bindings ?? []),
-                    imagePath: image?.path
+                    imagePath: image?.path,
+                    observationRevision: observationRevision
                 )
             )
         }
@@ -428,9 +480,74 @@ extension HostProtocolServer {
         }
 
         let probe = environment.bindingProbe(windowBounds: window.bounds)
+        var effectiveBinding = binding
+        var promotedToWebContent = false
         if let failure = hostVerifyBinding(binding, probe: probe) {
-            refuse(failure)
-            return
+            guard failure.code == .elementReleased else {
+                refuse(failure)
+                return
+            }
+
+            switch probe.uniqueRefetch(binding) {
+            case .unique(let replacement):
+                effectiveBinding = replacement
+            case .missing:
+                refuse(failure)
+                return
+            case .ambiguous:
+                refuse(HostDomainError(.elementChanged))
+                return
+            }
+        } else {
+            let webContentMatches = snapshot.bindings.values.filter {
+                hostIsWebContentEquivalent(recorded: binding, candidate: $0)
+            }
+            if webContentMatches.count > 1 {
+                refuse(HostDomainError(.elementChanged))
+                return
+            }
+            if let webContent = webContentMatches.first {
+                let currentWebContent: HostElementBinding
+                if webContent.dispatchPid == binding.pid {
+                    guard let resolved = probe.uniqueWebContentEquivalent(binding) else {
+                        refuse(HostDomainError(.elementChanged))
+                        return
+                    }
+                    currentWebContent = resolved
+                } else {
+                    currentWebContent = webContent
+                }
+                if let failure = hostVerifyBinding(currentWebContent, probe: probe) {
+                    let frameOnlyChange =
+                        failure.code == .elementChanged
+                        && failure.detail == .changed([.frame])
+                    guard failure.code == .elementReleased || frameOnlyChange else {
+                        refuse(failure)
+                        return
+                    }
+                    switch probe.uniqueRefetch(currentWebContent) {
+                    case .unique(let replacement):
+                        effectiveBinding = replacement
+                        promotedToWebContent = true
+                    case .missing:
+                        refuse(failure)
+                        return
+                    case .ambiguous:
+                        refuse(HostDomainError(.elementChanged))
+                        return
+                    }
+                } else {
+                    effectiveBinding = currentWebContent
+                    promotedToWebContent = true
+                }
+            } else if let webContent = probe.uniqueWebContentEquivalent(binding) {
+                if let failure = hostVerifyBinding(webContent, probe: probe) {
+                    refuse(failure)
+                    return
+                }
+                effectiveBinding = webContent
+                promotedToWebContent = true
+            }
         }
 
         // §6.1 `strictness: "window"` — the only defence against recycled row
@@ -450,7 +567,7 @@ extension HostProtocolServer {
         // Applying the check here would also refuse window management on every
         // application `apps.launch` started, because those begin at the bottom of
         // the z-order — the defect §6.1 already had to fix once for `same_app`.
-        if !params.action.addressesTheWindowItself, let frame = binding.observed.frame?.cgRect {
+        if !params.action.addressesTheWindowItself, let frame = effectiveBinding.observed.frame?.cgRect {
             let center = CGPoint(
                 x: window.bounds.minX + frame.midX,
                 y: window.bounds.minY + frame.midY
@@ -471,14 +588,22 @@ extension HostProtocolServer {
             }
         }
 
-        guard binding.observed.enabled else {
+        guard effectiveBinding.observed.enabled else {
             refuse(HostDomainError(.elementDisabled))
             return
         }
 
-        guard let element = binding.element else {
+        guard let element = effectiveBinding.element else {
             refuse(HostDomainError(.elementReleased))
             return
+        }
+
+        if promotedToWebContent, case .click = params.action {
+            // WebKit can expose the renderer AX tree and actual pid a fraction
+            // before its event bridge is ready. Pressing in that interval routes
+            // through the host accessibility mirror and produces an untrusted
+            // DOM click. This delay is paid only for mirror promotion.
+            Thread.sleep(forTimeInterval: 0.2)
         }
 
         let settleMode = params.observeAfter?.settle ?? HostSettleMode.none
@@ -486,7 +611,7 @@ extension HostProtocolServer {
         let performed = performElementAction(
             params.action,
             on: element,
-            binding: binding,
+            binding: effectiveBinding,
             window: window,
             settle: settleMode
         )
@@ -541,6 +666,43 @@ extension HostProtocolServer {
         settle: HostSettleMode
     ) -> PerformedAction {
         switch action {
+        case .click(.left, let count) where binding.dispatchPid != binding.pid:
+            guard (1...2).contains(count),
+                  let frame = binding.observed.frame?.cgRect
+            else {
+                return refused(.unsupportedAction)
+            }
+            let windowPoint = CGPoint(x: frame.midX, y: frame.midY)
+            let screenPoint = CGPoint(
+                x: window.bounds.minX + windowPoint.x,
+                y: window.bounds.minY + windowPoint.y
+            )
+            do {
+                try environment.postWebContentClick(
+                    at: screenPoint,
+                    windowPoint: windowPoint,
+                    window: window,
+                    dispatchPid: binding.dispatchPid,
+                    count: count
+                )
+                return PerformedAction(
+                    outcome: .ok,
+                    path: .skylightPid,
+                    tier: .coordinateBackground,
+                    verdict: settle == .quiesce
+                        ? HostEffectVerdict(
+                            effect: .unverifiable,
+                            verification: HostVerification(method: .treeDelta, observedChange: false)
+                        )
+                        : hostEffectNotChecked(),
+                    failure: nil
+                )
+            } catch let error as HostDomainError {
+                return failed(error.code, path: .skylightPid)
+            } catch {
+                return failed(.dispatchRefused, path: .skylightPid)
+            }
+
         case .click(_, let count):
             guard let required = action.requiredElementAction else {
                 // A middle click has no semantic equivalent: no AX action means
@@ -568,22 +730,104 @@ extension HostProtocolServer {
                 name = .scrollRight
             }
 
-            // A whole number of pages is the only thing an AX scroll action can
-            // express. Falling back to a wheel event here would silently change
-            // the declared path, which §6.3 forbids.
-            guard pages.rounded() == pages else {
-                return refused(.unsupportedAction)
+            if pages.rounded() == pages, binding.observed.actions.contains(name) {
+                let semantic = performAXAction(
+                    name,
+                    on: element,
+                    binding: binding,
+                    repeatCount: Int(pages),
+                    settle: settle
+                )
+                // `path: none` proves the OS refused before one page landed.
+                // Only that side-effect-free arm may try the declared pid-bound
+                // wheel path; partial or unknown AX delivery never falls through.
+                if semantic.outcome != .failed || semantic.path != .none {
+                    return semantic
+                }
             }
 
-            return performAXAction(name, on: element, binding: binding, repeatCount: Int(pages), settle: settle)
+            if pages.rounded() == pages,
+               let pageButton = HostAX.pageScrollButton(in: element, direction: direction) {
+                return performAXAction(
+                    .press,
+                    on: pageButton,
+                    binding: binding,
+                    repeatCount: Int(pages),
+                    settle: settle,
+                    requireAdvertisedAction: false
+                )
+            }
+
+            guard let frame = binding.observed.frame?.cgRect else {
+                return refused(.elementNotActionable)
+            }
+            let point = CGPoint(
+                x: window.bounds.minX + frame.midX,
+                y: window.bounds.minY + frame.midY
+            )
+            do {
+                try environment.postPointEvent(
+                    .scroll(direction: direction, pages: pages),
+                    at: point,
+                    from: nil,
+                    pid: binding.dispatchPid,
+                    path: .cgEventPid
+                )
+                return PerformedAction(
+                    outcome: .ok,
+                    path: .cgEventPid,
+                    tier: .coordinateBackground,
+                    verdict: settle == .quiesce
+                        ? HostEffectVerdict(
+                            effect: .unverifiable,
+                            verification: HostVerification(method: .treeDelta, observedChange: false)
+                        )
+                        : hostEffectNotChecked(),
+                    failure: nil
+                )
+            } catch let error as HostDomainError {
+                return failed(error.code, path: .cgEventPid)
+            } catch {
+                return failed(.dispatchRefused, path: .cgEventPid)
+            }
 
         case .setValue(let value):
             guard HostAX.isSettable(element, kAXValueAttribute) else {
                 return refused(.elementNotActionable)
             }
 
+            guard let write = HostAX.preparedValueWrite(value, for: element) else {
+                return refused(.elementNotActionable)
+            }
             let previous = HostAX.stringLikeValue(element, kAXValueAttribute)
-            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
+            if write.comparesNumerically,
+               let previous,
+               let currentNumber = Double(previous),
+               let requestedNumber = Double(write.requestedReadback),
+               currentNumber != requestedNumber {
+                let direction: HostElementActionName =
+                    requestedNumber > currentNumber ? .increment : .decrement
+                let opposite: HostElementActionName =
+                    direction == .increment ? .decrement : .increment
+                if binding.observed.actions.contains(direction),
+                   binding.observed.actions.contains(opposite) {
+                    return performSteppedValueAction(
+                        requested: write.requestedReadback,
+                        previous: previous,
+                        currentNumber: currentNumber,
+                        requestedNumber: requestedNumber,
+                        direction: direction,
+                        opposite: opposite,
+                        on: element
+                    )
+                }
+            }
+
+            let result = AXUIElementSetAttributeValue(
+                element,
+                kAXValueAttribute as CFString,
+                write.value
+            )
             guard result == .success else {
                 // A rejected write did not happen, and `path` is what the
                 // dispatch did. `ax_attribute` here claimed a route was taken.
@@ -595,7 +839,12 @@ extension HostProtocolServer {
                 outcome: .ok,
                 path: .axAttribute,
                 tier: .ax,
-                verdict: hostEffectFromValueReadback(requested: value, previous: previous, readback: readback),
+                verdict: hostEffectFromValueReadback(
+                    requested: write.requestedReadback,
+                    previous: previous,
+                    readback: readback,
+                    comparesNumerically: write.comparesNumerically
+                ),
                 failure: nil
             )
 
@@ -635,6 +884,77 @@ extension HostProtocolServer {
         case .moveWindow, .resizeWindow, .minimizeWindow:
             return performWindowAction(action, on: element, binding: binding, window: window)
         }
+    }
+
+    /// Numeric controls frequently accept an `AXValue` write without running
+    /// their application action. When increment/decrement are available, use
+    /// those actions so the control's business callback observes the change.
+    ///
+    /// One step is measured first. If the target is not an exact bounded number
+    /// of those steps away, the probe step is reversed and the action fails
+    /// rather than leaving a rounded value behind.
+    private func performSteppedValueAction(
+        requested: String,
+        previous: String,
+        currentNumber: Double,
+        requestedNumber: Double,
+        direction: HostElementActionName,
+        opposite: HostElementActionName,
+        on element: AXUIElement
+    ) -> PerformedAction {
+        guard AXUIElementPerformAction(element, direction.rawAXAction as CFString) == .success,
+              let firstReadback = HostAX.stringLikeValue(element, kAXValueAttribute),
+              let firstNumber = Double(firstReadback)
+        else {
+            return failed(.dispatchRefused, path: .axAction)
+        }
+
+        let step = firstNumber - currentNumber
+        let remaining = (requestedNumber - firstNumber) / step
+        let roundedRemaining = remaining.rounded()
+        let reachesTarget =
+            step.isFinite
+            && step != 0
+            && remaining.isFinite
+            && remaining >= 0
+            && abs(remaining - roundedRemaining) < 0.000_001
+            && roundedRemaining <= 99
+
+        guard reachesTarget else {
+            let reversed = AXUIElementPerformAction(element, opposite.rawAXAction as CFString)
+            let restored = HostAX.stringLikeValue(element, kAXValueAttribute)
+            if reversed != .success || !hostNumericStringsEqual(restored, previous) {
+                return unknownOutcome()
+            }
+            return failed(.dispatchRefused, path: .axAction)
+        }
+
+        for _ in 0..<Int(roundedRemaining) {
+            guard AXUIElementPerformAction(element, direction.rawAXAction as CFString) == .success else {
+                return unknownOutcome()
+            }
+        }
+
+        let readback = HostAX.stringLikeValue(element, kAXValueAttribute)
+        return PerformedAction(
+            outcome: .ok,
+            path: .axAction,
+            tier: .ax,
+            verdict: hostEffectFromValueReadback(
+                requested: requested,
+                previous: previous,
+                readback: readback,
+                comparesNumerically: true
+            ),
+            failure: nil
+        )
+    }
+
+    private func hostNumericStringsEqual(_ lhs: String?, _ rhs: String) -> Bool {
+        guard let lhs, let left = Double(lhs), let right = Double(rhs) else {
+            return false
+        }
+        return left.isFinite && right.isFinite && left == right
     }
 
     /// §6.1 — the three actions whose subject is the window itself.
@@ -750,9 +1070,10 @@ extension HostProtocolServer {
         on element: AXUIElement,
         binding: HostElementBinding,
         repeatCount: Int,
-        settle: HostSettleMode
+        settle: HostSettleMode,
+        requireAdvertisedAction: Bool = true
     ) -> PerformedAction {
-        guard binding.observed.actions.contains(name) else {
+        guard !requireAdvertisedAction || binding.observed.actions.contains(name) else {
             return refused(.elementNotActionable)
         }
 

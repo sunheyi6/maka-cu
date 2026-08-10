@@ -40,6 +40,8 @@ public protocol HostSystemEnvironment {
     /// directly makes that field unassertable — which is how it went unnoticed
     /// that the field was answered from a value frozen at executor start.
     func frontmostApplicationPid() -> pid_t?
+    /// The unique WebKit WebContent process in the host app's coalition.
+    func webContentProcess(pid: pid_t) -> pid_t?
     /// §5.7 — `apps.launch`. Resolves the request to a running application,
     /// starting it if it is not running yet, and gives up after `budget`.
     ///
@@ -80,6 +82,15 @@ public protocol HostSystemEnvironment {
         pid: pid_t,
         path: HostDispatchPath
     ) throws
+    /// A renderer-owned web element uses the host window for geometry/focus and
+    /// the WebContent/renderer pid for final event delivery.
+    func postWebContentClick(
+        at screenPoint: CGPoint,
+        windowPoint: CGPoint,
+        window: HostWindowInfo,
+        dispatchPid: pid_t,
+        count: Int
+    ) throws
     /// §6.4 — posted to the target pid. Behind the same seam as the pointer for
     /// the same reason: a handler that reaches the keyboard directly cannot be
     /// asserted against without typing into whatever process holds that pid.
@@ -110,6 +121,10 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
 
     public func frontmostApplicationPid() -> pid_t? {
         LiveApplicationInventory.frontmostApplicationPid()
+    }
+
+    public func webContentProcess(pid: pid_t) -> pid_t? {
+        LiveApplicationInventory.uniqueWebContentProcess(for: pid)
     }
 
     public func launchApp(_ query: String, waitFor budget: TimeInterval) -> Result<HostRunningApp, HostDomainError> {
@@ -223,6 +238,28 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
 
             try InputSimulation.pressKeyStroke(stroke, pid: pid)
         }
+    }
+
+    public func postWebContentClick(
+        at screenPoint: CGPoint,
+        windowPoint: CGPoint,
+        window: HostWindowInfo,
+        dispatchPid: pid_t,
+        count: Int
+    ) throws {
+        // `dispatchPid` was already generation-checked against the selected
+        // WebContent element. WindowServer needs the host window owner here and
+        // performs the final renderer hop itself.
+        _ = dispatchPid
+        try InputSimulation.clickWithSkyLight(
+            at: screenPoint,
+            windowPoint: windowPoint,
+            windowBounds: window.bounds,
+            windowID: window.windowId,
+            clickCount: count,
+            pid: window.pid,
+            postsPublicEvent: false
+        )
     }
 
     private func postClick(

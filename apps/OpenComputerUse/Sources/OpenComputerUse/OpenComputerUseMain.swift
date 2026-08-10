@@ -38,10 +38,15 @@ enum OpenComputerUseMain {
             if server.exitStatus != 0 {
                 exit(server.exitStatus)
             }
-        case .doctor:
-            let permissions = PermissionDiagnostics.current()
-            print(permissions.summary)
-            if !permissions.missingPermissions.isEmpty {
+        case let .doctor(format, launchOnboarding):
+            let report = DoctorDiagnostics.current()
+            switch format {
+            case .text:
+                print(report.renderedText)
+            case .json:
+                print(try report.encodedJSON())
+            }
+            if launchOnboarding && !report.permissions.allGranted {
                 PermissionOnboardingApp.launch()
             }
         case .listApps:

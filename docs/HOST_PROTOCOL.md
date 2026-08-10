@@ -352,6 +352,20 @@ dictionary. It MUST NOT parse an index out of a token and re-walk the tree. An
 index-derived token that survives a tree rebuild is precisely the defect being
 removed.
 
+Each element also carries a non-negative integer `stableId`. This is presentation
+identity across revisions of the same `(session, pid, windowId)`, not dispatch
+identity:
+
+- the first observation assigns ids in depth-first tree order;
+- a later observation gives structurally matched nodes their previous ids;
+- a new node receives an id greater than every id in the baseline revision;
+- removed ids are not reassigned inside that revision chain.
+
+The host may expose `stableId` as the short model-facing element id, but it MUST
+map that id back to the fresh snapshot's `token` before dispatch. Quoting a
+stable id to `dispatch.element`, or resolving it against a later tree without
+the current token, would recreate the index bug under a different name.
+
 ### 4.3 What "the same element" means
 
 A token resolves to the same element at dispatch time if and only if all three
@@ -427,13 +441,13 @@ than none.
    than a guess by either side.
 
 2. **Tree-rebuilding applications.** Chromium and Electron web areas mint fresh
-   `AXUIElement`s per query. There E1 can fail on a control that is visibly still
-   present and unchanged. This is a **false refusal**, not a false accept, and it
-   is why `element_released` is its own code: the correct host response is to
-   re-observe, not to tell the user the control vanished.
-   `maka-cu` already carries Electron-specific click handling
-   (`ComputerUseService.swift:372-413`), which is evidence that this app class is
-   the hard one — but the invalidation rate has not been measured. See §14.
+   `AXUIElement`s per query. When E1 fails, the executor performs one bounded
+   fresh walk and accepts a replacement only when it is unique, belongs to the
+   same host and renderer process generations, has the same role/subrole, and
+   preserves either the stable AX identifier or the full name/value/action
+   signature. Geometry, ancestor wrappers and sibling position may change.
+   Missing remains `element_released`; more than one match is
+   `element_changed`. The old token is never reinterpreted as an index.
 
 3. **Identity is not reachability.** All three checks pass on an element behind a
    sheet, in a hidden tab, or on another Space. Occlusion is a separate check
@@ -528,6 +542,12 @@ match when the caller had sent only one (§5.2).
 
 `app` is an `appId` (§5.1). `{ "kind": "app" }` resolves to the app's frontmost
 usable window and is ambiguous by design; `{ "kind": "window" }` is exact.
+The frontmost inventory entry may be an AppKit sheet. `CGWindowList` reports a
+sheet as a window, while Accessibility exposes it as an `AXSheet`/`AXDrawer`
+child of the main `AXWindow`; the executor first matches ordinary AX windows by
+frame, then matches those child roles by the same frame. It does not query a
+fictional `AXSheets` attribute. Exact window targeting never falls back to the
+main window when the requested secondary or sheet window cannot be matched.
 Optional `app` *and* optional `windowId` in one object is how a real-machine
 failure happened: the contract said "app **or** window\_id" while the harness
 required both to match, so a compliant model could not pass. A tagged union
@@ -579,7 +599,16 @@ Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
     ],
     "obscuringRects": [ { "x": 300, "y": 100, "width": 400, "height": 300 } ],
     "elements": [ … ],
-    "truncated": { "elements": false, "depth": false }
+    "truncated": { "elements": false, "depth": false },
+    "difference": {
+      "baseSnapshotId": "snap_4e2c99…",
+      "presentation": "difference",
+      "changes": [
+        { "kind": "remove", "path": [0, 2], "stableId": 7, "token": null },
+        { "kind": "update", "path": [0, 3], "stableId": 9, "token": "el_9b41…" }
+      ],
+      "removedStableIdRanges": [ { "start": 7, "end": 8 } ]
+    }
   }
 }
 ```
@@ -600,6 +629,7 @@ the window list is read.
 ```json
 {
   "token": "el_7f3ab2…",
+  "stableId": 12,
   "parentToken": "el_1b0c55…",
   "depth": 4,
   "role": "AXButton",
@@ -621,6 +651,9 @@ the window list is read.
 
 - `parentToken` is `null` for the root. `null` and absent are the same on the
   wire; the executor SHOULD emit `null` for clarity.
+- `stableId` follows §4.2. It is required on snapshots produced by this
+  executor, while hosts MAY accept its absence from an older executor and fall
+  back to snapshot-local ordering for compatibility.
 - **`title` is `AXTitle` and `label` is `AXDescription`, and they are two
   fields.** Which one an element names itself with is the application's choice,
   not a shape the host may assume: measured on a background Calculator, 23 of 35
@@ -683,6 +716,42 @@ bound it raised was not the one that fired. What the wire must never do is stay
 silent: a short tree returned as `{ "elements": false, "depth": false }` tells
 the host it has seen the whole window, and every "the control is not there"
 conclusion drawn from it is wrong.
+
+### 5.2.1 Observation revisions
+
+`snapshot.difference` is absent when no earlier snapshot of the same
+`(session, pid, windowId)` can serve as a baseline. Otherwise it describes the
+window tree's revision against `baseSnapshotId`. The full current `elements`
+array is still present and authoritative; the difference is a bounded rendering
+hint, never a patch the host must apply to reconstruct the tree.
+
+`presentation` is a closed set:
+
+- `no-change`: no effective accessibility change; `changes` and
+  `removedStableIdRanges` are empty.
+- `difference`: render the declared changes instead of repeating the whole tree.
+- `full`: the difference would take more lines than the full tree, so render the
+  full current `elements` array.
+
+`changes` is ordered lexicographically by zero-based sibling `path`, then by
+`remove < insert < update`. An insert or update carries the current snapshot's
+token; a removal carries no token because that element is not dispatchable.
+Removed stable ids are also compressed into inclusive
+`removedStableIdRanges`, so a host can retire a contiguous run in one line.
+
+Matching is sibling-scoped and structural. Matched nodes inherit their stable
+ids even when fresh snapshot tokens change; new ids begin after the baseline's
+maximum. A spent snapshot remains eligible as the next difference baseline,
+because mutation consumes dispatch authority, not the executor's knowledge of
+what the host just saw. Expired and evicted snapshots are never baselines.
+
+The difference covers the window tree only. Menu observations retain their own
+scope and continue to travel as the full `snapshot.menu` payload.
+
+Hosts SHOULD render differences only for the immediate post-action observation.
+An explicit user/model `observe` SHOULD render the full authoritative tree even
+when the executor supplies a difference, so asking to look again never returns
+only a delta whose base may no longer be in model context.
 
 ### 5.3 Coordinate spaces, declared once
 
@@ -1250,6 +1319,50 @@ call without a side table.
 { "kind": "minimize_window" }
 ```
 
+#### WebContent and renderer elements
+
+The retained binding records both the host application process generation and
+the element's actual input-owner process generation. On macOS the latter is read
+through the dynamically resolved `_AXUIElementGetActualPid` SPI; if it names a
+WebContent/renderer process, a PID reuse or renderer restart is
+`process_replaced`.
+
+A fresh WKWebView may publish its XPC process before its AX subtree. The executor
+uses XNU `PROC_PIDCOALITIONINFO` to require one WebKit WebContent process sharing
+both resource and jetsam coalition IDs with the host. When that unique process
+exists and the first walk has no `AXWebArea`, observe waits 250 ms and walks once
+more. This is readiness evidence only: process name alone never selects an
+element.
+
+When the same snapshot contains a leaf host accessibility mirror and exactly one
+renderer-owned element with equal role, stable identifier/name, compatible
+actions and frame within two points, the mirror is omitted. Ambiguous and
+non-leaf mirrors remain visible.
+
+A left click on a renderer-owned element uses the host window's exact
+`CGWindowID`, a single private `SLEventPostToPid` channel, and the existing
+synthetic-target-focus lifetime. WindowServer performs the renderer hop. The
+public `CGEvent.postToPid` duplicate used by the general Chromium compatibility
+recipe is disabled on this path, so one request produces one down/up pair.
+The result declares `tier: "coordinate-background"` and
+`path: "skylight_pid"`. No AXPress or JavaScript `.click()` fallback follows a
+failure.
+
+#### Numeric value and scroll semantics
+
+`set_value` preserves the live AX scalar type. A numeric control that advertises
+both increment and decrement is changed through those actions, not by a bare
+attribute write that can alter the displayed value without running the
+application callback. The executor measures one step, requires the target to be
+an exact bounded number of steps away, and reverses the probe step before
+failing when it is not.
+
+`scroll` prefers the element's `AXScroll*ByPage` action. If that action is
+advertised but refused before delivery, the executor next presses the matching
+`AXIncrementPage` / `AXDecrementPage` descendant. Only when neither semantic
+route exists does it use the PID-bound wheel path. Partial or unknown AX delivery
+never falls through.
+
 #### Window management
 
 The last three address the window rather than something drawn in it. They are
@@ -1595,7 +1708,7 @@ became expressible when refusals started carrying `path` (§1.1).
 | `ax_attribute` | `AXUIElementSetAttributeValue` | always |
 | `ax_select` | set `AXSelectedChildren` on the containing list | always |
 | `cg_event_pid` | `CGEventPostToPid` — target-bound, no cursor warp | always |
-| `skylight_pid` | `SLEventPostToPid` — background window path | always |
+| `skylight_pid` | `SLEventPostToPid` — background window path, including WebContent-aware host-window routing | always |
 | `cg_event_global` | `CGEventPost` — **moves the system cursor** | only when `allowGlobalPointer: true` |
 | `none` | nothing was dispatched | refusals |
 
@@ -2427,6 +2540,19 @@ Frame binding:
    changed; `strictness: "element"` does not.
 8. A refused dispatch leaves the snapshot `live`; an `outcome_unknown` spends it.
 9. Snapshot ids from two executor generations never collide.
+
+Observation revisions:
+
+9a. The first observation assigns depth-first stable ids; a later observation
+    with fresh tokens preserves ids for structurally matched nodes and gives new
+    nodes ids above the previous maximum.
+9b. A spent snapshot remains the next difference baseline, while expired and
+    evicted snapshots do not.
+9c. Empty effective change produces `presentation: "no-change"`; insert/update
+    changes carry current tokens; removals carry no token and their stable ids
+    are compressed into inclusive ranges.
+9d. A difference whose rendered line count exceeds the full tree selects
+    `presentation: "full"`.
 
 Declared schema:
 

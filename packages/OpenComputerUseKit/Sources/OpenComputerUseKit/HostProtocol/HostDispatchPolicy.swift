@@ -260,7 +260,8 @@ public func hostKeyEvidence(for action: HostKeyAction) -> HostKeyEvidence {
 public func hostEffectFromValueReadback(
     requested: String,
     previous: String?,
-    readback: String?
+    readback: String?,
+    comparesNumerically: Bool = false
 ) -> HostEffectVerdict {
     guard let readback else {
         return HostEffectVerdict(
@@ -269,14 +270,21 @@ public func hostEffectFromValueReadback(
         )
     }
 
-    if readback == requested {
+    if hostValueReadbackEquals(readback, requested, comparesNumerically: comparesNumerically) {
         return HostEffectVerdict(
             effect: .confirmed,
-            verification: HostVerification(method: .valueReadback, observedChange: readback != previous)
+            verification: HostVerification(
+                method: .valueReadback,
+                observedChange: previous.map {
+                    !hostValueReadbackEquals(readback, $0, comparesNumerically: comparesNumerically)
+                } ?? true
+            )
         )
     }
 
-    if readback == previous {
+    if previous.map({
+        hostValueReadbackEquals(readback, $0, comparesNumerically: comparesNumerically)
+    }) == true {
         return HostEffectVerdict(
             effect: .suspectedNoop,
             verification: HostVerification(method: .valueReadback, observedChange: false)
@@ -287,6 +295,25 @@ public func hostEffectFromValueReadback(
         effect: .unverifiable,
         verification: HostVerification(method: .valueReadback, observedChange: true)
     )
+}
+
+private func hostValueReadbackEquals(
+    _ lhs: String,
+    _ rhs: String,
+    comparesNumerically: Bool
+) -> Bool {
+    if lhs == rhs {
+        return true
+    }
+    guard comparesNumerically,
+          let left = Double(lhs),
+          let right = Double(rhs),
+          left.isFinite,
+          right.isFinite
+    else {
+        return false
+    }
+    return left == right
 }
 
 public func hostEffectFromSelectionReadback(

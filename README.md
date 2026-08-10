@@ -20,8 +20,8 @@ all three, and has semantics upstream does not:
   against a freshly taken snapshot at action time
 - the full Anthropic `computer_20251124` action contract, because Maka serves
   models that emit it; upstream is shaped for Codex's own tool surface
-- Electron and Chromium targets driven through page identity and DOM read-back
-  rather than through accessibility alone
+- WebContent/renderer elements bound to their real process generation, with
+  unique stale refetch and a trusted background window-event path
 
 So what is taken is the executor: the accessibility snapshot, the dispatch core,
 input synthesis, the SkyLight background-click path, and app discovery. What is
@@ -37,6 +37,18 @@ upstream rarely touches. That asymmetry is what makes the fork sustainable
 rather than a divergence that has to be re-merged forever.
 
 Improvements to the shared accessibility layer belong upstream, not here.
+
+## Diagnostics
+
+```bash
+open-computer-use doctor
+open-computer-use doctor --json
+```
+
+Text mode reports protocol, permissions, lock state, native WebContent/SkyLight
+capabilities, code signing, and readiness. It opens onboarding when permissions
+are missing. `--json` is side-effect free and emits the same information as one
+stable JSON object; add `--no-onboarding` to text mode for automation.
 
 ## Attribution
 
