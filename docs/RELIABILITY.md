@@ -8,7 +8,7 @@
 - host protocol 一致性向量（§12）：`swift test --filter HostProtocolTests`、`swift test --filter HostDispatchTests`、`swift test --filter HostObserveContractTests`
 - macOS SkyLight 实机回归：`OPEN_COMPUTER_USE_RUN_SKY_CLICK_LIVE_TEST=1 swift test --filter SkyClickLiveTests`
 - Linux runtime：`(cd apps/OpenComputerUseLinux && go test ./...)`、`./scripts/build-open-computer-use-linux.sh --arch arm64`
-- Windows native helper：`dotnet build apps/OpenComputerUseWindows/native/MakaCuWindows.csproj -c Release`；可复现自包含发布：`powershell -ExecutionPolicy Bypass -File scripts/windows/publish-native.ps1`；交互式 fixture 生命周期：`node scripts/windows/lifecycle-driver.mjs <helper-exe> <fixture-exe>`
+- Windows native helper：`dotnet build apps/OpenComputerUseWindows/native/MakaCuWindows.csproj -c Release`；可复现 `win-x64` 发布：`powershell -ExecutionPolicy Bypass -File scripts/windows/publish-native.ps1`。该发布将 managed payload 做成 single-file，同时保留 Windows Desktop/WPF 所需的五个 native companion DLL；manifest 校验整个目录的 size/SHA-256；交互式 fixture 生命周期：`node scripts/windows/lifecycle-driver.mjs <helper-exe> <fixture-exe>`
 - 本地诊断：
   - `open-computer-use doctor`
   - `open-computer-use snapshot <app>`

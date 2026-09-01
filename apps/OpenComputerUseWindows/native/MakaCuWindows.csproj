@@ -29,8 +29,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>false</InvariantGlobalization>
-    <!-- The dev loop is framework-dependent. Reproducible single-file
-         self-contained publishing is provided by scripts/windows. -->
+    <!-- The dev loop is framework-dependent. Reproducible self-contained
+         publishing puts the managed payload in one file, while Windows
+         Desktop/WPF native companion DLLs remain beside that apphost. -->
   </PropertyGroup>
 
   <ItemGroup>

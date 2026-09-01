@@ -35,7 +35,13 @@ powershell -ExecutionPolicy Bypass -File scripts/windows/publish-native.ps1
 ```
 
 The publish script writes a manifest containing the SDK, publish settings and
-SHA-256 hashes. It deliberately marks the artifact `distributionReady: false`
+the size and SHA-256 hash of every file in the publish directory. `PublishSingleFile`
+bundles the managed payload into the large apphost, but Windows Desktop/WPF
+still emits five native companion DLLs (`D3DCompiler_47_cor3.dll`,
+`PenImc_cor3.dll`, `PresentationNative_cor3.dll`, `vcruntime140_cor3.dll`, and
+`wpfgfx_cor3.dll`). Copy the complete flat `helper/` directory together; an
+exe-only copy is incomplete and fails when UI Automation initializes on a clean
+machine. The manifest deliberately marks the artifact `distributionReady: false`
 until supported Windows release testing, signing and installer ownership are
 defined.
 

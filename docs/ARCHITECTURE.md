@@ -119,7 +119,7 @@
 - Windows `click_method=accessibility` 映射到 UI Automation pattern，`app_post` 映射到 HWND `PostMessage`；macOS-only 的 `sky_click` 和没有实现的 `global` 都会在 snapshot lookup 前明确返回 unsupported。`auto` 仍保持 UIA 优先、window message fallback 的现有行为。
 - Windows UI Automation 需要运行在已登录用户的桌面 session 里。通过 SSH 作为脱离桌面的后台进程运行时，PowerShell 可以启动并返回 JSON，但系统可能不给它暴露顶层窗口；这种情况下 `list_apps` 会是空，`get_app_state` 可能返回 `appNotFound(...)`。
 - `apps/OpenComputerUseWindows/native/` 提供正式迁入的 C#/.NET 私有 executor。它使用独立 MTA UIA lane、显式 HWND、带 helper generation 的一次性 snapshot/token、操作前后 PID/process-start/window-generation 重校验、typed `verified`/`refused`/`unknown` outcome，以及 `GraphicsCaptureItem::CreateForWindow` target-window capture。它不实现 global input、rectangle capture 或静默前台 fallback。
-- native helper 的 `debug_sleep` 和 post-dispatch delay 只在生命周期测试进程通过 `MAKA_CU_WINDOWS_ENABLE_DEBUG_ENDPOINTS=1` 显式开启；默认产品端点返回 method-not-found。自包含 `win-x64` 发布由 `scripts/windows/publish-native.ps1` 生成并写入 SHA-256 manifest，当前仍标记为 `distributionReady: false`，因为签名、installer、支持版本与干净机证据尚未完成。
+- native helper 的 `debug_sleep` 和 post-dispatch delay 只在生命周期测试进程通过 `MAKA_CU_WINDOWS_ENABLE_DEBUG_ENDPOINTS=1` 显式开启；默认产品端点返回 method-not-found。`win-x64` 发布由 `scripts/windows/publish-native.ps1` 生成：managed payload 是 single-file，但 Windows Desktop/WPF 仍需要同目录的五个 native companion DLL；manifest 为整个 flat publish closure 记录 size/SHA-256，当前仍标记为 `distributionReady: false`，因为签名、installer、支持版本与干净机证据尚未完成。
 - Windows fixture 与生命周期回归位于 `apps/OpenComputerUseWindows/fixture/` 和 `scripts/windows/lifecycle-driver.mjs`，覆盖 WGC 遮挡、取消结算、provider 卡死恢复、父进程退出、整窗重建以及同窗口控件替换。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
 
 ### 7. Linux Runtime

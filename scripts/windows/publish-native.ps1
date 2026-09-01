@@ -3,14 +3,19 @@ param(
   [string]$RuntimeIdentifier = 'win-x64',
   [ValidateSet('Release')]
   [string]$Configuration = 'Release',
-  [switch]$IncludeFixture
+  [switch]$IncludeFixture,
+  [string]$OutputDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $helperProject = Join-Path $repoRoot 'apps/OpenComputerUseWindows/native/MakaCuWindows.csproj'
 $fixtureProject = Join-Path $repoRoot 'apps/OpenComputerUseWindows/fixture/HangWindowFixture/HangWindowFixture.csproj'
-$outputRoot = Join-Path $repoRoot "dist/windows-native/$RuntimeIdentifier"
+$outputRoot = if ($OutputDirectory) {
+  [IO.Path]::GetFullPath($OutputDirectory)
+} else {
+  Join-Path $repoRoot "dist/windows-native/$RuntimeIdentifier"
+}
 $helperOutput = Join-Path $outputRoot 'helper'
 $fixtureOutput = Join-Path $outputRoot 'fixture'
 
@@ -30,7 +35,7 @@ if ($IncludeFixture) {
 
 $sdk = (& dotnet --version).Trim()
 $files = @()
-foreach ($path in Get-ChildItem -LiteralPath $outputRoot -Recurse -File | Where-Object { $_.Extension -eq '.exe' }) {
+foreach ($path in Get-ChildItem -LiteralPath $outputRoot -Recurse -File | Where-Object { $_.FullName -ne (Join-Path $outputRoot 'manifest.json') }) {
   $hash = (Get-FileHash -LiteralPath $path.FullName -Algorithm SHA256).Hash
   $files += [ordered]@{
     path = $path.FullName.Substring($repoRoot.Length + 1).Replace('\', '/')
@@ -46,6 +51,9 @@ $manifest = [ordered]@{
   sdk = $sdk
   selfContained = $true
   singleFile = $true
+  managedSingleFile = $true
+  nativeCompanionsRequired = $true
+  compression = $false
   trimmed = $false
   distributionReady = $false
   files = $files
