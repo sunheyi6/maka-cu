@@ -638,9 +638,7 @@ func hostTestBinding(
     )
 }
 
-/// A snapshot of `window`, carrying one element and a window digest computed the
-/// way `dispatch.point`'s live check recomputes it, so an unchanged window
-/// matches and a changed one does not.
+/// A snapshot of `window`, carrying one element and a canonical window digest.
 func hostTestSnapshot(
     registry: HostSnapshotRegistry,
     session: String,

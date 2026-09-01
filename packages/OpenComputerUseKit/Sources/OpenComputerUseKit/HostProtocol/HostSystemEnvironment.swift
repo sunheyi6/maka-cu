@@ -83,8 +83,8 @@ public protocol HostSystemEnvironment {
     /// caller re-reads `focusedElement(pid:)` before posting anything.
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool
     func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe
-    /// §6.3 — the path has already been selected and permitted by
-    /// `hostPointDispatchPath`; this only posts it.
+    /// Posts an executor-derived, PID-bound event for an already bound semantic
+    /// element action. Model-provided point dispatch never reaches this seam.
     func postPointEvent(
         _ action: HostPointAction,
         at point: CGPoint,
@@ -225,8 +225,8 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
         pid: pid_t,
         path: HostDispatchPath
     ) throws {
-        // Only the pid-bound paths are reachable when `allowGlobalPointer` is
-        // false, and `hostPointDispatchPath` has already refused anything else.
+        // Host element dispatch passes only PID-bound paths here. The retained
+        // `dispatch.point` compatibility endpoint never calls this method.
         switch action {
         case .move:
             try InputSimulation.moveGlobally(to: point)

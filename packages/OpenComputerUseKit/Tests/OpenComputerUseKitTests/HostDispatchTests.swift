@@ -676,14 +676,12 @@ final class HostDispatchTests: XCTestCase {
         XCTAssertEqual(try errorCode(harness.awaitResult()), "element_disabled")
     }
 
-    // MARK: - Point dispatch (§6.3)
+    // MARK: - Point dispatch compatibility refusal (§6.3)
 
-    func testPointDispatchRecomputesTheWindowAnchorRatherThanTrustingTheEcho() throws {
-        // The echo proves only that the host remembered its own digest. Within
-        // the TTL the window can be resized, and because the screen point is
-        // derived from the *current* bounds that silently rescaled the click.
+    func testPointDispatchIsAStableRefusalAndDoesNotTouchTheTarget() throws {
         var environment = FakeEnvironment()
-        environment.windows = [hostTestWindow(bounds: CGRect(x: 0, y: 0, width: 200, height: 200))]
+        environment.windows = []
+        environment.pointEvents.failure = HostDomainError(.dispatchRefused)
 
         let harness = ServerHarness(environment: environment)
         try harness.begin()
@@ -694,128 +692,31 @@ final class HostDispatchTests: XCTestCase {
         )
         harness.install(snapshot)
 
-        harness.send(dispatchPoint(snapshot: snapshot, expectDigest: snapshot.windowDigest))
-        XCTAssertEqual(try errorCode(harness.awaitResult()), "window_changed")
-        XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty, "a refused point dispatch posts nothing")
-    }
-
-    /// §12 vector 52 — a window that did not change is dispatchable at a point.
-    ///
-    /// Every other point vector installs a snapshot whose digest the fixture
-    /// computed, and verifies it against a probe that answers from the record. So
-    /// the recompute always agreed with itself, and the executor could ship with
-    /// the two ends of §4.3 reading the same unchanged element differently:
-    /// against every real application, `dispatch.point` refused `window_changed`
-    /// on the frame it had just been handed.
-    ///
-    /// Here the snapshot comes from the real tree walk and the probe recomputes
-    /// from the nodes, so the two ends are both present and neither is the other.
-    func testAPointDispatchAgainstAWindowThatDidNotChangeIsNotRefused() throws {
-        // A window, one group, one button. Every node reports the live parent
-        // chain the probe will read — including the root, whose chain runs up
-        // into the application element the walk never sees.
-        let button = FakeNode(
-            role: "AXButton",
-            label: "Send",
-            liveAncestorRoles: ["AXGroup", "AXWindow"]
+        harness.send(
+            dispatchPoint(
+                snapshot: snapshot,
+                expectDigest: "sha256:" + String(repeating: "c", count: 64),
+                x: 100,
+                y: 100,
+                observeAfter: #"{"includeImage":false,"settle":"quiesce"}"#
+            )
         )
-        let group = FakeNode(role: "AXGroup", liveAncestorRoles: ["AXWindow"], children: [button])
-        let root = FakeNode(role: "AXWindow", liveAncestorRoles: ["AXApplication"], children: [group])
-
-        var environment = FakeEnvironment()
-        environment.windows = [hostTestWindow()]
-        let probe = FakeRecomputingProbe()
-        environment.probe = probe
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-        let (snapshot, walk) = hostTestWalkedSnapshot(
-            registry: harness.server.currentRegistry(),
-            session: "s1",
-            root: root
-        )
-
-        probe.nodes = [
-            walk.elements[0].token: root,
-            walk.elements[1].token: group,
-            walk.elements[2].token: button,
-        ]
-        probe.siblingIndexes = [
-            // The root's live index is not its traversal index: this window is
-            // third in its application's `AXWindows`. §4.3's root rule is what
-            // keeps a *different* window coming forward out of this digest.
-            walk.elements[0].token: 3,
-            walk.elements[1].token: 0,
-            walk.elements[2].token: 0,
-        ]
-        harness.install(snapshot)
-
-        harness.send(dispatchPoint(snapshot: snapshot, expectDigest: snapshot.windowDigest, x: 100, y: 100))
         let result = try harness.awaitResult()
 
-        XCTAssertNil(
-            (result["error"] as? [String: Any])?["code"] as? String,
-            "nothing in the window moved, so the anchor must still hold"
-        )
-        XCTAssertEqual(result["ok"] as? Bool, true)
-        XCTAssertEqual(result["path"] as? String, "cg_event_pid")
-        XCTAssertFalse(harness.environment.pointEvents.posted.isEmpty)
-    }
-
-    func testPointDispatchTellsAHostEchoMistakeApartFromAChangedWindow() throws {
-        var environment = FakeEnvironment()
-        environment.windows = [hostTestWindow()]
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-        let snapshot = hostTestSnapshot(
-            registry: harness.server.currentRegistry(),
-            session: "s1",
-            image: hostTestImage()
-        )
-        harness.install(snapshot)
-
-        harness.send(dispatchPoint(snapshot: snapshot, expectDigest: "sha256:" + String(repeating: "c", count: 64)))
-        let result = try harness.awaitResult()
-
-        // Reporting `window_changed` for a host bookkeeping fault sent the host
-        // round the re-observe loop with the same wrong pairing.
-        XCTAssertEqual(try errorCode(result), "element_digest_mismatch")
+        XCTAssertEqual(result["ok"] as? Bool, false)
         XCTAssertEqual(result["outcome"] as? String, "refused")
         XCTAssertEqual(result["tier"] as? String, "coordinate-background")
+        XCTAssertEqual(result["path"] as? String, "none")
+        XCTAssertEqual(result["effect"] as? String, "unverifiable")
+        let verification = try XCTUnwrap(result["verification"] as? [String: Any])
+        XCTAssertEqual(verification["method"] as? String, "none")
+        XCTAssertEqual(verification["observedChange"] as? Bool, false)
+        XCTAssertEqual(try errorCode(result), "unsupported_action")
         XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty)
-    }
-
-    func testAPointDispatchThatLandsSpendsTheFrameAndDeclaresItsPath() throws {
-        var environment = FakeEnvironment()
-        environment.windows = [hostTestWindow()]
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-        let snapshot = hostTestSnapshot(
-            registry: harness.server.currentRegistry(),
-            session: "s1",
-            image: hostTestImage()
-        )
-        harness.install(snapshot)
-
-        harness.send(dispatchPoint(snapshot: snapshot, expectDigest: snapshot.windowDigest, x: 100, y: 100))
-        let result = try harness.awaitResult()
-
-        XCTAssertEqual(result["ok"] as? Bool, true)
-        XCTAssertEqual(result["outcome"] as? String, "ok")
-        XCTAssertEqual(result["path"] as? String, "cg_event_pid")
-        XCTAssertEqual(result["tier"] as? String, "coordinate-background")
-
-        // `image_px` is divided by the image's measured scale, never by a
-        // backing scale factor read off the screen.
-        let posted = try XCTUnwrap(harness.environment.pointEvents.posted.first)
-        XCTAssertEqual(posted.point, CGPoint(x: 50, y: 50))
-
-        // §4.1 — a mutating dispatch spends the frame it quoted.
         XCTAssertEqual(
             harness.server.currentRegistry().snapshotState(session: "s1", snapshotId: snapshot.id),
-            .spent
+            .live,
+            "a compatibility refusal must not consume snapshot authority"
         )
     }
 
@@ -849,99 +750,6 @@ final class HostDispatchTests: XCTestCase {
         XCTAssertEqual(posted.pid, hostTestPid)
         XCTAssertEqual(posted.path, .cgEventPid)
         XCTAssertEqual(posted.action, .scroll(direction: .down, pages: 0.5))
-    }
-
-    func testAnAttemptedPointDispatchTheOSRejectedIsFailedNotRefused() throws {
-        var environment = FakeEnvironment()
-        environment.windows = [hostTestWindow()]
-        environment.pointEvents.failure = HostDomainError(.dispatchRefused)
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-        let snapshot = hostTestSnapshot(
-            registry: harness.server.currentRegistry(),
-            session: "s1",
-            image: hostTestImage()
-        )
-        harness.install(snapshot)
-
-        harness.send(dispatchPoint(snapshot: snapshot, expectDigest: snapshot.windowDigest, x: 100, y: 100))
-        let result = try harness.awaitResult()
-
-        // §6.5 — `failed` names the path attempted. Reporting `refused` with
-        // `path: none` here erases the difference between "we never tried" and
-        // "we tried and it said no".
-        XCTAssertEqual(result["outcome"] as? String, "failed")
-        XCTAssertEqual(result["path"] as? String, "cg_event_pid")
-        XCTAssertEqual(try errorCode(result), "dispatch_refused")
-        XCTAssertEqual(result["effect"] as? String, "unverifiable")
-    }
-
-    func testATargetReachableOnlyByTheGlobalPathIsRefusedOverTheWireToo() throws {
-        // Vector 14, through the handler rather than the policy function: the
-        // refusal carries `wouldRequirePath`, and the pointer never moves.
-        var environment = FakeEnvironment()
-        environment.windows = [hostTestWindow()]
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-        let snapshot = hostTestSnapshot(
-            registry: harness.server.currentRegistry(),
-            session: "s1",
-            image: hostTestImage()
-        )
-        harness.install(snapshot)
-
-        harness.send(
-            dispatchPoint(
-                snapshot: snapshot,
-                expectDigest: snapshot.windowDigest,
-                action: #"{"kind":"move"}"#
-            )
-        )
-        let result = try harness.awaitResult()
-
-        XCTAssertEqual(try errorCode(result), "dispatch_refused")
-        XCTAssertEqual(result["outcome"] as? String, "refused")
-        XCTAssertEqual(result["path"] as? String, "none")
-        let detail = try XCTUnwrap((result["error"] as? [String: Any])?["detail"] as? [String: Any])
-        XCTAssertEqual(detail["wouldRequirePath"] as? String, "cg_event_global")
-        XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty, "the system cursor must not move")
-    }
-
-    func testAFailedPostObservationIsReportedAsAnErrorObjectBesideTheOutcome() throws {
-        // §6.1 — the action happened and must be reported even though the frame
-        // after it could not be. The field is an error object like every other
-        // error on this wire; a bare code string made it the one failure the host
-        // had to parse differently.
-        var environment = FakeEnvironment()
-        environment.windows = [hostTestWindow()]
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-        let snapshot = hostTestSnapshot(
-            registry: harness.server.currentRegistry(),
-            session: "s1",
-            image: hostTestImage()
-        )
-        harness.install(snapshot)
-
-        harness.send(
-            dispatchPoint(
-                snapshot: snapshot,
-                expectDigest: snapshot.windowDigest,
-                x: 100,
-                y: 100,
-                observeAfter: #"{"includeImage":false,"settle":"none"}"#
-            )
-        )
-        let result = try harness.awaitResult()
-
-        XCTAssertEqual(result["ok"] as? Bool, true)
-        XCTAssertNil(result["snapshot"] as? [String: Any])
-        let postError = try XCTUnwrap(result["postObservationError"] as? [String: Any])
-        XCTAssertEqual(postError["code"] as? String, "window_gone")
-        XCTAssertEqual(postError["message"] as? String, HostDomainErrorCode.windowGone.message)
     }
 
     // MARK: - Key dispatch (§6.4)

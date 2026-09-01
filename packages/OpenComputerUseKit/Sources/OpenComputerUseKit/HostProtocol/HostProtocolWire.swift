@@ -585,10 +585,7 @@ public struct HostCapabilities: Codable, Equatable, Sendable {
         "click", "set_value", "select_text", "secondary_action", "scroll",
         "move_window", "resize_window", "minimize_window",
     ]
-    public var pointActions: [String] = [
-        "move", "left_click", "right_click", "middle_click", "double_click",
-        "triple_click", "drag", "scroll",
-    ]
+    public var pointActions: [String] = []
     public var keyActions: [String] = ["type", "key"]
     public var imageFormats: [HostImageFormat] = [.png]
 

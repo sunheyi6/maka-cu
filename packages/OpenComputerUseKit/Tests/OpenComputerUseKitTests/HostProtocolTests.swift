@@ -252,9 +252,8 @@ final class HostProtocolTests: XCTestCase {
     func testTheTwoEndsOfTheBindingCheckAgreeOnAnElementThatDidNotMove() throws {
         // The walk records the inputs and the probe recomputes them, and §4.3
         // holds only if the two produce the same bytes from the same unchanged
-        // element. Asserted at the root, where they disagreed: no element
-        // dispatch could see it — it checks the element it targets — and
-        // `dispatch.point`, which anchors on the whole window, saw it every time.
+        // element. Asserted at the root, where they once disagreed despite the
+        // element itself remaining unchanged.
         let root = FakeNode(role: "AXWindow", title: "Untitled", liveAncestorRoles: ["AXApplication"])
 
         let walk = hostWalkTree(
@@ -606,73 +605,6 @@ final class HostProtocolTests: XCTestCase {
         let inconclusive = hostEffectFromValueReadback(requested: "a", previous: "b", readback: nil).verification
 
         XCTAssertNotEqual(neverChecked.method, inconclusive.method)
-    }
-
-    // MARK: - Path selection (§6.3)
-
-    func testTargetReachableOnlyByTheGlobalPathIsRefusedRatherThanWarped() {
-        let bounds = CGRect(x: 0, y: 0, width: 100, height: 100)
-
-        let refusal = hostPointDispatchPath(
-            action: .move,
-            point: CGPoint(x: 10, y: 10),
-            startPoint: nil,
-            windowBounds: bounds,
-            allowGlobalPointer: false
-        )
-
-        XCTAssertEqual(failureCode(refusal), .dispatchRefused)
-        if case .failure(let error) = refusal {
-            XCTAssertEqual(error.detail, .wouldRequirePath(.cgEventGlobal))
-        } else {
-            XCTFail("a pointer move has no target-bound form and must be refused")
-        }
-
-        // The same request is allowed only when the host said so in the handshake.
-        XCTAssertEqual(
-            try? hostPointDispatchPath(
-                action: .move,
-                point: CGPoint(x: 10, y: 10),
-                startPoint: nil,
-                windowBounds: bounds,
-                allowGlobalPointer: true
-            ).get(),
-            .cgEventGlobal
-        )
-    }
-
-    func testDragLeavingTheTargetWindowIsRefusedWithoutGlobalPointer() {
-        let bounds = CGRect(x: 0, y: 0, width: 100, height: 100)
-
-        let refusal = hostPointDispatchPath(
-            action: .drag,
-            point: CGPoint(x: 50, y: 50),
-            startPoint: CGPoint(x: 400, y: 400),
-            windowBounds: bounds,
-            allowGlobalPointer: false
-        )
-        XCTAssertEqual(failureCode(refusal), .dispatchRefused)
-
-        let inside = hostPointDispatchPath(
-            action: .drag,
-            point: CGPoint(x: 50, y: 50),
-            startPoint: CGPoint(x: 10, y: 10),
-            windowBounds: bounds,
-            allowGlobalPointer: false
-        )
-        XCTAssertEqual(try? inside.get(), .cgEventPid)
-    }
-
-    func testPointOutsideTheTargetWindowIsAnInvalidPointNotARefusal() {
-        let result = hostPointDispatchPath(
-            action: .leftClick(count: 1),
-            point: CGPoint(x: 900, y: 900),
-            startPoint: nil,
-            windowBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
-            allowGlobalPointer: false
-        )
-
-        XCTAssertEqual(failureCode(result), .invalidPoint)
     }
 
     // MARK: - Occlusion (§6.2)

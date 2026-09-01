@@ -278,13 +278,9 @@ public enum HostCapture {
                         return CGImage?.none
                     }
                     filter = SCContentFilter(display: display, excludingWindows: [])
-                    // §5.3 / §6.3 — `image.scale` is measured against the target
-                    // window and `dispatch.point` reads `image_px` from the
-                    // window's origin, so a desktop-scope image has to be the
-                    // window's rectangle *as composited* — everything stacked on
-                    // top included. Handing back a display-origin crop the size of
-                    // the window kept both fields but moved the pixels, and every
-                    // point dispatch under this scope landed somewhere else.
+                    // §5.3 — `image.scale` is measured against the target window,
+                    // so a desktop-scope image has to be the window's rectangle
+                    // as composited, including everything stacked on top.
                     let sourceRect = hostDesktopSourceRect(
                         windowFrame: window.frame,
                         displayFrame: display.frame

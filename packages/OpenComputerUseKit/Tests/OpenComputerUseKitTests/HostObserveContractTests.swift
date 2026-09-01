@@ -312,7 +312,7 @@ final class HostObserveContractTests: XCTestCase {
     func testDesktopScopeCapturesTheWindowRectangleAndNotADisplayOriginCrop() {
         // A whole-display filter sized to the window produced a display-origin
         // crop while `image.scale` and `image_px` both anchor at the window's
-        // origin, so every point dispatch under this scope landed elsewhere.
+        // origin, so the returned pixels did not describe the declared window.
         let rect = hostDesktopSourceRect(
             windowFrame: CGRect(x: 1512, y: 200, width: 800, height: 600),
             displayFrame: CGRect(x: 1512, y: 0, width: 1512, height: 982)

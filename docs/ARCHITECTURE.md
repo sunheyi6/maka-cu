@@ -47,7 +47,7 @@
 
 - transport 是 stdio 上的 line-framed JSON-RPC 2.0：一行一个 JSON value，UTF-8，`\n` 结尾，没有 `Content-Length`。stdout 只承载 JSON-RPC，诊断一律走 stderr。
 - 两层错误刻意分开：JSON-RPC `error` 只表示请求本身不可用（`-32000` 版本不匹配、`-32001` 未握手、`-32002` 未知 session、`-32003` 正在退出）；世界的状态一律是 `result` 里的 `{ ok: false, error: { code, message, detail } }`，`code` 是闭集，`message` 由 `code` 决定，`detail` 只有枚举和数字。
-- 当前 method：`host.hello`、`session.begin` / `session.end`、`observe`、`window.list`、`apps.list`、`permissions.check`、`apps.launch`、`dispatch.element` / `dispatch.point` / `dispatch.key`、`screen.capture`，以及 `$/cancel` notification。`capture.start` / `capture.next` / `capture.stop` 已预留，v1 一律返回 domain 结果 `not_implemented`，而不是 `-32601`——这样 feature detection 是一次稳定的字段读取，方法名也不会被别的东西占掉。
+- 当前 method：`host.hello`、`session.begin` / `session.end`、`observe`、`window.list`、`apps.list`、`permissions.check`、`apps.launch`、`dispatch.element` / `dispatch.key`、`screen.capture`，以及 `$/cancel` notification。`dispatch.point` 仅作为旧 host 的兼容拒绝端点保留，固定返回 `unsupported_action`，不会解析 snapshot、读取目标或发送输入。`capture.start` / `capture.next` / `capture.stop` 已预留，v1 一律返回 domain 结果 `not_implemented`，而不是 `-32601`——这样 feature detection 是一次稳定的字段读取，方法名也不会被别的东西占掉。
 - 握手带回 executor 版本、capabilities 和全部 limits。host 不允许硬编码 executor 负责执行的边界，因为过去两侧各写一份、谁都发现不了漂移。
 - 并发按 lane 组织：`control`、`target:<pid>:<windowId>`、`misc`、`capture:<streamId>`。同 lane 严格 FIFO，跨 lane 并发；所以同一窗口的 dispatch 永远不会超过产出它 snapshot 的 observe，而未来的 capture 长轮询也不会挡住 dispatch。
 - 每个 snapshot id 都带一个 128-bit 的 per-process nonce。executor 重启后，上一代的 id 一定 `snapshot_unknown`，不会静默命中新状态。
@@ -56,7 +56,7 @@
 
 ### 3. Service 层
 
-- host protocol 自己实现 observe 与 dispatch：`observe` 产出结构化的 AX 树 + element token，`dispatch.*` 只对 token 指名的那个元素执行指名的那个动作。它不复用 `ComputerUseService` 的 index 定址入口——把协议接到 index 上就等于把协议存在的理由接回来了。
+- host protocol 自己实现 observe 与 dispatch：`observe` 产出结构化的 AX 树 + element token，可执行 mutation 通过 `dispatch.element` 或绑定已验证焦点的 `dispatch.key` 完成。生产动作面不接受坐标输入，也不把 semantic action 降级成 point event。它不复用 `ComputerUseService` 的 index 定址入口——把协议接到 index 上就等于把协议存在的理由接回来了。
 - mutation 消费 snapshot 的 dispatch authority，但 spent snapshot 的 revision 仍可作为下一次 post-action observation 的差分基线；expired/evicted snapshot 不参与。这样动作后的模型输入可以只写有效变化，又不放宽 single-use snapshot 合同。
 - `{kind: "app"}` 按 window inventory 的前到后顺序选择当前 sheet/窗口；`{kind: "window"}` 严格按 PID + window ID。AppKit sheet 在 CGWindow 侧是独立窗口、在 AX 侧是主窗口的 `AXSheet` / `AXDrawer` child，匹配顺序固定为 direct AXWindow 后 child sheet。
 - CGWindow 已出现但对应 AXWindow/AXSheet 尚未发布时，会对同一 PID/window/frame 最多重读 250ms；window inventory 本身不存在目标时仍立即 `window_gone`，不会回退到别的窗口。
@@ -139,6 +139,7 @@
 - 当前权限引导已经具备可运行 app、深链、拖拽辅助，以及一版更接近官方的 accessory panel 入场动画和返回 affordance；点击链路也已经补上独立 visual cursor、官方 asset fallback 和相对目标 window 的排序逻辑，并且在 overlay 可见期间会持续重申“排在目标 window 之上”，避免用户手动激活目标 app 后 cursor 被目标窗口重新盖住；但整体还没有完全复刻官方那套嵌入式 choreography / host 集成 / session approval 体验。
 - host protocol 的截图一律以文件路径返回，写在握手声明的 `imageDir` 里，生命周期与 snapshot 绑定；line-framed 通道上内联 base64 是 4/3 膨胀，而且一条 8 MB 的行会把其它待回的响应全部堵住。调试命令仍走 `ScreenCaptureKit` 捕获目标窗口，不再把普通 app 截图落盘到仓库或临时目录；编码前会按最大尺寸和目标字节数自适应缩小，避免复杂页面的大 PNG 触发 host 侧 MCP result 降级，同时 coordinate tools 继续按实际返回的 screenshot pixel 尺寸映射坐标；单次 ScreenCaptureKit capture 会设置超时，超时后省略 image block 而不是卡住整个 `get_app_state`。
 - host protocol 的会话状态是进程内内存态：每个 session 持有自己的 snapshot 集合、element token 字典和保留的 `AXUIElement` 引用；`session.end` 会一次性释放 snapshot、删除本会话写出的图片，并清掉 executor 画的 cursor，同时把释放计数报回去，好让这类回归有断言可写。
+- 本仓库旧 MCP/CLI 产品面仍有历史坐标 API；它和 Maka 的 `maka.cu/2` host protocol 是不同边界。Windows、macOS 和后续平台接入 Maka 时必须共享 semantic-only host contract，不能从旧 MCP/CLI schema 派生第二套 model action space 或 fallback ladder。
 
 ## 主要验证路径
 

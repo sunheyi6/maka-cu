@@ -197,8 +197,7 @@ executor is already correct; the host is the side that changes.
   "capabilities": {
     "captureStream": false,
     "elementActions": ["click", "set_value", "select_text", "secondary_action", "scroll"],
-    "pointActions": ["move", "left_click", "right_click", "middle_click", "double_click",
-                     "triple_click", "mouse_down", "mouse_up", "drag", "scroll"],
+    "pointActions": [],
     "keyActions": ["type", "key"],
     "imageFormats": ["png", "jpeg"]
   },
@@ -1044,11 +1043,9 @@ carries a `title`. A consumer that reads `label` alone gets an anonymous tree.
 why it was already missing.
 
 **`elements` and `menu.elements` are separate, and `windowDigest` is over
-`elements` only.** The digest anchors `dispatch.point` and is recomputed on
-every settle sample — one Accessibility round trip per recorded element, per
-look — and a menu folded into it would make the same window digest differently
-depending on whether menus had been asked for, while charging every settle for
-elements that cannot change when the window does.
+`elements` only.** A menu folded into it would make the same window digest
+differently depending on whether menus had been asked for, while charging every
+settle for elements that cannot change when the window does.
 
 #### Scope, because a menu bar is not one size
 
@@ -1264,8 +1261,9 @@ command is not there, and stops looking.
 
 #### `observeAfter.menu`
 
-`dispatch.element`, `dispatch.point` and `dispatch.key` take `menu` in
-`observeAfter` on the same terms, absent meaning `false`. It exists because a
+`dispatch.element` and `dispatch.key` take `menu` in `observeAfter` on the same
+terms, absent meaning `false`. The legacy `dispatch.point` shape still parses
+the field but never performs a post-action observation. The field exists because a
 menu press changes what the rest of the menu will do: `文件 > 打开…` brings a
 document up, and `存储`, `导出为PDF…` and `关闭` all move from disabled to
 enabled with it. Without it the host would have to spend a second `observe` to
@@ -1698,48 +1696,40 @@ became expressible when refusals started carrying `path` (§1.1).
   } }
 ```
 
-- `space` is `"image_px"`. It is required and single-valued: a required field
-  with one legal value is how a second space gets added later without either side
-  guessing which one it was handed.
-- `expectWindowDigest` is required. A point has no element to anchor to, so the
-  whole window is the anchor — which is what the host already does for coordinate
-  actions (`cua-driver-target-resolution.ts:336-365`). The executor MUST
-  **recompute** that digest against the live window before dispatching, and MUST
-  refuse `window_changed` when it differs; comparing the echo against its own
-  record and stopping there checks the host against itself, and inside the TTL
-  the click goes to whatever the window has become — a resize rescales the point
-  silently, because the screen point is derived from the *current* bounds.
-  The recompute is over the elements the snapshot recorded, read the one way
-  §4.3 requires. This is the whole of point dispatch's binding, so an executor
-  whose two ends disagree by one field on one element does not lose an edge case:
-  it refuses every point dispatch ever made against it, and answers
-  `window_changed` for a window sitting still. See §12 vector 52.
-- `occlusionPolicy` defaults to `"any"` here, not `"same_app"`. A pixel is a
-  pixel: anything on top of it owns it.
-- `startPoint` is present only for `drag`.
+This method is retained only as a compatibility endpoint for a host that still
+sends the old request shape. Point mutation is not an executor capability:
+`host.hello.capabilities.pointActions` is always empty.
 
-**Path selection is declared, not discovered.** `path` in the response is one of:
+After the normal handshake and session checks, every structurally valid request
+returns:
+
+```json
+{ "ok": false, "toolCallId": "call_2",
+  "outcome": "refused", "tier": "coordinate-background", "path": "none",
+  "effect": "unverifiable",
+  "verification": { "method": "none", "observedChange": false },
+  "error": { "code": "unsupported_action",
+             "message": "The requested action is not supported by this executor." } }
+```
+
+The executor MUST NOT resolve or consume `snapshotId`, compare
+`expectWindowDigest`, inspect window inventory, choose a dispatch path, post an
+input event, or perform `observeAfter`. A stale, missing, or mismatched target
+therefore does not replace `unsupported_action` with a target error. This keeps
+old hosts on a typed domain refusal while making coordinate execution
+unavailable on every platform.
+
+The paths used by executable dispatch methods are:
 
 | `path` | mechanism | permitted when |
 | --- | --- | --- |
-| `ax_action` | `AXUIElementPerformAction` on the element under the point | always |
+| `ax_action` | `AXUIElementPerformAction` on the bound element | always |
 | `ax_attribute` | `AXUIElementSetAttributeValue` | always |
 | `ax_select` | set `AXSelectedChildren` on the containing list | always |
-| `cg_event_pid` | `CGEventPostToPid` — target-bound, no cursor warp | always |
-| `skylight_pid` | `SLEventPostToPid` — background window path, including WebContent-aware host-window routing | always |
-| `cg_event_global` | `CGEventPost` — **moves the system cursor** | only when `allowGlobalPointer: true` |
+| `cg_event_pid` | PID-bound key or element-scroll fallback | `dispatch.key` or bound `dispatch.element` only |
+| `skylight_pid` | bound WebContent element activation | `dispatch.element` only |
+| `cg_event_global` | global pointer dispatch path | never permitted by Maka |
 | `none` | nothing was dispatched | refusals |
-
-When `allowGlobalPointer` is `false` and no permitted path can reach the target,
-the executor MUST return `dispatch_refused` with
-`detail: { "wouldRequirePath": "cg_event_global" }`. It MUST NOT fall back. This
-is the invariant Maka refuses to trade: no cursor warp, no z-order change. The
-current backend enforces it by refusing when no app window owns the click point
-(`cua-driver-backend.ts:1954-1963`) — a check that only works because the host
-knows which driver path a pid-bound click takes. Under this protocol the executor
-states the path and the host verifies it: a response whose `path` was not
-permitted is a protocol violation, and the host MUST treat the session as
-compromised rather than accept the result.
 
 `tier` and `path` are both declared, and their pairing is fixed:
 
@@ -2165,12 +2155,10 @@ Which method belongs to which action, in full:
 | | `dispatch.key` | `kind: "type"` |
 | `selection_readback` | `dispatch.element` | `select_text` |
 | `tree_delta` | `dispatch.element` | `click`, `scroll` — with `settle: "quiesce"` |
-| | `dispatch.point` | every action — with `settle: "quiesce"` |
 | | `dispatch.key` | `kind: "key"` — with `settle: "quiesce"` |
 | `action_result` | `dispatch.element` | `secondary_action`, and `click`/`scroll` without a settle |
-| | `dispatch.point` | every action without a settle |
 | `none` | `dispatch.key` | `kind: "key"` without a settle |
-| | any | every refusal (§6.5), and a readback with nothing on either side to read |
+| | any | every refusal (§6.5), including every `dispatch.point`, and a readback with nothing on either side to read |
 
 `none` is where a key without a settle lands rather than `action_result` because
 there is no result to report: the events were written to the target pid and
@@ -2258,10 +2246,6 @@ empty image at half the resolution its `scale` claims, and a host that mirrors
 the frame renders the empty part as a black margin — which is how this was
 found, two layers away from the cause.
 
-Every pixel statement in the protocol rests on this. `image_px` in §6.3 is read
-from the image's origin, so a frame whose content is drawn at a different scale
-than it declares puts every point dispatch off by the ratio between the two.
-
 The executor therefore sizes the output buffer from the same source it renders
 from, so the two cannot disagree, and measures `scale` from the bitmap it got
 back (§5.3). Neither number is chosen twice.
@@ -2312,8 +2296,7 @@ gets the same answer — a new member.
 What the host does with it:
 
 - Surfaces it to the model as an outcome, with the executor's `detail` (enums and
-  numbers only, §1.2) as evidence — including `wouldRequirePath` when nothing was
-  attempted (§6.3).
+  numbers only, §1.2) as evidence.
 - Does **not** re-observe automatically. A refused dispatch leaves the frame live
   (§4.1), so the model may retry against the same frame with different arguments.
 - Does not treat it as a permission problem. `permission_missing` is a separate
@@ -2598,9 +2581,9 @@ Declared schema:
     `suspected_noop`, not `ok`.
 13. `click` with `settle: "none"` never reports `effect: "confirmed"` via
     `tree_delta`.
-14. With `allowGlobalPointer: false`, a target reachable only by
-    `cg_event_global` yields `dispatch_refused` with
-    `wouldRequirePath: "cg_event_global"` — and the system cursor does not move.
+14. `dispatch.point` returns `unsupported_action`, `path: "none"` and
+    `verification.method: "none"` without resolving or consuming the snapshot,
+    inspecting a window, or posting an event.
 
 Versioning:
 
@@ -2788,29 +2771,14 @@ Observing a window that is expensive to read (§5.2):
     is per-attempt rather than per-observation passes the unit half and fails
     this one, because §7.5 walks the tree up to four times.
 
-Dispatching a point at the frame just observed (§4.3, §6.3):
+Refusing point mutation (§6.3):
 
-52. `observe` a window, then immediately `dispatch.point` against the snapshot it
-    returned: the answer is not `window_changed`. Nothing moved between the two
-    calls, so the anchor the observation recorded must still recompute to the
-    same bytes.
-
-    The vector that fails against an executor whose two ends of §4.3 read one
-    field of one element differently. Measured: the walk recorded the snapshot
-    root's ancestor chain live as `["AXApplication"]` while the binding probe
-    answered `[]` for the root, so 1 element of 65 differed, the window digest
-    differed, and `dispatch.point` refused `window_changed` on every call against
-    every application on both displays. No element dispatch could see it —
-    `strictness: "element"` checks the element it targets — so an executor can
-    hold this defect with a full element matrix passing.
-
-    Its unit half puts a tree in front of the walk whose nodes report a live
-    parent chain, and asserts the root records neither an ancestor nor a sibling
-    index; an executor that answers the binding probe from its own record rather
-    than by recomputing passes every other point vector and cannot fail this one,
-    which is why the vector also has a live half. The live half needs a window
-    that does not change on its own — against a window with a clock in it,
-    `window_changed` is the correct answer and the vector proves nothing.
+52. Begin a valid session, install a live snapshot, then send `dispatch.point`
+    with a deliberately wrong `expectWindowDigest`, an empty live window
+    inventory, and an event sink configured to fail if called. The answer is the
+    stable `unsupported_action` refusal, no event is posted, and the snapshot
+    remains live. This proves the compatibility endpoint does not inspect or
+    mutate the target before refusing.
 
 Judging a key by something that bears on it (§6.5):
 

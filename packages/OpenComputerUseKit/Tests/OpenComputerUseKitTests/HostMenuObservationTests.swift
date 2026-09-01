@@ -182,13 +182,11 @@ final class HostMenuObservationTests: XCTestCase {
     // MARK: - Vector 58: the menu has its own budget, and stays out of the window's
 
     func testTheMenuDoesNotChangeTheWindowDigest() throws {
-        // §5.8 — the reason the menu is a second array and not a second root.
-        // `windowDigest` anchors `dispatch.point` and is recomputed on every
-        // settle sample, one Accessibility round trip per recorded element. A
-        // menu folded into `elements` would have joined that hash, so the same
+        // §5.8 — the reason the menu is a second array and not a second root. A
+        // menu folded into `elements` would join the window hash, so the same
         // window would digest differently depending on whether the host had
-        // asked for menus — and every settle would have paid for menu elements
-        // that cannot change while the window does.
+        // asked for menus, and every settle would pay for menu elements that
+        // cannot change while the window does.
         let harness = try menuHarness()
 
         harness.send(observe(id: 3, menu: nil))
