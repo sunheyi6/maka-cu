@@ -8,3 +8,10 @@ artifacts/codex-dumps/
 research/
 __pycache__/
 *.pyc
+
+# Local Windows .NET builds and published native helper artifacts.
+apps/OpenComputerUseWindows/native/bin/
+apps/OpenComputerUseWindows/native/obj/
+apps/OpenComputerUseWindows/fixture/HangWindowFixture/bin/
+apps/OpenComputerUseWindows/fixture/HangWindowFixture/obj/
+dist/windows-native/

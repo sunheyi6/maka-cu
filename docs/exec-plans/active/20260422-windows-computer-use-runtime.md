@@ -31,7 +31,7 @@
   - `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseToolDispatcher.swift`
 - 已知约束：
   - Windows UI Automation 需要 runtime 运行在已登录桌面 session；脱离桌面的 SSH/service 进程可能看不到顶层窗口。
-  - 第一版以 Go 生成 `.exe` 为交付边界，但 UIA 操作通过嵌入式 PowerShell bridge 调 Windows 内置 .NET UI Automation API。
+  - 兼容性 Go `.exe` 继续保留旧 9-tool CLI/MCP 交付面；正式 native executor 迁入 `apps/OpenComputerUseWindows/native/`，由上层 host 直接监督，不增加无职责 Go→.NET 转发。
   - Win32 window message fallback 能减少真实鼠标抢占，但不同 GUI toolkit 对后台消息支持不一致。
   - Windows 没有一套对任意 app 都等价于 macOS AX 的后台键鼠模型；当前策略是 UIA pattern 优先、window message best-effort，并把启动 app / `SetFocus` / UIA text fallback 这类前台抢占路径做成显式 opt-in。
 
@@ -48,7 +48,7 @@
 
 1. 完成 Windows Go runtime 骨架和 9-tool 功能性实现。
 2. 完成 `.exe` 构建脚本、Go 单测、MCP/tools list 和 SSH 基础验证。
-3. 补交互式桌面 smoke、Windows fixture、installer/signing 和更原生 UIA 实现。
+3. 完成 native helper 的交互式桌面 smoke、host 选择/监督接入，再推进 installer/signing 与 supported-release 认证。
 
 ## 验证方式
 
@@ -84,6 +84,10 @@
 - [x] 将 Windows artifact 接入 npm release packaging，作为既有 npm root/alias packages 的 bundled artifacts 分发。
 - [ ] 补 Windows signing / installer 方案。
 - [ ] 评估把 PowerShell bridge 替换为原生 Go COM/UIA 的收益和风险。
+- [x] 将 C#/.NET helper 从实验线迁入 `apps/OpenComputerUseWindows/native/`，保留独立 private JSON-RPC 协议，不改变 Go CLI/MCP 兼容面。
+- [x] 加入 Windows Forms fixture、可复现 self-contained `win-x64` publish manifest 与 lifecycle/protocol drivers。
+- [x] 将 `debug_sleep` / post-dispatch delay 限制为显式 fixture 环境变量，产品默认禁用；capture 要求 PID/process-start/window-generation 并在读回后重校验。
+- [x] 补 same-window control replacement：保持顶层 HWND，替换控件并验证旧 RuntimeId token fail closed。
 
 ## 决策记录
 
@@ -97,3 +101,5 @@
 - 2026-04-22：Notepad 实测反馈 `type_text` 的 UIA `ValuePattern.SetValue` 会把窗口带到前台；默认改为 child HWND `EM_REPLACESEL` 后台消息路径，旧 UIA fallback 需要 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_FALLBACK=1`。
 - 2026-04-22：Windows 交互式 scheduled task 验证显示新 `type_text` 能写入 Notepad 且不会把前台从 Codex 切到 Notepad；Notepad 文本控件 UIA class 为 `RichEditD2DPT`，有 child native handle，可接收 `EM_REPLACESEL`。
 - 2026-04-23：Windows release artifact 接入 npm package bundled artifacts，不新增系统 installer/signing；root `open-computer-use` package 通过 launcher 按 `win32-arm64` / `win32-x64` 自动选择 `.exe`。
+- 2026-09-01：C# helper 迁入 `apps/OpenComputerUseWindows/native/` 作为独立监督边界；Go runtime 保持兼容性面。native endpoint 默认只开放 `initialize`、`list_windows`、`observe`、`act`、`capture`，测试 timing hooks 由环境变量显式开启。
+- 2026-09-01：capture 不再只信任 HWND/windowGeneration；调用方必须提供 observation 的 PID 与 process start time，采集结束再次校验身份，避免 capture/action 目标漂移。

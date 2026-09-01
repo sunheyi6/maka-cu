@@ -8,6 +8,7 @@
 - host protocol 一致性向量（§12）：`swift test --filter HostProtocolTests`、`swift test --filter HostDispatchTests`、`swift test --filter HostObserveContractTests`
 - macOS SkyLight 实机回归：`OPEN_COMPUTER_USE_RUN_SKY_CLICK_LIVE_TEST=1 swift test --filter SkyClickLiveTests`
 - Linux runtime：`(cd apps/OpenComputerUseLinux && go test ./...)`、`./scripts/build-open-computer-use-linux.sh --arch arm64`
+- Windows native helper：`dotnet build apps/OpenComputerUseWindows/native/MakaCuWindows.csproj -c Release`；可复现自包含发布：`powershell -ExecutionPolicy Bypass -File scripts/windows/publish-native.ps1`；交互式 fixture 生命周期：`node scripts/windows/lifecycle-driver.mjs <helper-exe> <fixture-exe>`
 - 本地诊断：
   - `open-computer-use doctor`
   - `open-computer-use snapshot <app>`
@@ -17,6 +18,7 @@
 - macOS 上必须给 `Open Computer Use.app` 授权 `Accessibility` 与 `Screen Recording`；终端本身不应该再是必需授权对象。
 - macOS `click_method=sky_click` 额外依赖 SkyLight / ApplicationServices 私有符号 `SLEventPostToPid`、`SLEventSetIntegerValueField`、`CGEventSetWindowLocation`、`SLPSPostEventRecordTo` 和 `GetProcessForPID`。运行时会动态探测并 fail closed，但 macOS 更新、签名方式或目标 app 输入策略变化仍可能让后台投递失效。受控实机回归除 DOM、前台 PID、鼠标和 z-order 外，还必须验证前台 AppKit active、key window、first responder 以及 resign/key-loss 计数。
 - smoke suite 依赖本地 GUI session，不能把它当成无头环境命令。
+- Windows native UIA/WGC fixture suite 同样依赖已登录的交互式桌面；本机成功不代表 clean machine、supported Windows release 或签名发布已认证。helper 卡死时必须由 host 监督并重启，不能把 UIA lane 的取消当作强制终止。
 - 普通 app 的 `get_app_state` 结果依赖 AX tree 和窗口截图，复杂 app 上输出会有差异；Electron/WebView app 的 AX tree 通常很深，当前会压缩空 wrapper 并放宽遍历深度，以优先保留可操作文本、按钮和输入框。
 - Linux runtime 依赖已登录桌面用户 session；缺少 `XDG_RUNTIME_DIR`、`DBUS_SESSION_BUS_ADDRESS` 或 display 环境时，会尝试从 `/run/user/<uid>` 和常见桌面进程自动发现当前用户的 session env。纯 SSH tty 如果找不到桌面 session 仍不能直接访问 AT-SPI GUI tree。
 - GNOME Wayland 截图可能被 compositor 限制，当前 Linux bridge 会把黑图视为无效截图并省略 image block。

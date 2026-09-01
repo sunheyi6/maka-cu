@@ -1,6 +1,6 @@
 # 架构总览
 
-这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 和 Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
+这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 的产品化基础由独立 C#/.NET executor 与兼容性 Go runtime 组成；Linux 仍是实验性的 Go runtime，二者尚未迁到 macOS host protocol。
 
 ## 当前目录结构
 
@@ -9,7 +9,7 @@
 - `apps/OpenComputerUseFixture`
   本地 GUI fixture app，用来承载低风险、可预测的点击/输入/滚动/拖拽验证路径。
 - `apps/OpenComputerUseWindows`
-  实验性 Windows runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 PowerShell UI Automation bridge，构建产物是 `open-computer-use.exe`，并随已有 npm 包的 `dist/windows/<arch>/` bundled artifacts 分发。
+  Windows runtime 目录。顶层 Go CLI/MCP 入口和 PowerShell bridge 保持旧 9-tool 兼容面；`native/` 是独立的 C#/.NET 私有 executor，负责 UIA snapshot/token、语义动作、WGC target-window capture 和可重启生命周期。两者不互相转发职责；上层 host 可以直接监督 native helper。构建产物分别是 `open-computer-use.exe` 和自包含的 `maka-cu-windows.exe`。
 - `apps/OpenComputerUseLinux`
   实验性 Linux runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 Python AT-SPI bridge，构建产物是 `open-computer-use`，并随已有 npm 包的 `dist/linux/<arch>/` bundled artifacts 分发。
 - `packages/OpenComputerUseKit`
@@ -118,7 +118,9 @@
 - 这 9 个 tool 的协议面与 macOS 主线保持一致：`list_apps`、`get_app_state`、`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value`。其中 element-targeted action 会优先复用上一轮 `get_app_state` 的 runtime id / automation metadata，coordinate action 使用 screenshot/window-relative 坐标。
 - Windows `click_method=accessibility` 映射到 UI Automation pattern，`app_post` 映射到 HWND `PostMessage`；macOS-only 的 `sky_click` 和没有实现的 `global` 都会在 snapshot lookup 前明确返回 unsupported。`auto` 仍保持 UIA 优先、window message fallback 的现有行为。
 - Windows UI Automation 需要运行在已登录用户的桌面 session 里。通过 SSH 作为脱离桌面的后台进程运行时，PowerShell 可以启动并返回 JSON，但系统可能不给它暴露顶层窗口；这种情况下 `list_apps` 会是空，`get_app_state` 可能返回 `appNotFound(...)`。
-- 当前 Windows 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/onboarding、没有 code signing，也没有独立的 Windows smoke fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
+- `apps/OpenComputerUseWindows/native/` 提供正式迁入的 C#/.NET 私有 executor。它使用独立 MTA UIA lane、显式 HWND、带 helper generation 的一次性 snapshot/token、操作前后 PID/process-start/window-generation 重校验、typed `verified`/`refused`/`unknown` outcome，以及 `GraphicsCaptureItem::CreateForWindow` target-window capture。它不实现 global input、rectangle capture 或静默前台 fallback。
+- native helper 的 `debug_sleep` 和 post-dispatch delay 只在生命周期测试进程通过 `MAKA_CU_WINDOWS_ENABLE_DEBUG_ENDPOINTS=1` 显式开启；默认产品端点返回 method-not-found。自包含 `win-x64` 发布由 `scripts/windows/publish-native.ps1` 生成并写入 SHA-256 manifest，当前仍标记为 `distributionReady: false`，因为签名、installer、支持版本与干净机证据尚未完成。
+- Windows fixture 与生命周期回归位于 `apps/OpenComputerUseWindows/fixture/` 和 `scripts/windows/lifecycle-driver.mjs`，覆盖 WGC 遮挡、取消结算、provider 卡死恢复、父进程退出、整窗重建以及同窗口控件替换。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
 
 ### 7. Linux Runtime
 
@@ -153,6 +155,9 @@
 - skill 打包：`npm run package:skill`
 - Windows runtime 单测：`(cd apps/OpenComputerUseWindows && go test ./...)`
 - Windows exe 构建：`./scripts/build-open-computer-use-windows.sh --arch arm64`
+- Windows native helper 构建：`dotnet build apps/OpenComputerUseWindows/native/MakaCuWindows.csproj -c Release`
+- Windows native self-contained publish：`powershell -ExecutionPolicy Bypass -File scripts/windows/publish-native.ps1`
+- Windows native fixture lifecycle（交互式桌面）：`node scripts/windows/lifecycle-driver.mjs <helper-exe> <fixture-exe>`
 - Linux runtime 单测：`(cd apps/OpenComputerUseLinux && go test ./...)`
 - Linux binary 构建：`./scripts/build-open-computer-use-linux.sh --arch arm64`
 - 对比样本：`artifacts/tool-comparisons/20260417-focus-behavior/`
