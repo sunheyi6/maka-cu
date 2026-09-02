@@ -1,6 +1,6 @@
 # 架构总览
 
-这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 和 Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
+这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 已有共享 `maka.cu/2` 的 Rust/direct-COM native executor 骨架和跨机器验证证据，但仍未达到可发布状态；旧 Go runtime 继续作为兼容/实验性实现保留。Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
 
 ## 当前目录结构
 
@@ -9,7 +9,7 @@
 - `apps/OpenComputerUseFixture`
   本地 GUI fixture app，用来承载低风险、可预测的点击/输入/滚动/拖拽验证路径。
 - `apps/OpenComputerUseWindows`
-  实验性 Windows runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 PowerShell UI Automation bridge，构建产物是 `open-computer-use.exe`，并随已有 npm 包的 `dist/windows/<arch>/` bundled artifacts 分发。
+  Windows runtime 目录。现有 Go CLI/MCP 入口仍通过 PowerShell UI Automation bridge 提供旧的 9-tool 兼容面；`native/` 是共享 `maka.cu/2` 的 Rust/direct-COM executor，直接由 Maka host 按 stdio 协议托管。Rust native executor 已通过 fixture、WPF、Chromium 和 LibreOffice 的本机验证，但签名、打包、clean-machine 和更完整的真实应用矩阵仍未完成，因此暂不标记为 distribution-ready。
 - `apps/OpenComputerUseLinux`
   实验性 Linux runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 Python AT-SPI bridge，构建产物是 `open-computer-use`，并随已有 npm 包的 `dist/linux/<arch>/` bundled artifacts 分发。
 - `packages/OpenComputerUseKit`
@@ -111,14 +111,16 @@
 
 ### 6. Windows Runtime
 
-- Windows runtime 位于 `apps/OpenComputerUseWindows`，以 Go 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache。
+- Windows 有两条明确隔离的实现路径：旧 Go runtime 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache；`apps/OpenComputerUseWindows/native` 的 Rust executor 只实现共享 `maka.cu/2` host protocol，不复制面向模型的 tool schema 或第二套生产 supervisor。
+- Rust native executor 使用 Windows UI Automation 的 direct-COM 路径、Win32/WGC 窗口枚举与截图，并在 dispatch 时重新校验 PID、进程启动时间、window generation、RuntimeId 和 snapshot/token 绑定。坐标 dispatch 在协议边界保持 typed refusal；语义动作的执行结果不能仅凭 helper 调用成功宣称 verified，缺少应用层 readback 时保持 `unknown`。
+- Rust native executor 的跨机器验证入口与结果位于 `experiments/maka-cu-windows-rust` 和 `experiments/maka-cu-windows`；正式源代码位于 `apps/OpenComputerUseWindows/native`。当前验证已覆盖 fixture 生命周期/协议、WPF、Chromium、.NET 10 WPF 和隔离临时 profile 的 LibreOffice Writer probe，但旧 comparison harness 仍发送已废弃的私有协议，不能作为 Rust native 的有效回归入口。
 - 构建入口是 `scripts/build-open-computer-use-windows.sh --arch arm64|amd64`，默认输出到 `dist/windows/<arch>/open-computer-use.exe`；npm release package 会把两个 Windows artifact 内置到已有 root/alias packages，Node launcher 按 `process.platform/process.arch` 自动选择。
 - Go runtime 通过 `go:embed` 带上 `runtime.ps1`，执行 tool call 时临时落盘并调用 Windows PowerShell。PowerShell bridge 使用 `System.Windows.Automation` 做 app/window/element discovery、tree rendering、UIA pattern action、ValuePattern set value 和 ScrollPattern scroll；当目标 app 不暴露对应 pattern 时，fallback 到 `PostMessage` / `SendMessage` 形式的 Win32 window message。
 - Windows runtime 默认只连接已经运行的 app，不会在 `get_app_state` 找不到进程时自动 `Start-Process`，也不会默认允许 `SetFocus` secondary action；这两条前台抢占路径分别需要 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_APP_LAUNCH=1` 和 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_FOCUS_ACTIONS=1` 显式打开。`type_text` 默认优先对可写文本控件的 child HWND 发送 `EM_SETSEL` / `EM_REPLACESEL`，不再默认走可能触发前台激活的 UIA `ValuePattern.SetValue` fallback；需要旧行为时必须设置 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_FALLBACK=1`。UIA pattern 和 Win32 message fallback 本身仍是 best-effort：很多控件可以在后台响应，但 Windows 没有一套对所有 GUI toolkit 都等价于 macOS AX 的后台键鼠输入模型。
 - 这 9 个 tool 的协议面与 macOS 主线保持一致：`list_apps`、`get_app_state`、`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value`。其中 element-targeted action 会优先复用上一轮 `get_app_state` 的 runtime id / automation metadata，coordinate action 使用 screenshot/window-relative 坐标。
 - Windows `click_method=accessibility` 映射到 UI Automation pattern，`app_post` 映射到 HWND `PostMessage`；macOS-only 的 `sky_click` 和没有实现的 `global` 都会在 snapshot lookup 前明确返回 unsupported。`auto` 仍保持 UIA 优先、window message fallback 的现有行为。
 - Windows UI Automation 需要运行在已登录用户的桌面 session 里。通过 SSH 作为脱离桌面的后台进程运行时，PowerShell 可以启动并返回 JSON，但系统可能不给它暴露顶层窗口；这种情况下 `list_apps` 会是空，`get_app_state` 可能返回 `appNotFound(...)`。
-- 当前 Windows 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/onboarding、没有 code signing，也没有独立的 Windows smoke fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
+- 旧 Go runtime 仍是功能性第一版；Rust native executor 也不是生产发布物：当前 Windows 打包会受 MSVC Spectre-mitigated library 安装状态影响，尚未完成 code signing、installer/servicing、clean-machine 验证、打包后 Maka conversation E2E 和足够宽的真实应用矩阵。`bundled-tools.json` 的 `distributionReady` 必须保持 `false`，直到这些条件都有证据。
 
 ### 7. Linux Runtime
 
