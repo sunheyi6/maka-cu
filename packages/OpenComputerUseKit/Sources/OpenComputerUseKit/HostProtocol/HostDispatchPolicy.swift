@@ -112,52 +112,11 @@ public enum HostKeyAction: Equatable, Sendable {
     case key(name: String, modifiers: [HostKeyModifier])
 }
 
-// MARK: - Path selection
+// MARK: - Path validation
 
-/// §6.3 — path selection is declared, not discovered. When `allowGlobalPointer`
-/// is false and no permitted path can reach the target, the executor refuses; it
-/// must never fall back. This is the invariant Maka refuses to trade: no cursor
-/// warp, no z-order change.
-public func hostPointDispatchPath(
-    action: HostPointAction,
-    point: CGPoint,
-    startPoint: CGPoint?,
-    windowBounds: CGRect,
-    allowGlobalPointer: Bool
-) -> Result<HostDispatchPath, HostDomainError> {
-    // A pointer *move* has no pid-bound form: the only way to make the cursor
-    // appear somewhere is to warp the system cursor, which is the one thing this
-    // executor will not do on Maka's behalf.
-    if action == .move {
-        return allowGlobalPointer
-            ? .success(.cgEventGlobal)
-            : .failure(HostDomainError(.dispatchRefused, detail: .wouldRequirePath(.cgEventGlobal)))
-    }
-
-    guard windowBounds.contains(point) else {
-        return .failure(HostDomainError(.invalidPoint))
-    }
-
-    if action.needsStartPoint {
-        guard let startPoint else {
-            return .failure(HostDomainError(.invalidPoint))
-        }
-
-        // A drag that begins outside the target window crosses a window boundary,
-        // and only a global-tap drag is delivered to whichever window happens to
-        // be under each intermediate point.
-        guard windowBounds.contains(startPoint) else {
-            return allowGlobalPointer
-                ? .success(.cgEventGlobal)
-                : .failure(HostDomainError(.dispatchRefused, detail: .wouldRequirePath(.cgEventGlobal)))
-        }
-    }
-
-    return .success(.cgEventPid)
-}
-
-/// §6.3 — the host MUST reject an inconsistent `tier`/`path` pair as a protocol
-/// violation rather than prefer one. The executor never emits one.
+/// §6.5 — the host MUST reject an inconsistent `tier`/`path` pair as a protocol
+/// violation rather than prefer one. `dispatch.point` never selects a path; its
+/// compatibility refusal always reports `path: none`.
 public func hostTierIsConsistent(tier: HostDispatchTier, path: HostDispatchPath) -> Bool {
     guard let expected = path.tier else {
         // `path: none` only ever accompanies a refusal, which reports the tier it

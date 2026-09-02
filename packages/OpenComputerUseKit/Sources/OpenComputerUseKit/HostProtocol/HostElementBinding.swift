@@ -72,10 +72,7 @@ public func hostNormalizedActions(_ rawAXActions: [String]) -> [HostElementActio
 ///   `AXParent` on the other, which disagree on every Chromium tree.
 /// - `ancestorRoles` for the **root**: the walker read the live chain for every
 ///   node, so a window recorded `["AXApplication"]`, while the probe answered
-///   `[]`. One element out of sixty-five, and no element dispatch could see it —
-///   it checks the element it targets. `dispatch.point` has no element to target,
-///   anchors on the whole window, and so refused `window_changed` on every call
-///   against every application.
+///   `[]`.
 ///
 /// `depth == 0` is the snapshot's root, and inside the frame the root has no
 /// ancestors and no siblings: the walk is rooted at the window and never sees the
@@ -197,8 +194,7 @@ public func hostElementDigest(_ input: HostElementDigestInput) -> String {
     return HostDigest.sha256(HostDigest.canonicalArray(parts))
 }
 
-/// §4.3 — the window digest is the anchor for point dispatch, which has no
-/// element to bind to.
+/// §4.3 — the canonical digest for the observed window.
 public func hostWindowDigest(
     elementDigests: [String],
     bounds: CGRect?,
