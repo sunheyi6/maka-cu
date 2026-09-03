@@ -44,8 +44,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::sync::Once;
-#[cfg(test)]
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 mod readback;
@@ -53,15 +51,15 @@ mod scroll_readback;
 
 const PROTOCOL: &str = "maka.cu/2";
 const MAX_ELEMENTS: usize = 512;
-const MAX_SNAPSHOTS: usize = 64;
+const MAX_SNAPSHOTS_PER_SESSION: usize = 8;
+const SNAPSHOT_TTL: Duration = Duration::from_secs(120);
 const MAX_TEXT: usize = 1024;
-const MAX_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_IMAGE_DIR_BYTES: usize = 256 * 1024 * 1024;
 const MAX_CAPTURE_PIXELS: i64 = 16_000_000;
 const MAX_CAPTURE_PNG_BYTES: usize = 4 * 1024 * 1024;
 const SHUTDOWN_GRACE_MS: u64 = 1_000;
 static HOST_PID: AtomicU64 = AtomicU64::new(0);
-#[cfg(test)]
-static HELPER_GENERATION: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RpcRequest {
@@ -81,15 +79,36 @@ struct Registry {
     snapshots: HashMap<String, Snapshot>,
     sessions: HashSet<String>,
     image_dir: Option<PathBuf>,
+    image_sizes: HashMap<PathBuf, usize>,
+    image_created_at: HashMap<PathBuf, Instant>,
+    image_bytes: usize,
+    unattached_images: HashMap<PathBuf, UnattachedImage>,
     host_pid: Option<u32>,
     // Presentation identity is scoped to one target process/window. RuntimeId
     // is used only as the matching key; dispatch still quotes the opaque
     // snapshot token and digest.
     stable_ids: HashMap<(u32, isize), HashMap<Vec<i32>, u64>>,
-    // Kept only for historical comparison tests; this field is absent from the
-    // production binary so compatibility input cannot be reached there.
-    #[cfg(test)]
-    compat_authorizations: HashMap<String, CompatAuthorization>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotState {
+    Live,
+    Spent,
+    Superseded,
+    Expired,
+    Evicted,
+}
+
+impl SnapshotState {
+    fn error_code(self) -> &'static str {
+        match self {
+            Self::Live => "snapshot_live",
+            Self::Spent => "snapshot_spent",
+            Self::Superseded => "snapshot_superseded",
+            Self::Expired => "snapshot_expired",
+            Self::Evicted => "snapshot_evicted",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +119,9 @@ struct Snapshot {
     start_time: u64,
     generation: String,
     elements: HashMap<String, ElementRef>,
+    captured_at: Instant,
+    state: SnapshotState,
+    image_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,21 +133,229 @@ struct ElementRef {
     digest: String,
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
-struct CompatAuthorization {
-    snapshot_id: String,
-    element_token: String,
-    hwnd: isize,
-    pid: u32,
-    start_time: u64,
-    generation: String,
-    helper_generation: String,
-    runtime_id: Vec<i32>,
-    op: String,
-    payload: String,
-    expires_at: Instant,
+struct UnattachedImage {
+    session: String,
+    captured_at: Instant,
+}
+
+#[derive(Debug)]
+struct StoredImage {
+    path: PathBuf,
+    value: Value,
+}
+
+impl Registry {
+    fn delete_image(&mut self, path: &Path) -> bool {
+        let size = self.image_sizes.remove(path);
+        self.image_created_at.remove(path);
+        if let Some(size) = size {
+            self.image_bytes = self.image_bytes.saturating_sub(size);
+        }
+        let _ = std::fs::remove_file(path);
+        size.is_some()
+    }
+
+    fn track_image(&mut self, path: PathBuf, size: usize) {
+        if let Some(previous) = self.image_sizes.insert(path.clone(), size) {
+            self.image_bytes = self.image_bytes.saturating_sub(previous);
+        }
+        self.image_created_at.insert(path, Instant::now());
+        self.image_bytes = self.image_bytes.saturating_add(size);
+    }
+
+    fn make_room_for_image(&mut self, required: usize) -> bool {
+        while self.image_bytes.saturating_add(required) > MAX_IMAGE_DIR_BYTES {
+            let Some(oldest_path) = self
+                .image_created_at
+                .iter()
+                .min_by_key(|(_, created_at)| *created_at)
+                .map(|(path, _)| path.clone())
+            else {
+                return false;
+            };
+
+            for snapshot in self.snapshots.values_mut() {
+                if snapshot.image_path.as_ref() == Some(&oldest_path) {
+                    snapshot.state = SnapshotState::Evicted;
+                    snapshot.image_path = None;
+                    break;
+                }
+            }
+            self.unattached_images.remove(&oldest_path);
+            self.delete_image(&oldest_path);
+        }
+        true
+    }
+
+    fn attach_snapshot_image(&mut self, snapshot_id: &str, path: PathBuf) -> bool {
+        if let Some(snapshot) = self.snapshots.get_mut(snapshot_id) {
+            snapshot.image_path = Some(path);
+            true
+        } else {
+            self.delete_image(&path);
+            false
+        }
+    }
+
+    fn register_unattached_image(&mut self, session: String, path: PathBuf) {
+        if self.sessions.contains(&session) {
+            self.unattached_images.insert(
+                path,
+                UnattachedImage {
+                    session,
+                    captured_at: Instant::now(),
+                },
+            );
+        } else {
+            self.delete_image(&path);
+        }
+    }
+
+    fn reap_expired(&mut self, now: Instant) {
+        let mut retired_images = Vec::new();
+        for snapshot in self.snapshots.values_mut() {
+            if snapshot.state == SnapshotState::Live
+                && now >= snapshot.captured_at
+                && now.duration_since(snapshot.captured_at) >= SNAPSHOT_TTL
+            {
+                snapshot.state = SnapshotState::Expired;
+                if let Some(path) = snapshot.image_path.take() {
+                    retired_images.push(path);
+                }
+            }
+        }
+
+        let expired_unattached = self
+            .unattached_images
+            .iter()
+            .filter(|(_, image)| {
+                now >= image.captured_at && now.duration_since(image.captured_at) >= SNAPSHOT_TTL
+            })
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        for path in expired_unattached {
+            self.unattached_images.remove(&path);
+            retired_images.push(path);
+        }
+
+        for path in retired_images {
+            self.delete_image(&path);
+        }
+    }
+
+    fn register_snapshot(&mut self, id: String, snapshot: Snapshot) {
+        self.reap_expired(Instant::now());
+        let mut retired_images = Vec::new();
+
+        for existing in self.snapshots.values_mut() {
+            if existing.state == SnapshotState::Live
+                && existing.session == snapshot.session
+                && existing.pid == snapshot.pid
+                && existing.hwnd == snapshot.hwnd
+            {
+                existing.state = SnapshotState::Superseded;
+                if let Some(path) = existing.image_path.take() {
+                    retired_images.push(path);
+                }
+            }
+        }
+
+        let mut live = self
+            .snapshots
+            .iter()
+            .filter(|(_, existing)| {
+                existing.state == SnapshotState::Live && existing.session == snapshot.session
+            })
+            .map(|(id, existing)| (id.clone(), existing.captured_at))
+            .collect::<Vec<_>>();
+        live.sort_by_key(|(_, captured_at)| *captured_at);
+        while live.len() >= MAX_SNAPSHOTS_PER_SESSION {
+            let (id, _) = live.remove(0);
+            if let Some(existing) = self.snapshots.get_mut(&id) {
+                existing.state = SnapshotState::Evicted;
+                if let Some(path) = existing.image_path.take() {
+                    retired_images.push(path);
+                }
+            }
+        }
+
+        self.snapshots.insert(id, snapshot);
+        for path in retired_images {
+            self.delete_image(&path);
+        }
+    }
+
+    fn resolve_snapshot(
+        &mut self,
+        session: &str,
+        id: &str,
+    ) -> Result<Snapshot, (i32, &'static str)> {
+        self.reap_expired(Instant::now());
+        let snapshot = self.snapshots.get(id).ok_or((-32001, "snapshot_unknown"))?;
+        if snapshot.session != session {
+            return Err((-32001, "snapshot_unknown"));
+        }
+        if snapshot.state != SnapshotState::Live {
+            return Err((-32001, snapshot.state.error_code()));
+        }
+        Ok(snapshot.clone())
+    }
+
+    fn spend_snapshot(&mut self, id: &str) -> Result<Snapshot, (i32, &'static str)> {
+        self.reap_expired(Instant::now());
+        let (snapshot, image_path) = {
+            let snapshot = self
+                .snapshots
+                .get_mut(id)
+                .ok_or((-32001, "snapshot_unknown"))?;
+            if snapshot.state != SnapshotState::Live {
+                return Err((-32001, snapshot.state.error_code()));
+            }
+            snapshot.state = SnapshotState::Spent;
+            let image_path = snapshot.image_path.take();
+            (snapshot.clone(), image_path)
+        };
+        if let Some(path) = image_path {
+            self.delete_image(&path);
+        }
+        Ok(snapshot)
+    }
+
+    fn end_session(&mut self, session: &str) -> (usize, usize) {
+        self.sessions.remove(session);
+        self.reap_expired(Instant::now());
+        let snapshot_ids = self
+            .snapshots
+            .iter()
+            .filter(|(_, snapshot)| snapshot.session == session)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut released_snapshots = 0;
+        let mut released_images = 0;
+        for id in snapshot_ids {
+            if let Some(snapshot) = self.snapshots.remove(&id) {
+                if snapshot.state == SnapshotState::Live {
+                    released_snapshots += 1;
+                }
+                if let Some(path) = snapshot.image_path {
+                    released_images += usize::from(self.delete_image(&path));
+                }
+            }
+        }
+
+        let image_paths = self
+            .unattached_images
+            .iter()
+            .filter(|(_, image)| image.session == session)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        for path in image_paths {
+            self.unattached_images.remove(&path);
+            released_images += usize::from(self.delete_image(&path));
+        }
+        (released_snapshots, released_images)
+    }
 }
 
 #[derive(Debug)]
@@ -418,10 +648,7 @@ fn cancel_queued_action(
         .get("snapshotId")
         .and_then(Value::as_str)
         .ok_or((-32602, "missing_snapshot"))?;
-    let _ = registry
-        .snapshots
-        .remove(snapshot_id)
-        .ok_or((-32001, "snapshot_spent_or_unknown"))?;
+    let _ = registry.spend_snapshot(snapshot_id)?;
     Ok(
         json!({"outcome":{"tier":"cancelled-before-dispatch","path":"none","status":"refused","reason":"cancelled_before_dispatch","effect":"none","snapshotSpent":true,"verification":"no_mutation"}}),
     )
@@ -433,11 +660,18 @@ fn write_rpc(
     result: Option<Value>,
     error: Option<(i32, &str)>,
 ) {
-    let response = if let Some((code, message)) = error {
+    let mut response = if let Some((code, message)) = error {
         json!({"jsonrpc":"2.0", "id":id, "error":{"code":code,"message":message}})
     } else {
         json!({"jsonrpc":"2.0", "id":id, "result":result.unwrap_or_else(|| json!({}))})
     };
+    if serde_json::to_vec(&response)
+        .map(|line| line.len() > MAX_RESPONSE_BYTES)
+        .unwrap_or(true)
+        && error.is_none()
+    {
+        shrink_oversized_observation(&mut response);
+    }
     let mut line = serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
     if line.len() > MAX_RESPONSE_BYTES {
         line = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32002,"message":"response_too_large"}})).unwrap();
@@ -446,6 +680,158 @@ fn write_rpc(
         std::process::exit(2);
     }
     let _ = out.flush();
+}
+
+fn truncate_json_strings(value: &mut Value, max_chars: usize) {
+    match value {
+        Value::String(text) => {
+            if text.chars().count() > max_chars {
+                *text = text.chars().take(max_chars).collect();
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                truncate_json_strings(value, max_chars);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                truncate_json_strings(value, max_chars);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn response_is_oversized(response: &Value) -> bool {
+    serde_json::to_vec(response)
+        .map(|line| line.len() > MAX_RESPONSE_BYTES)
+        .unwrap_or(true)
+}
+
+fn truncate_observation_elements(response: &mut Value, max_len: usize) -> bool {
+    response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("snapshot"))
+        .and_then(|snapshot| snapshot.get_mut("elements"))
+        .and_then(Value::as_array_mut)
+        .map(|elements| {
+            if elements.len() > max_len {
+                elements.truncate(max_len);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn truncate_observation_nodes(response: &mut Value, max_len: usize) -> bool {
+    response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("snapshot"))
+        .and_then(|snapshot| snapshot.get_mut("tree"))
+        .and_then(|tree| tree.get_mut("nodes"))
+        .and_then(Value::as_array_mut)
+        .map(|nodes| {
+            if nodes.len() > max_len {
+                nodes.truncate(max_len);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn observation_node_count(response: &Value) -> usize {
+    response
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .and_then(|snapshot| snapshot.get("tree"))
+        .and_then(|tree| tree.get("nodes"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
+}
+
+fn mark_observation_tree_truncated(response: &mut Value) {
+    let node_count = observation_node_count(response);
+    if let Some(tree) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("snapshot"))
+        .and_then(|snapshot| snapshot.get_mut("tree"))
+        .and_then(Value::as_object_mut)
+    {
+        tree.insert("nodeCount".to_owned(), json!(node_count));
+        tree.insert("truncated".to_owned(), json!(true));
+    }
+}
+
+fn mark_observation_elements_truncated(response: &mut Value) {
+    if let Some(snapshot) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("snapshot"))
+        .and_then(Value::as_object_mut)
+    {
+        let truncated = snapshot
+            .entry("truncated".to_owned())
+            .or_insert_with(|| json!({}));
+        if let Some(truncated) = truncated.as_object_mut() {
+            truncated.insert("elements".to_owned(), json!(true));
+        }
+    }
+}
+
+fn shrink_oversized_observation(response: &mut Value) {
+    truncate_json_strings(response, 256);
+    if !response_is_oversized(response) {
+        return;
+    }
+
+    if response
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        return;
+    }
+
+    let elements_truncated = truncate_observation_elements(response, 128);
+    let nodes_truncated = truncate_observation_nodes(response, 128);
+    if elements_truncated {
+        mark_observation_elements_truncated(response);
+    }
+    if nodes_truncated {
+        mark_observation_tree_truncated(response);
+    }
+    if response_is_oversized(response) {
+        let snapshot = response
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let snapshot_id = snapshot.get("snapshotId").cloned().unwrap_or(Value::Null);
+        let target = snapshot.get("target").cloned().unwrap_or(Value::Null);
+        let window_digest = snapshot.get("windowDigest").cloned().unwrap_or(Value::Null);
+        let image = snapshot.get("image").cloned().unwrap_or(Value::Null);
+        let minimal = json!({
+            "snapshotId":snapshot_id,
+            "target":target,
+            "windowDigest":window_digest,
+            "image":image,
+            "elements":[],
+            "truncated":{"elements":true,"depth":true},
+            "tree":{"nodes":[],"nodeCount":0,"truncated":true}
+        });
+        if let Some(snapshot) = response
+            .get_mut("result")
+            .and_then(|result| result.get_mut("snapshot"))
+        {
+            *snapshot = minimal;
+        }
+    }
 }
 
 fn dispatch(
@@ -460,6 +846,7 @@ fn dispatch(
     if registry.image_dir.is_none() {
         return Err((-32001, "handshake_required"));
     }
+    registry.reap_expired(Instant::now());
     match method {
         "session.begin" => session_begin(params, registry),
         "session.end" => session_end(params, registry),
@@ -546,8 +933,8 @@ fn host_hello(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'s
             "imageFormats": ["png"]
         },
         "limits": {
-            "snapshotsPerSession": MAX_SNAPSHOTS,
-            "snapshotTtlMs": 120000,
+            "snapshotsPerSession": MAX_SNAPSHOTS_PER_SESSION,
+            "snapshotTtlMs": SNAPSHOT_TTL.as_millis(),
             "maxElements": MAX_ELEMENTS,
             "maxDepth": 64,
             "maxTextChars": 500,
@@ -555,7 +942,7 @@ fn host_hello(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'s
             "settleCeilingMs": 2500,
             "treeWalkCeilingMs": 6000,
             "shutdownGraceMs": SHUTDOWN_GRACE_MS,
-            "imageDirBudgetBytes": 268435456
+            "imageDirBudgetBytes": MAX_IMAGE_DIR_BYTES
         }
     }))
 }
@@ -587,19 +974,16 @@ fn session_begin(params: Value, registry: &mut Registry) -> Result<Value, (i32, 
 
 fn session_end(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'static str)> {
     let session = session_id(&params)?;
-    if !registry.sessions.remove(&session) {
+    if !registry.sessions.contains(&session) {
         return Ok(json!({
             "ok":true,
             "session":session,
             "released":{"snapshots":0,"images":0,"streams":0}
         }));
     }
-    let released = registry
-        .snapshots
-        .extract_if(|_, snapshot| snapshot.session == session)
-        .count();
+    let (released_snapshots, released_images) = registry.end_session(&session);
     Ok(
-        json!({"ok":true,"session":session,"released":{"snapshots":released,"images":0,"streams":0}}),
+        json!({"ok":true,"session":session,"released":{"snapshots":released_snapshots,"images":released_images,"streams":0}}),
     )
 }
 
@@ -618,6 +1002,19 @@ fn generic_dispatch_refusal(params: &Value, code: &str, message: &str, tier: &st
         "verification":{"method":"none","observedChange":false},
         "error":{"code":code,"message":message,"detail":{}}
     })
+}
+
+fn snapshot_refusal(params: &Value, code: &'static str, tier: &str) -> Value {
+    let message = match code {
+        "snapshot_spent" => "The snapshot has already been spent.",
+        "snapshot_superseded" => "A newer snapshot superseded this snapshot.",
+        "snapshot_expired" => "The snapshot has expired.",
+        "snapshot_evicted" => {
+            "The snapshot was evicted because the session exceeded its frame budget."
+        }
+        _ => "The snapshot is no longer available.",
+    };
+    generic_dispatch_refusal(params, code, message, tier)
 }
 
 fn generic_point_refusal(params: &Value) -> Value {
@@ -978,10 +1375,10 @@ fn target_window(params: &Value) -> Result<(isize, u32), (i32, &'static str)> {
 }
 
 fn store_capture(
-    registry: &Registry,
+    registry: &mut Registry,
     image_id: &str,
     raw: Value,
-) -> Result<Value, (i32, &'static str)> {
+) -> Result<StoredImage, (i32, &'static str)> {
     let frame = raw
         .get("frame")
         .and_then(Value::as_object)
@@ -993,6 +1390,14 @@ fn store_capture(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| (-32001, "capture_failed"))?;
+    let width = frame.get("width").and_then(Value::as_i64).unwrap_or(0);
+    let height = frame.get("height").and_then(Value::as_i64).unwrap_or(0);
+    if width <= 0 || height <= 0 {
+        return Err((-32001, "capture_failed"));
+    }
+    if !registry.make_room_for_image(bytes.len()) {
+        return Err((-32001, "image_write_failed"));
+    }
     let directory = registry
         .image_dir
         .as_ref()
@@ -1003,27 +1408,27 @@ fn store_capture(
         .collect::<String>();
     let path = directory.join(format!("{safe_id}.png"));
     write(&path, &bytes).map_err(|_| (-32001, "image_write_failed"))?;
-    let width = frame.get("width").and_then(Value::as_i64).unwrap_or(0);
-    let height = frame.get("height").and_then(Value::as_i64).unwrap_or(0);
-    if width <= 0 || height <= 0 {
-        return Err((-32001, "capture_failed"));
-    }
-    Ok(json!({
-        "path":path,
-        "format":"png",
-        "widthPx":width,
-        "heightPx":height,
-        "byteLength":bytes.len(),
-        "sha256":digest_bytes(&bytes),
-        "scale":1.0
-    }))
+    registry.track_image(path.clone(), bytes.len());
+    Ok(StoredImage {
+        path: path.clone(),
+        value: json!({
+            "path":path,
+            "format":"png",
+            "widthPx":width,
+            "heightPx":height,
+            "byteLength":bytes.len(),
+            "sha256":digest_bytes(&bytes),
+            "scale":1.0
+        }),
+    })
 }
 
 fn generic_image_for_window(
-    registry: &Registry,
+    registry: &mut Registry,
     hwnd: isize,
     generation: &str,
     image_id: &str,
+    snapshot_id: &str,
 ) -> Result<Option<Value>, (i32, &'static str)> {
     let raw = platform::capture(json!({
         "hwnd":hwnd,
@@ -1032,7 +1437,11 @@ fn generic_image_for_window(
     if raw.get("status").and_then(Value::as_str) != Some("available") {
         return Ok(None);
     }
-    Ok(Some(store_capture(registry, image_id, raw)?))
+    let stored = store_capture(registry, image_id, raw)?;
+    if !registry.attach_snapshot_image(snapshot_id, stored.path) {
+        return Err((-32001, "snapshot_unknown"));
+    }
+    Ok(Some(stored.value))
 }
 
 fn generic_observe(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'static str)> {
@@ -1047,7 +1456,7 @@ fn generic_observe(params: Value, registry: &mut Registry) -> Result<Value, (i32
             "The requested window is no longer available.",
         ));
     };
-    let raw = observe(json!({"hwnd":hwnd}), registry);
+    let raw = observe(&session, json!({"hwnd":hwnd}), registry);
     let raw = match raw {
         Ok(raw) => raw,
         Err((-32001, "stale_target_revalidate_failed")) => {
@@ -1232,7 +1641,7 @@ fn generic_observe(params: Value, registry: &mut Registry) -> Result<Value, (i32
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let image = if include_image {
-        generic_image_for_window(registry, hwnd, generation, snapshot_id)?
+        generic_image_for_window(registry, hwnd, generation, snapshot_id, snapshot_id)?
     } else {
         None
     };
@@ -1287,22 +1696,11 @@ fn generic_dispatch_element(
         .get("expectElementDigest")
         .and_then(Value::as_str)
         .ok_or((-32602, "missing_element_digest"))?;
-    let Some(quoted) = registry.snapshots.get(snapshot_id).cloned() else {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "snapshot_unknown",
-            "The snapshot is no longer available.",
-            "ax",
-        ));
+    let quoted = match registry.resolve_snapshot(&session, snapshot_id) {
+        Ok(snapshot) => snapshot,
+        Err((-32001, code)) => return Ok(snapshot_refusal(&params, code, "ax")),
+        Err(error) => return Err(error),
     };
-    if quoted.session != session {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "snapshot_unknown",
-            "The snapshot does not belong to this session.",
-            "ax",
-        ));
-    }
     let Some(element) = quoted.elements.get(token) else {
         return Ok(generic_dispatch_refusal(
             &params,
@@ -1489,7 +1887,7 @@ fn generic_dispatch_element(
                 // boundary must leave it available for an honest retry or
                 // inspection by the caller.
                 if matches!(status, "verified" | "unknown") {
-                    registry.snapshots.remove(snapshot_id);
+                    let _ = registry.spend_snapshot(snapshot_id);
                 }
                 Ok(json!({"outcome":{"status":status,"verification":verification}}))
             }
@@ -1507,13 +1905,8 @@ fn generic_dispatch_element(
     };
     let old = match raw {
         Ok(value) => value,
-        Err((-32001, "snapshot_spent_or_unknown")) => {
-            return Ok(generic_dispatch_refusal(
-                &params,
-                "snapshot_unknown",
-                "The snapshot is no longer available.",
-                "ax",
-            ));
+        Err((-32001, code)) if code.starts_with("snapshot_") => {
+            return Ok(snapshot_refusal(&params, code, "ax"));
         }
         Err((-32001, "element_token_unknown_in_snapshot")) => {
             return Ok(generic_dispatch_refusal(
@@ -1636,22 +2029,13 @@ fn generic_dispatch_key(
         .get("expectElementDigest")
         .and_then(Value::as_str)
         .ok_or((-32602, "missing_element_digest"))?;
-    let Some(quoted) = registry.snapshots.get(snapshot_id).cloned() else {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "snapshot_unknown",
-            "The snapshot is no longer available.",
-            "coordinate-background",
-        ));
+    let quoted = match registry.resolve_snapshot(&session, snapshot_id) {
+        Ok(snapshot) => snapshot,
+        Err((-32001, code)) => {
+            return Ok(snapshot_refusal(&params, code, "coordinate-background"));
+        }
+        Err(error) => return Err(error),
     };
-    if quoted.session != session {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "snapshot_unknown",
-            "The snapshot does not belong to this session.",
-            "coordinate-background",
-        ));
-    }
     let Some(element) = quoted.elements.get(token) else {
         return Ok(generic_dispatch_refusal(
             &params,
@@ -1716,7 +2100,9 @@ fn generic_dispatch_key(
             "coordinate-background",
         ));
     }
-    registry.snapshots.remove(snapshot_id);
+    if let Err((-32001, code)) = registry.spend_snapshot(snapshot_id) {
+        return Ok(snapshot_refusal(&params, code, "coordinate-background"));
+    }
     let mut report = None;
     let (status, verification) = match platform::dispatch_key(
         quoted.hwnd,
@@ -1785,7 +2171,7 @@ fn generic_screen_capture(
     params: Value,
     registry: &mut Registry,
 ) -> Result<Value, (i32, &'static str)> {
-    let _session = require_session(&params, registry)?;
+    let session = require_session(&params, registry)?;
     let requested_display = params.get("displayId").and_then(Value::as_str);
     let raw = platform::capture_display(requested_display)?;
     if raw.get("status").and_then(Value::as_str) != Some("available") {
@@ -1799,7 +2185,7 @@ fn generic_screen_capture(
         .and_then(Value::as_str)
         .unwrap_or("windows-primary")
         .to_owned();
-    let image = store_capture(
+    let stored = store_capture(
         registry,
         &format!(
             "screen-{}-{}",
@@ -1808,37 +2194,26 @@ fn generic_screen_capture(
         ),
         raw,
     )?;
+    registry.register_unattached_image(session, stored.path);
     Ok(json!({
         "ok":true,
-        "image":image,
+        "image":stored.value,
         "displayId":display_id,
         "capturedAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or_default()
     }))
 }
 
-#[cfg(test)]
-fn helper_generation() -> String {
-    HELPER_GENERATION
-        .get_or_init(|| {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default();
-            format!("{}-{:x}", std::process::id(), nanos)
-        })
-        .clone()
-}
-
-fn observe(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'static str)> {
+fn observe(
+    session: &str,
+    params: Value,
+    registry: &mut Registry,
+) -> Result<Value, (i32, &'static str)> {
     let hwnd = params
         .get("hwnd")
         .and_then(Value::as_i64)
         .ok_or((-32602, "missing_hwnd"))? as isize;
     if hwnd <= 0 {
         return Err((-32602, "invalid_hwnd"));
-    }
-    if registry.snapshots.len() >= MAX_SNAPSHOTS {
-        return Err((-32001, "snapshot_registry_full"));
     }
     let observed = platform::observe(hwnd)?;
     let generation = observed.generation.clone();
@@ -1868,15 +2243,18 @@ fn observe(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'stat
         rendered.push(json!({"token":token,"name":element.name,"automationId":element.automation_id,"controlType":element.control_type,"runtimeId":element.runtime_id,"patterns":element.patterns,"actions":element.actions,"isEnabled":element.is_enabled,"focused":element.focused,"value":element.value,"scrollState":element.scroll_state,"bounds":element.bounds,"parentRuntimeId":element.parent_runtime_id,"depth":element.depth,"ancestorRoles":element.ancestor_roles,"siblingIndex":element.sibling_index,"digest":digest}));
     }
     let element_count = rendered.len();
-    registry.snapshots.insert(
+    registry.register_snapshot(
         snapshot_id.clone(),
         Snapshot {
-            session: String::new(),
+            session: session.to_owned(),
             hwnd,
             pid: observed.pid,
             start_time: observed.start_time,
             generation: generation.clone(),
             elements,
+            captured_at: Instant::now(),
+            state: SnapshotState::Live,
+            image_path: None,
         },
     );
     let nodes = rendered
@@ -1903,213 +2281,6 @@ fn observe(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'stat
     )
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-fn compat_payload(params: &Value, op: &str) -> Result<String, (i32, &'static str)> {
-    if !matches!(op, "compat_type_text" | "compat_press_enter") {
-        return Err((-32602, "compat_unsupported"));
-    }
-    if op == "compat_type_text" {
-        let value = params
-            .get("value")
-            .and_then(Value::as_str)
-            .ok_or((-32602, "compat_payload_invalid"))?;
-        if value.chars().count() > MAX_TEXT || value.chars().any(char::is_control) {
-            return Err((-32602, "compat_payload_invalid"));
-        }
-        Ok(value.to_owned())
-    } else if params.get("value").is_some() {
-        Err((-32602, "compat_payload_invalid"))
-    } else {
-        Ok(String::new())
-    }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn authorize_compat(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'static str)> {
-    let snapshot_id = params
-        .get("snapshotId")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "compat_authorization_missing"))?;
-    let element_token = params
-        .get("elementToken")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "compat_authorization_missing"))?;
-    let op = params
-        .get("op")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "compat_authorization_missing"))?;
-    let payload = compat_payload(&params, op)?;
-    prune_expired_authorizations(registry, Instant::now());
-    if !authorization_registry_has_capacity(registry) {
-        return Err((-32001, "compat_authorization_registry_full"));
-    }
-    let snapshot = registry
-        .snapshots
-        .get(snapshot_id)
-        .cloned()
-        .ok_or((-32001, "snapshot_spent_or_unknown"))?;
-    let element = snapshot
-        .elements
-        .get(element_token)
-        .cloned()
-        .ok_or((-32001, "element_token_unknown_in_snapshot"))?;
-    if element.runtime_id.is_empty() {
-        return Err((-32001, "element_runtime_id_unavailable"));
-    }
-    let current = platform::identity(snapshot.hwnd)?;
-    if current.pid != snapshot.pid
-        || current.start_time != snapshot.start_time
-        || current.generation != snapshot.generation
-    {
-        return Err((-32001, "stale_target_revalidate_failed"));
-    }
-    // Prune abandoned grants before enforcing the bounded registry.  Grants
-    // remain one-shot and are still removed on every successful act.
-    let token = new_authorization_token()?;
-    registry.compat_authorizations.insert(
-        token.clone(),
-        CompatAuthorization {
-            snapshot_id: snapshot_id.to_owned(),
-            element_token: element_token.to_owned(),
-            hwnd: snapshot.hwnd,
-            pid: snapshot.pid,
-            start_time: snapshot.start_time,
-            generation: snapshot.generation.clone(),
-            helper_generation: helper_generation(),
-            runtime_id: element.runtime_id.clone(),
-            op: op.to_owned(),
-            payload,
-            expires_at: Instant::now() + Duration::from_secs(5),
-        },
-    );
-    Ok(
-        json!({"authorizationToken":token,"snapshotId":snapshot_id,"elementToken":element_token,"op":op,"expiresMs":5000}),
-    )
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn compat_act(
-    params: Value,
-    registry: &mut Registry,
-    cancelled: &AtomicBool,
-) -> Result<Value, (i32, &'static str)> {
-    let auth_token = params
-        .get("authorizationToken")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "compat_authorization_missing"))?;
-    let snapshot_id = params
-        .get("snapshotId")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "compat_authorization_missing"))?;
-    let element_token = params
-        .get("elementToken")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "compat_authorization_missing"))?;
-    let op = params
-        .get("op")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "compat_authorization_missing"))?;
-    let payload = compat_payload(&params, op)?;
-    let auth = registry
-        .compat_authorizations
-        .get(auth_token)
-        .ok_or((-32001, "compat_authorization_unknown"))?
-        .clone();
-    if auth.snapshot_id != snapshot_id
-        || auth.element_token != element_token
-        || auth.op != op
-        || auth.payload != payload
-    {
-        return Err((-32001, "compat_authorization_mismatch"));
-    }
-    if Instant::now() >= auth.expires_at {
-        registry.compat_authorizations.remove(auth_token);
-        return Err((-32001, "compat_authorization_expired"));
-    }
-    // Both capabilities are one-shot. Spend them before foreground/focus or
-    // SendInput so a refused/unknown attempt cannot be replayed.
-    registry.compat_authorizations.remove(auth_token);
-    let snapshot = registry
-        .snapshots
-        .remove(snapshot_id)
-        .ok_or((-32001, "snapshot_spent_or_unknown"))?;
-    let element = snapshot
-        .elements
-        .get(element_token)
-        .ok_or((-32001, "element_token_unknown_in_snapshot"))?
-        .clone();
-    if snapshot.hwnd != auth.hwnd
-        || snapshot.pid != auth.pid
-        || snapshot.start_time != auth.start_time
-        || snapshot.generation != auth.generation
-        || auth.helper_generation != helper_generation()
-        || element.runtime_id != auth.runtime_id
-    {
-        return Err((-32001, "stale_target_revalidate_failed"));
-    }
-    let current = platform::identity(snapshot.hwnd)?;
-    if current.pid != snapshot.pid
-        || current.start_time != snapshot.start_time
-        || current.generation != snapshot.generation
-    {
-        return Err((-32001, "stale_target_revalidate_failed"));
-    }
-    let mut readback = None;
-    let (status, verification) = platform::compat_input(
-        snapshot.hwnd,
-        element,
-        op,
-        &payload,
-        snapshot.pid,
-        snapshot.start_time,
-        &snapshot.generation,
-        cancelled,
-        &mut readback,
-    )?;
-    let effect = if status == "verified" {
-        "text_set"
-    } else if status == "unknown" {
-        "possibly_dispatched"
-    } else {
-        "none"
-    };
-    Ok(
-        json!({"outcome":{"tier":"compatibility","path":"send_input","status":status,"reason":if status == "refused" {Some(verification)} else {None::<&str>},"effect":effect,"snapshotSpent":true,"authorizationSpent":true,"verification":verification,"readback":readback}}),
-    )
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn new_authorization_token() -> Result<String, (i32, &'static str)> {
-    #[cfg(windows)]
-    {
-        let guid = unsafe { windows::Win32::System::Com::CoCreateGuid() }
-            .map_err(|_| (-32001, "authorization_random_unavailable"))?;
-        Ok(format!("auth-{guid:?}"))
-    }
-    #[cfg(not(windows))]
-    {
-        Err((-32001, "authorization_random_unavailable"))
-    }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn prune_expired_authorizations(registry: &mut Registry, now: Instant) {
-    registry
-        .compat_authorizations
-        .retain(|_, authorization| authorization.expires_at > now);
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn authorization_registry_has_capacity(registry: &Registry) -> bool {
-    registry.compat_authorizations.len() < MAX_SNAPSHOTS
-}
-
 fn act(
     params: Value,
     registry: &mut Registry,
@@ -2131,10 +2302,7 @@ fn act(
         .and_then(Value::as_str)
         .ok_or((-32602, "missing_action"))?;
     // Spend before touching COM. A duplicate action is therefore always refused.
-    let snapshot = registry
-        .snapshots
-        .remove(snapshot_id)
-        .ok_or((-32001, "snapshot_spent_or_unknown"))?;
+    let snapshot = registry.spend_snapshot(snapshot_id)?;
     let element = snapshot
         .elements
         .get(token)
@@ -2346,21 +2514,6 @@ mod platform {
     ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
         Err((-32001, "windows_only"))
     }
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn compat_input(
-        _: isize,
-        _: ElementRef,
-        _: &str,
-        _: &str,
-        _: u32,
-        _: u64,
-        _: &str,
-        _: &AtomicBool,
-        _: &mut Option<Value>,
-    ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
-        Err((-32001, "windows_only"))
-    }
     pub fn capture(_: Value) -> Result<Value, (i32, &'static str)> {
         Ok(json!({"status":"unavailable","path":"none","reason":"windows_only"}))
     }
@@ -2394,13 +2547,16 @@ mod tests {
                         digest: String::new(),
                     },
                 )]),
+                captured_at: Instant::now(),
+                state: SnapshotState::Live,
+                image_path: None,
             },
         );
         let params = json!({"snapshotId":"s1","elementToken":"e1","op":"click_element"});
         let _ = act(params.clone(), &mut registry, &AtomicBool::new(false));
-        assert!(!registry.snapshots.contains_key("s1"));
+        assert_eq!(registry.snapshots["s1"].state, SnapshotState::Spent);
         let second = act(params, &mut registry, &AtomicBool::new(false)).unwrap_err();
-        assert_eq!(second.1, "snapshot_spent_or_unknown");
+        assert_eq!(second.1, "snapshot_spent");
     }
 
     #[test]
@@ -2415,111 +2571,211 @@ mod tests {
                 start_time: 1,
                 generation: "g".to_owned(),
                 elements: HashMap::new(),
+                captured_at: Instant::now(),
+                state: SnapshotState::Live,
+                image_path: None,
             },
         );
         let result = cancel_queued_action(json!({"snapshotId":"s-cancel"}), &mut registry)
             .expect("queued cancellation should settle");
         assert_eq!(result["outcome"]["status"], json!("refused"));
-        assert!(!registry.snapshots.contains_key("s-cancel"));
+        assert_eq!(registry.snapshots["s-cancel"].state, SnapshotState::Spent);
+    }
+
+    fn snapshot_for_test(
+        session: &str,
+        hwnd: isize,
+        captured_at: Instant,
+        image_path: Option<PathBuf>,
+    ) -> Snapshot {
+        Snapshot {
+            session: session.to_owned(),
+            hwnd,
+            pid: 1,
+            start_time: 1,
+            generation: "g".to_owned(),
+            elements: HashMap::new(),
+            captured_at,
+            state: SnapshotState::Live,
+            image_path,
+        }
+    }
+
+    fn temporary_image_path(registry: &Registry, suffix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "maka-cu-{}-{}-{suffix}.png",
+            std::process::id(),
+            registry.next.load(Ordering::Relaxed)
+        ))
     }
 
     #[test]
-    fn compatibility_payload_is_bounded_and_explicit() {
-        assert!(compat_payload(&json!({"value":"safe"}), "compat_type_text").is_ok());
-        assert_eq!(
-            compat_payload(&json!({"value":"line\nfeed"}), "compat_type_text")
-                .unwrap_err()
-                .1,
-            "compat_payload_invalid"
-        );
-        assert_eq!(
-            compat_payload(&json!({"value":"unexpected"}), "compat_press_enter")
-                .unwrap_err()
-                .1,
-            "compat_payload_invalid"
-        );
-        assert_eq!(
-            compat_payload(&json!({"value":"x"}), "press_enter")
-                .unwrap_err()
-                .1,
-            "compat_unsupported"
-        );
-    }
-
-    #[test]
-    fn compatibility_authorization_is_one_shot_in_registry() {
+    fn snapshot_registry_supersedes_per_window_and_evicts_per_session() {
         let mut registry = Registry::default();
-        registry.compat_authorizations.insert(
-            "auth-test".to_owned(),
-            CompatAuthorization {
-                snapshot_id: "s".to_owned(),
-                element_token: "e".to_owned(),
-                hwnd: 1,
-                pid: 1,
-                start_time: 1,
-                generation: "g".to_owned(),
-                helper_generation: "h".to_owned(),
-                runtime_id: vec![1],
-                op: "compat_press_enter".to_owned(),
-                payload: String::new(),
-                expires_at: Instant::now() + Duration::from_secs(1),
-            },
-        );
-        assert!(registry.compat_authorizations.remove("auth-test").is_some());
-        assert!(registry.compat_authorizations.remove("auth-test").is_none());
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn authorization_tokens_are_os_random_and_opaque() {
-        let first = new_authorization_token().expect("CoCreateGuid should succeed");
-        let second = new_authorization_token().expect("CoCreateGuid should succeed");
-        assert!(first.starts_with("auth-"));
-        assert!(second.starts_with("auth-"));
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn authorization_registry_prunes_expired_entries_and_enforces_capacity() {
+        registry.sessions.insert("s".to_owned());
         let now = Instant::now();
-        let mut registry = Registry::default();
-        registry.compat_authorizations.insert(
-            "expired".to_owned(),
-            CompatAuthorization {
-                snapshot_id: "s".to_owned(),
-                element_token: "e".to_owned(),
-                hwnd: 1,
-                pid: 1,
-                start_time: 1,
-                generation: "g".to_owned(),
-                helper_generation: "h".to_owned(),
-                runtime_id: vec![1],
-                op: "compat_press_enter".to_owned(),
-                payload: String::new(),
-                expires_at: now - Duration::from_secs(1),
-            },
-        );
-        prune_expired_authorizations(&mut registry, now);
-        assert!(registry.compat_authorizations.is_empty());
-        for index in 0..MAX_SNAPSHOTS {
-            registry.compat_authorizations.insert(
-                format!("live-{index}"),
-                CompatAuthorization {
-                    snapshot_id: "s".to_owned(),
-                    element_token: "e".to_owned(),
-                    hwnd: 1,
-                    pid: 1,
-                    start_time: 1,
-                    generation: "g".to_owned(),
-                    helper_generation: "h".to_owned(),
-                    runtime_id: vec![1],
-                    op: "compat_press_enter".to_owned(),
-                    payload: String::new(),
-                    expires_at: now + Duration::from_secs(30),
-                },
+        for index in 0..MAX_SNAPSHOTS_PER_SESSION {
+            registry.register_snapshot(
+                format!("s{index}"),
+                snapshot_for_test(
+                    "s",
+                    100 + index as isize,
+                    now - Duration::from_millis((MAX_SNAPSHOTS_PER_SESSION - index) as u64),
+                    None,
+                ),
             );
         }
-        assert!(!authorization_registry_has_capacity(&registry));
+        registry.register_snapshot("s8".to_owned(), snapshot_for_test("s", 108, now, None));
+
+        assert_eq!(registry.snapshots["s0"].state, SnapshotState::Evicted);
+        assert_eq!(registry.snapshots["s8"].state, SnapshotState::Live);
+        assert_eq!(
+            registry.resolve_snapshot("s", "s0").unwrap_err().1,
+            "snapshot_evicted"
+        );
+        assert_eq!(
+            registry
+                .snapshots
+                .values()
+                .filter(|snapshot| snapshot.state == SnapshotState::Live)
+                .count(),
+            MAX_SNAPSHOTS_PER_SESSION
+        );
+
+        registry.register_snapshot(
+            "same-window-new".to_owned(),
+            snapshot_for_test("s", 102, now, None),
+        );
+        assert_eq!(registry.snapshots["s2"].state, SnapshotState::Superseded);
+    }
+
+    #[test]
+    fn terminal_snapshot_states_delete_owned_images() {
+        let mut registry = Registry::default();
+        registry.sessions.insert("s".to_owned());
+        let path = temporary_image_path(&registry, "terminal");
+        write(&path, b"image").unwrap();
+        registry.track_image(path.clone(), 5);
+        let now = Instant::now();
+        registry.register_snapshot(
+            "old".to_owned(),
+            snapshot_for_test("s", 1, now, Some(path.clone())),
+        );
+        registry.register_snapshot("new".to_owned(), snapshot_for_test("s", 1, now, None));
+        assert_eq!(registry.snapshots["old"].state, SnapshotState::Superseded);
+        assert_eq!(
+            registry.resolve_snapshot("s", "old").unwrap_err().1,
+            "snapshot_superseded"
+        );
+        assert_eq!(registry.image_bytes, 0);
+        assert!(!path.exists());
+
+        let expired_path = temporary_image_path(&registry, "expired");
+        write(&expired_path, b"image").unwrap();
+        registry.track_image(expired_path.clone(), 5);
+        registry.register_snapshot(
+            "expired".to_owned(),
+            snapshot_for_test(
+                "s",
+                2,
+                Instant::now() - SNAPSHOT_TTL - Duration::from_secs(1),
+                Some(expired_path.clone()),
+            ),
+        );
+        assert_eq!(
+            registry.resolve_snapshot("s", "expired").unwrap_err().1,
+            "snapshot_expired"
+        );
+        assert!(!expired_path.exists());
+        assert_eq!(registry.image_bytes, 0);
+    }
+
+    #[test]
+    fn session_end_releases_snapshot_and_unattached_images() {
+        let mut registry = Registry::default();
+        registry.sessions.insert("s".to_owned());
+        let snapshot_path = temporary_image_path(&registry, "session-snapshot");
+        let capture_path = temporary_image_path(&registry, "session-capture");
+        write(&snapshot_path, b"image").unwrap();
+        write(&capture_path, b"capture").unwrap();
+        registry.track_image(snapshot_path.clone(), 5);
+        registry.track_image(capture_path.clone(), 7);
+        registry.register_snapshot(
+            "session-snapshot".to_owned(),
+            snapshot_for_test("s", 1, Instant::now(), Some(snapshot_path.clone())),
+        );
+        registry.unattached_images.insert(
+            capture_path.clone(),
+            UnattachedImage {
+                session: "s".to_owned(),
+                captured_at: Instant::now(),
+            },
+        );
+        let released = registry.end_session("s");
+        assert_eq!(released, (1, 2));
+        assert!(!snapshot_path.exists());
+        assert!(!capture_path.exists());
+        assert_eq!(registry.image_bytes, 0);
+    }
+
+    #[test]
+    fn expired_unattached_images_are_removed_on_the_snapshot_clock() {
+        let mut registry = Registry::default();
+        registry.sessions.insert("s".to_owned());
+        let path = temporary_image_path(&registry, "expired-capture");
+        write(&path, b"capture").unwrap();
+        registry.track_image(path.clone(), 7);
+        registry.unattached_images.insert(
+            path.clone(),
+            UnattachedImage {
+                session: "s".to_owned(),
+                captured_at: Instant::now() - SNAPSHOT_TTL - Duration::from_secs(1),
+            },
+        );
+        registry.reap_expired(Instant::now());
+        assert!(!path.exists());
+        assert_eq!(registry.image_bytes, 0);
+        assert!(registry.unattached_images.is_empty());
+    }
+
+    #[test]
+    fn image_budget_rejects_a_single_image_larger_than_available_space() {
+        let mut registry = Registry {
+            image_bytes: MAX_IMAGE_DIR_BYTES,
+            ..Registry::default()
+        };
+        assert!(!registry.make_room_for_image(1));
+    }
+
+    #[test]
+    fn oversized_observation_is_bounded_without_rpc_error() {
+        let many_elements = (0..10_000)
+            .map(|_| json!({"title":"x".repeat(256)}))
+            .collect::<Vec<_>>();
+        let many_nodes = (0..10_000)
+            .map(|_| json!({"name":"x".repeat(256)}))
+            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+        write_rpc(
+            &mut out,
+            Some(json!(1)),
+            Some(json!({
+                "snapshot": {
+                    "snapshotId": "s1",
+                    "target": {"title": "target"},
+                    "elements": many_elements,
+                    "tree": {"nodes": many_nodes}
+                }
+            })),
+            None,
+        );
+        let line = out.strip_suffix(b"\n").unwrap_or(&out);
+        assert!(line.len() <= MAX_RESPONSE_BYTES);
+        let response: Value = serde_json::from_slice(line).unwrap();
+        assert!(response.get("error").is_none());
+        assert!(response["result"]["snapshot"]["elements"]
+            .as_array()
+            .is_some_and(|elements| elements.len() < 10_000));
     }
 }
 
@@ -3775,190 +4031,6 @@ mod platform {
         // queue, not the application-level effect. Without an app-specific
         // oracle, especially for Enter, keep the outcome unknown.
         Ok(("unknown", "key_readback_unavailable"))
-    }
-
-    /// Explicit compatibility input. This is intentionally separate from the
-    /// semantic pattern path: it never accepts coordinates, clipboard text,
-    /// PostMessage, or an implicit Enter fallback. The caller has already
-    /// spent the snapshot and authorization before entering this function.
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
-    pub fn compat_input(
-        hwnd: isize,
-        element: ElementRef,
-        op: &str,
-        payload: &str,
-        expected_pid: u32,
-        expected_start_time: u64,
-        expected_generation: &str,
-        cancelled: &AtomicBool,
-        report: &mut Option<Value>,
-    ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
-        if !matches!(op, "compat_type_text" | "compat_press_enter") {
-            return Err((-32602, "compat_unsupported"));
-        }
-        if op == "compat_type_text"
-            && (payload.chars().count() > MAX_TEXT || payload.chars().any(char::is_control))
-        {
-            return Err((-32602, "compat_payload_invalid"));
-        }
-        let hwnd = HWND(hwnd as *mut _);
-        if unsafe { !IsWindow(Some(hwnd)).as_bool() }
-            || unsafe { GetAncestor(hwnd, GA_ROOT) } != hwnd
-        {
-            return Ok(("refused", "target_not_top_level_window"));
-        }
-        if !unsafe { SetForegroundWindow(hwnd).as_bool() }
-            || unsafe { GetForegroundWindow() } != hwnd
-        {
-            return Ok(("refused", "foreground_mismatch"));
-        }
-        let uia = automation()?;
-        let root = unsafe {
-            uia.ElementFromHandle(hwnd)
-                .map_err(|_| (-32001, "uia_element_unavailable"))?
-        };
-        let condition = unsafe {
-            uia.CreateTrueCondition()
-                .map_err(|_| (-32001, "uia_condition_failed"))?
-        };
-        let all = unsafe {
-            root.FindAll(TreeScope_Descendants, &condition)
-                .map_err(|_| (-32001, "uia_observe_failed"))?
-        };
-        let count = unsafe { all.Length().unwrap_or(0).min(MAX_ELEMENTS as i32) };
-        let mut target = None;
-        for i in 0..count {
-            let Ok(candidate) = (unsafe { all.GetElement(i) }) else {
-                continue;
-            };
-            if runtime_id(&candidate) != element.runtime_id
-                || unsafe {
-                    candidate
-                        .CurrentAutomationId()
-                        .map(text)
-                        .unwrap_or_default()
-                } != element.automation_id
-                || unsafe { candidate.CurrentName().map(text).unwrap_or_default() } != element.name
-                || unsafe {
-                    candidate
-                        .CurrentControlType()
-                        .map(|x| x.0)
-                        .unwrap_or_default()
-                } != element.control_type
-                || !unsafe {
-                    candidate
-                        .CurrentIsEnabled()
-                        .map(|x| x.as_bool())
-                        .unwrap_or(false)
-                }
-            {
-                continue;
-            }
-            target = Some(candidate);
-            break;
-        }
-        let target = target.ok_or((-32001, "element_changed"))?;
-        // UIA SetFocus is the element-level focus request; the Win32 call is
-        // retained for classic controls whose provider does not implement it.
-        if unsafe { target.SetFocus() }.is_err() {
-            let native = unsafe { target.CurrentNativeWindowHandle().ok() };
-            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(native) };
-        }
-        let focused =
-            unsafe { uia.GetFocusedElement() }.map_err(|_| (-32001, "compat_focus_refused"))?;
-        if runtime_id(&focused) != element.runtime_id {
-            return Ok(("refused", "focused_element_mismatch"));
-        }
-        let mut inputs = Vec::new();
-        if op == "compat_type_text" {
-            for code_unit in payload.encode_utf16() {
-                inputs.push(unicode_input(code_unit, false));
-                inputs.push(unicode_input(code_unit, true));
-            }
-        } else {
-            inputs.push(vk_input(0x0d, false));
-            inputs.push(vk_input(0x0d, true));
-        }
-        // Final checks immediately before SendInput.  These checks reduce the
-        // focus/identity race window but cannot make OS input dispatch atomic;
-        // any post-dispatch identity change is therefore reported unknown.
-        if unsafe { GetForegroundWindow() } != hwnd {
-            return Ok(("refused", "foreground_mismatch"));
-        }
-        let current = identity(hwnd.0 as isize)?;
-        if current.pid != expected_pid
-            || current.start_time != expected_start_time
-            || current.generation != expected_generation
-        {
-            return Ok(("refused", "stale_target_revalidate_failed"));
-        }
-        let focused =
-            unsafe { uia.GetFocusedElement() }.map_err(|_| (-32001, "compat_focus_refused"))?;
-        if runtime_id(&focused) != element.runtime_id {
-            return Ok(("refused", "focused_element_mismatch"));
-        }
-        if unsafe { GetForegroundWindow() } != hwnd {
-            return Ok(("refused", "foreground_mismatch"));
-        }
-        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-        if sent != inputs.len() as u32 {
-            return Ok(("unknown", "send_input_partial_or_failed"));
-        }
-        match identity(hwnd.0 as isize) {
-            Ok(current)
-                if current.pid == expected_pid
-                    && current.start_time == expected_start_time
-                    && current.generation == expected_generation => {}
-            _ => return Ok(("unknown", "post_dispatch_target_changed")),
-        }
-        if op == "compat_type_text" {
-            let same_identity = || {
-                identity(hwnd.0 as isize)
-                    .map(|current| {
-                        current.pid == expected_pid
-                            && current.start_time == expected_start_time
-                            && current.generation == expected_generation
-                    })
-                    .unwrap_or(false)
-                    && runtime_id(&target) == element.runtime_id
-            };
-            let value_report = readback::run(
-                || {
-                    if !same_identity() {
-                        return Err("readback_identity_changed");
-                    }
-                    if unsafe { target.CurrentIsPassword() }
-                        .map_err(|_| "readback_unavailable")?
-                        .as_bool()
-                    {
-                        return Err("readback_password_field_refused");
-                    }
-                    let pattern = unsafe {
-                        target.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                    }
-                    .map_err(|_| "readback_unavailable")?;
-                    let actual = unsafe { pattern.CurrentValue() }
-                        .map_err(|_| "readback_unavailable")
-                        .map(text)?;
-                    if actual.chars().count() > MAX_TEXT {
-                        return Err("readback_value_too_long");
-                    }
-                    if !same_identity() {
-                        return Err("readback_identity_changed");
-                    }
-                    Ok(actual == payload)
-                },
-                || cancelled.load(Ordering::Acquire),
-            );
-            let status = value_report.status;
-            let verification = value_report.verification;
-            *report = Some(
-                serde_json::to_value(value_report).map_err(|_| (-32001, "readback_unavailable"))?,
-            );
-            return Ok((status, verification));
-        }
-        Ok(("unknown", "enter_readback_unavailable"))
     }
 
     pub fn capture(params: Value) -> Result<Value, (i32, &'static str)> {
