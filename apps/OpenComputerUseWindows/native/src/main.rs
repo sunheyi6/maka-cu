@@ -43,20 +43,28 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
+#[cfg(windows)]
 use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod readback;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod scroll_readback;
 
 const PROTOCOL: &str = "maka.cu/2";
 const MAX_ELEMENTS: usize = 512;
 const MAX_SNAPSHOTS_PER_SESSION: usize = 8;
+const MAX_SNAPSHOT_TOMBSTONES_PER_SESSION: usize = 64;
 const SNAPSHOT_TTL: Duration = Duration::from_secs(120);
 const MAX_TEXT: usize = 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_DIR_BYTES: usize = 256 * 1024 * 1024;
+#[cfg(windows)]
 const MAX_CAPTURE_PIXELS: i64 = 16_000_000;
+#[cfg(windows)]
 const MAX_CAPTURE_PNG_BYTES: usize = 4 * 1024 * 1024;
 const SHUTDOWN_GRACE_MS: u64 = 1_000;
 static HOST_PID: AtomicU64 = AtomicU64::new(0);
@@ -70,12 +78,13 @@ struct RpcRequest {
     params: Value,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Registry {
     // Monotonic ids are used only for snapshot bookkeeping. The protocol
     // handshake and session set are owned by the same worker registry so a
     // request cannot bypass the shared lifecycle state.
     next: AtomicU64,
+    nonce: u128,
     snapshots: HashMap<String, Snapshot>,
     sessions: HashSet<String>,
     image_dir: Option<PathBuf>,
@@ -88,6 +97,12 @@ struct Registry {
     // is used only as the matching key; dispatch still quotes the opaque
     // snapshot token and digest.
     stable_ids: HashMap<(u32, isize), HashMap<Vec<i32>, u64>>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,13 +133,17 @@ struct Snapshot {
     pid: u32,
     start_time: u64,
     generation: String,
-    elements: HashMap<String, ElementRef>,
+    // Live snapshots retain their dispatch references. Terminal snapshots
+    // retain only bounded tombstone metadata, never the potentially large
+    // element map.
+    elements: Option<HashMap<String, ElementRef>>,
     captured_at: Instant,
     state: SnapshotState,
     image_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(windows), allow(dead_code))]
 struct ElementRef {
     automation_id: String,
     name: String,
@@ -146,6 +165,42 @@ struct StoredImage {
 }
 
 impl Registry {
+    fn new() -> Self {
+        let mut bytes = [0_u8; 16];
+        getrandom::fill(&mut bytes).expect("OS randomness is required for snapshot isolation");
+        Self {
+            next: AtomicU64::new(0),
+            nonce: u128::from_le_bytes(bytes),
+            snapshots: HashMap::new(),
+            sessions: HashSet::new(),
+            image_dir: None,
+            image_sizes: HashMap::new(),
+            image_created_at: HashMap::new(),
+            image_bytes: 0,
+            unattached_images: HashMap::new(),
+            host_pid: None,
+            stable_ids: HashMap::new(),
+        }
+    }
+
+    fn prune_tombstones(&mut self, session: &str) {
+        let mut terminal = self
+            .snapshots
+            .iter()
+            .filter(|(_, snapshot)| {
+                snapshot.session == session && snapshot.state != SnapshotState::Live
+            })
+            .map(|(id, snapshot)| (id.clone(), snapshot.captured_at))
+            .collect::<Vec<_>>();
+        terminal.sort_by_key(|(_, captured_at)| *captured_at);
+        let excess = terminal
+            .len()
+            .saturating_sub(MAX_SNAPSHOT_TOMBSTONES_PER_SESSION);
+        for (id, _) in terminal.into_iter().take(excess) {
+            self.snapshots.remove(&id);
+        }
+    }
+
     fn delete_image(&mut self, path: &Path) -> bool {
         let size = self.image_sizes.remove(path);
         self.image_created_at.remove(path);
@@ -178,6 +233,7 @@ impl Registry {
             for snapshot in self.snapshots.values_mut() {
                 if snapshot.image_path.as_ref() == Some(&oldest_path) {
                     snapshot.state = SnapshotState::Evicted;
+                    snapshot.elements = None;
                     snapshot.image_path = None;
                     break;
                 }
@@ -220,6 +276,7 @@ impl Registry {
                 && now.duration_since(snapshot.captured_at) >= SNAPSHOT_TTL
             {
                 snapshot.state = SnapshotState::Expired;
+                snapshot.elements = None;
                 if let Some(path) = snapshot.image_path.take() {
                     retired_images.push(path);
                 }
@@ -242,6 +299,15 @@ impl Registry {
         for path in retired_images {
             self.delete_image(&path);
         }
+        let sessions = self
+            .snapshots
+            .values()
+            .filter(|snapshot| snapshot.state != SnapshotState::Live)
+            .map(|snapshot| snapshot.session.clone())
+            .collect::<HashSet<_>>();
+        for session in sessions {
+            self.prune_tombstones(&session);
+        }
     }
 
     fn register_snapshot(&mut self, id: String, snapshot: Snapshot) {
@@ -255,6 +321,7 @@ impl Registry {
                 && existing.hwnd == snapshot.hwnd
             {
                 existing.state = SnapshotState::Superseded;
+                existing.elements = None;
                 if let Some(path) = existing.image_path.take() {
                     retired_images.push(path);
                 }
@@ -274,16 +341,19 @@ impl Registry {
             let (id, _) = live.remove(0);
             if let Some(existing) = self.snapshots.get_mut(&id) {
                 existing.state = SnapshotState::Evicted;
+                existing.elements = None;
                 if let Some(path) = existing.image_path.take() {
                     retired_images.push(path);
                 }
             }
         }
 
+        let session = snapshot.session.clone();
         self.snapshots.insert(id, snapshot);
         for path in retired_images {
             self.delete_image(&path);
         }
+        self.prune_tombstones(&session);
     }
 
     fn resolve_snapshot(
@@ -314,11 +384,14 @@ impl Registry {
             }
             snapshot.state = SnapshotState::Spent;
             let image_path = snapshot.image_path.take();
-            (snapshot.clone(), image_path)
+            let quoted = snapshot.clone();
+            snapshot.elements = None;
+            (quoted, image_path)
         };
         if let Some(path) = image_path {
             self.delete_image(&path);
         }
+        self.prune_tombstones(&snapshot.session);
         Ok(snapshot)
     }
 
@@ -665,16 +738,30 @@ fn write_rpc(
     } else {
         json!({"jsonrpc":"2.0", "id":id, "result":result.unwrap_or_else(|| json!({}))})
     };
-    if serde_json::to_vec(&response)
-        .map(|line| line.len() > MAX_RESPONSE_BYTES)
-        .unwrap_or(true)
-        && error.is_none()
-    {
-        shrink_oversized_observation(&mut response);
-    }
     let mut line = serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
-    if line.len() > MAX_RESPONSE_BYTES {
-        line = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32002,"message":"response_too_large"}})).unwrap();
+    if line.len() > MAX_RESPONSE_BYTES && error.is_none() {
+        let bytes = line.len();
+        response = json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "error":{
+                "code":-32002,
+                "message":"response_too_large",
+                "data":{"bytes":bytes,"limit":MAX_RESPONSE_BYTES}
+            }
+        });
+        line = serde_json::to_vec(&response).unwrap();
+    } else if line.len() > MAX_RESPONSE_BYTES {
+        line = serde_json::to_vec(&json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "error":{
+                "code":-32002,
+                "message":"response_too_large",
+                "data":{"bytes":line.len(),"limit":MAX_RESPONSE_BYTES}
+            }
+        }))
+        .unwrap();
     }
     if out.write_all(&line).is_err() || out.write_all(b"\n").is_err() {
         std::process::exit(2);
@@ -682,156 +769,10 @@ fn write_rpc(
     let _ = out.flush();
 }
 
-fn truncate_json_strings(value: &mut Value, max_chars: usize) {
-    match value {
-        Value::String(text) => {
-            if text.chars().count() > max_chars {
-                *text = text.chars().take(max_chars).collect();
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                truncate_json_strings(value, max_chars);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                truncate_json_strings(value, max_chars);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
 fn response_is_oversized(response: &Value) -> bool {
     serde_json::to_vec(response)
         .map(|line| line.len() > MAX_RESPONSE_BYTES)
         .unwrap_or(true)
-}
-
-fn truncate_observation_elements(response: &mut Value, max_len: usize) -> bool {
-    response
-        .get_mut("result")
-        .and_then(|result| result.get_mut("snapshot"))
-        .and_then(|snapshot| snapshot.get_mut("elements"))
-        .and_then(Value::as_array_mut)
-        .map(|elements| {
-            if elements.len() > max_len {
-                elements.truncate(max_len);
-                true
-            } else {
-                false
-            }
-        })
-        .unwrap_or(false)
-}
-
-fn truncate_observation_nodes(response: &mut Value, max_len: usize) -> bool {
-    response
-        .get_mut("result")
-        .and_then(|result| result.get_mut("snapshot"))
-        .and_then(|snapshot| snapshot.get_mut("tree"))
-        .and_then(|tree| tree.get_mut("nodes"))
-        .and_then(Value::as_array_mut)
-        .map(|nodes| {
-            if nodes.len() > max_len {
-                nodes.truncate(max_len);
-                true
-            } else {
-                false
-            }
-        })
-        .unwrap_or(false)
-}
-
-fn observation_node_count(response: &Value) -> usize {
-    response
-        .get("result")
-        .and_then(|result| result.get("snapshot"))
-        .and_then(|snapshot| snapshot.get("tree"))
-        .and_then(|tree| tree.get("nodes"))
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len)
-}
-
-fn mark_observation_tree_truncated(response: &mut Value) {
-    let node_count = observation_node_count(response);
-    if let Some(tree) = response
-        .get_mut("result")
-        .and_then(|result| result.get_mut("snapshot"))
-        .and_then(|snapshot| snapshot.get_mut("tree"))
-        .and_then(Value::as_object_mut)
-    {
-        tree.insert("nodeCount".to_owned(), json!(node_count));
-        tree.insert("truncated".to_owned(), json!(true));
-    }
-}
-
-fn mark_observation_elements_truncated(response: &mut Value) {
-    if let Some(snapshot) = response
-        .get_mut("result")
-        .and_then(|result| result.get_mut("snapshot"))
-        .and_then(Value::as_object_mut)
-    {
-        let truncated = snapshot
-            .entry("truncated".to_owned())
-            .or_insert_with(|| json!({}));
-        if let Some(truncated) = truncated.as_object_mut() {
-            truncated.insert("elements".to_owned(), json!(true));
-        }
-    }
-}
-
-fn shrink_oversized_observation(response: &mut Value) {
-    truncate_json_strings(response, 256);
-    if !response_is_oversized(response) {
-        return;
-    }
-
-    if response
-        .get("result")
-        .and_then(|result| result.get("snapshot"))
-        .and_then(Value::as_object)
-        .is_none()
-    {
-        return;
-    }
-
-    let elements_truncated = truncate_observation_elements(response, 128);
-    let nodes_truncated = truncate_observation_nodes(response, 128);
-    if elements_truncated {
-        mark_observation_elements_truncated(response);
-    }
-    if nodes_truncated {
-        mark_observation_tree_truncated(response);
-    }
-    if response_is_oversized(response) {
-        let snapshot = response
-            .get("result")
-            .and_then(|result| result.get("snapshot"))
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let snapshot_id = snapshot.get("snapshotId").cloned().unwrap_or(Value::Null);
-        let target = snapshot.get("target").cloned().unwrap_or(Value::Null);
-        let window_digest = snapshot.get("windowDigest").cloned().unwrap_or(Value::Null);
-        let image = snapshot.get("image").cloned().unwrap_or(Value::Null);
-        let minimal = json!({
-            "snapshotId":snapshot_id,
-            "target":target,
-            "windowDigest":window_digest,
-            "image":image,
-            "elements":[],
-            "truncated":{"elements":true,"depth":true},
-            "tree":{"nodes":[],"nodeCount":0,"truncated":true}
-        });
-        if let Some(snapshot) = response
-            .get_mut("result")
-            .and_then(|result| result.get_mut("snapshot"))
-        {
-            *snapshot = minimal;
-        }
-    }
 }
 
 fn dispatch(
@@ -1445,6 +1386,37 @@ fn generic_image_for_window(
 }
 
 fn generic_observe(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'static str)> {
+    let requested = params
+        .get("maxElements")
+        .and_then(Value::as_u64)
+        .unwrap_or(MAX_ELEMENTS as u64)
+        .clamp(1, MAX_ELEMENTS as u64) as usize;
+    let mut max_elements = requested;
+    let mut response_truncated = false;
+    for attempt in 0..4 {
+        let result =
+            generic_observe_once(params.clone(), registry, max_elements, response_truncated)?;
+        let envelope = json!({"jsonrpc":"2.0","id":Value::Null,"result":result});
+        if !response_is_oversized(&envelope) {
+            return Ok(envelope["result"].clone());
+        }
+        if attempt == 3 || max_elements == 1 {
+            // Keep the complete, protocol-shaped result intact. write_rpc
+            // will turn it into response_too_large with byte/limit details.
+            return Ok(envelope["result"].clone());
+        }
+        max_elements = max_elements.div_ceil(2);
+        response_truncated = true;
+    }
+    unreachable!("the observation budget loop always returns")
+}
+
+fn generic_observe_once(
+    params: Value,
+    registry: &mut Registry,
+    max_elements: usize,
+    response_truncated: bool,
+) -> Result<Value, (i32, &'static str)> {
     let session = require_session(&params, registry)?;
     let (hwnd, requested_pid) = target_window(&params)?;
     let Some(meta) = generic_windows()?.into_iter().find(|window| {
@@ -1456,7 +1428,11 @@ fn generic_observe(params: Value, registry: &mut Registry) -> Result<Value, (i32
             "The requested window is no longer available.",
         ));
     };
-    let raw = observe(&session, json!({"hwnd":hwnd}), registry);
+    let raw = observe(
+        &session,
+        json!({"hwnd":hwnd,"maxElements":max_elements}),
+        registry,
+    );
     let raw = match raw {
         Ok(raw) => raw,
         Err((-32001, "stale_target_revalidate_failed")) => {
@@ -1670,7 +1646,7 @@ fn generic_observe(params: Value, registry: &mut Registry) -> Result<Value, (i32
         "displays":platform::displays().unwrap_or_default(),
         "obscuringRects":[],
         "elements":elements,
-        "truncated":{"elements":raw.get("tree").and_then(|tree| tree.get("truncated")).and_then(Value::as_bool).unwrap_or(false),"depth":false}
+        "truncated":{"elements":response_truncated || raw.get("tree").and_then(|tree| tree.get("truncated")).and_then(Value::as_bool).unwrap_or(false),"depth":false}
     });
     if let Some(stored) = registry.snapshots.get_mut(snapshot_id) {
         stored.session = session;
@@ -1701,7 +1677,11 @@ fn generic_dispatch_element(
         Err((-32001, code)) => return Ok(snapshot_refusal(&params, code, "ax")),
         Err(error) => return Err(error),
     };
-    let Some(element) = quoted.elements.get(token) else {
+    let Some(element) = quoted
+        .elements
+        .as_ref()
+        .and_then(|elements| elements.get(token))
+    else {
         return Ok(generic_dispatch_refusal(
             &params,
             "element_unknown",
@@ -2036,7 +2016,11 @@ fn generic_dispatch_key(
         }
         Err(error) => return Err(error),
     };
-    let Some(element) = quoted.elements.get(token) else {
+    let Some(element) = quoted
+        .elements
+        .as_ref()
+        .and_then(|elements| elements.get(token))
+    else {
         return Ok(generic_dispatch_refusal(
             &params,
             "element_unknown",
@@ -2217,18 +2201,27 @@ fn observe(
     }
     let observed = platform::observe(hwnd)?;
     let generation = observed.generation.clone();
+    let max_elements = params
+        .get("maxElements")
+        .and_then(Value::as_u64)
+        .unwrap_or(MAX_ELEMENTS as u64)
+        .clamp(1, MAX_ELEMENTS as u64) as usize;
     // Reserve a disjoint token range per snapshot. Without this stride,
     // e(N+1) from a later observation could alias e(N) from the prior one.
     let token_seed = registry
         .next
         .fetch_add((MAX_ELEMENTS as u64) + 1, Ordering::Relaxed)
         .wrapping_add(1);
-    let snapshot_id = format!("s{:016x}", token_seed);
+    let snapshot_id = format!("s{:032x}{:016x}", registry.nonce, token_seed);
     let mut elements = HashMap::new();
     let mut rendered = Vec::with_capacity(observed.elements.len());
     let window_bounds = observed.window_bounds;
-    for (index, element) in observed.elements.into_iter().enumerate().take(MAX_ELEMENTS) {
-        let token = format!("e{:016x}", token_seed.wrapping_add(index as u64 + 1));
+    for (index, element) in observed.elements.into_iter().enumerate().take(max_elements) {
+        let token = format!(
+            "e{:032x}{:016x}",
+            registry.nonce,
+            token_seed.wrapping_add(index as u64 + 1)
+        );
         let digest = element_digest_for_observed(&element, window_bounds);
         elements.insert(
             token.clone(),
@@ -2251,7 +2244,7 @@ fn observe(
             pid: observed.pid,
             start_time: observed.start_time,
             generation: generation.clone(),
-            elements,
+            elements: Some(elements),
             captured_at: Instant::now(),
             state: SnapshotState::Live,
             image_path: None,
@@ -2305,7 +2298,8 @@ fn act(
     let snapshot = registry.spend_snapshot(snapshot_id)?;
     let element = snapshot
         .elements
-        .get(token)
+        .as_ref()
+        .and_then(|elements| elements.get(token))
         .ok_or((-32001, "element_token_unknown_in_snapshot"))?
         .clone();
     if !matches!(
@@ -2416,6 +2410,7 @@ fn act(
     )
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 struct VerificationContext<'a> {
     snapshot: &'a Snapshot,
     cancelled: &'a AtomicBool,
@@ -2463,7 +2458,6 @@ struct Identity {
 #[cfg(not(windows))]
 mod platform {
     use super::*;
-    pub fn initialize_worker() {}
     pub fn process_alive(pid: u32) -> bool {
         pid == std::process::id()
     }
@@ -2537,7 +2531,7 @@ mod tests {
                 pid: 1,
                 start_time: 1,
                 generation: "g".to_owned(),
-                elements: HashMap::from([(
+                elements: Some(HashMap::from([(
                     "e1".to_owned(),
                     ElementRef {
                         automation_id: "a".to_owned(),
@@ -2546,7 +2540,7 @@ mod tests {
                         runtime_id: vec![1],
                         digest: String::new(),
                     },
-                )]),
+                )])),
                 captured_at: Instant::now(),
                 state: SnapshotState::Live,
                 image_path: None,
@@ -2570,7 +2564,7 @@ mod tests {
                 pid: 1,
                 start_time: 1,
                 generation: "g".to_owned(),
-                elements: HashMap::new(),
+                elements: Some(HashMap::new()),
                 captured_at: Instant::now(),
                 state: SnapshotState::Live,
                 image_path: None,
@@ -2594,7 +2588,7 @@ mod tests {
             pid: 1,
             start_time: 1,
             generation: "g".to_owned(),
-            elements: HashMap::new(),
+            elements: Some(HashMap::new()),
             captured_at,
             state: SnapshotState::Live,
             image_path,
@@ -2748,7 +2742,37 @@ mod tests {
     }
 
     #[test]
-    fn oversized_observation_is_bounded_without_rpc_error() {
+    fn snapshot_ids_are_isolated_between_worker_generations() {
+        let first = Registry::default();
+        let second = Registry::default();
+        assert_ne!(first.nonce, second.nonce);
+    }
+
+    #[test]
+    fn terminal_snapshots_drop_elements_and_keep_bounded_tombstones() {
+        let mut registry = Registry::default();
+        registry.sessions.insert("s".to_owned());
+        for index in 0..(MAX_SNAPSHOT_TOMBSTONES_PER_SESSION + 8) {
+            registry.register_snapshot(
+                format!("snapshot-{index}"),
+                snapshot_for_test("s", index as isize + 1, Instant::now(), None),
+            );
+        }
+        assert!(
+            registry
+                .snapshots
+                .values()
+                .filter(|snapshot| snapshot.state != SnapshotState::Live)
+                .count()
+                <= MAX_SNAPSHOT_TOMBSTONES_PER_SESSION
+        );
+        assert!(registry.snapshots.values().all(|snapshot| {
+            snapshot.state == SnapshotState::Live || snapshot.elements.is_none()
+        }));
+    }
+
+    #[test]
+    fn oversized_observation_returns_protocol_error_without_mutating_payload() {
         let many_elements = (0..10_000)
             .map(|_| json!({"title":"x".repeat(256)}))
             .collect::<Vec<_>>();
@@ -2772,10 +2796,13 @@ mod tests {
         let line = out.strip_suffix(b"\n").unwrap_or(&out);
         assert!(line.len() <= MAX_RESPONSE_BYTES);
         let response: Value = serde_json::from_slice(line).unwrap();
-        assert!(response.get("error").is_none());
-        assert!(response["result"]["snapshot"]["elements"]
-            .as_array()
-            .is_some_and(|elements| elements.len() < 10_000));
+        assert_eq!(response["error"]["code"], json!(-32002));
+        assert_eq!(response["error"]["message"], json!("response_too_large"));
+        assert_eq!(
+            response["error"]["data"]["limit"],
+            json!(MAX_RESPONSE_BYTES)
+        );
+        assert!(response["error"]["data"]["bytes"].as_u64().unwrap() > MAX_RESPONSE_BYTES as u64);
     }
 }
 
