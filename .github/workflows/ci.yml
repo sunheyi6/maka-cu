@@ -41,18 +41,24 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
 
-      - name: Build release artifact
+      - name: Build Windows release artifact
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      - name: Build analysis release artifact
+        if: runner.os != 'Windows'
         run: cargo build --locked --release
 
       - name: Record Windows artifact digest
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $artifact = "target/release/maka-cu-windows-rust.exe"
+          $directory = "target/x86_64-pc-windows-msvc/release"
+          $artifact = "$directory/maka-cu-windows-rust.exe"
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $artifact
-          "commit=$env:GITHUB_SHA" | Out-File -Encoding utf8 target/release/provenance.txt
-          "artifact=$artifact" | Out-File -Encoding utf8 -Append target/release/provenance.txt
-          "sha256=$($hash.Hash.ToLowerInvariant())" | Out-File -Encoding utf8 -Append target/release/provenance.txt
+          "commit=$env:GITHUB_SHA" | Out-File -Encoding utf8 "$directory/provenance.txt"
+          "artifact=$artifact" | Out-File -Encoding utf8 -Append "$directory/provenance.txt"
+          "sha256=$($hash.Hash.ToLowerInvariant())" | Out-File -Encoding utf8 -Append "$directory/provenance.txt"
 
       - name: Upload Windows release artifact
         if: runner.os == 'Windows'
@@ -60,6 +66,6 @@ jobs:
         with:
           name: maka-cu-windows-rust-${{ github.sha }}
           path: |
-            apps/OpenComputerUseWindows/native/target/release/maka-cu-windows-rust.exe
-            apps/OpenComputerUseWindows/native/target/release/provenance.txt
+            apps/OpenComputerUseWindows/native/target/x86_64-pc-windows-msvc/release/maka-cu-windows-rust.exe
+            apps/OpenComputerUseWindows/native/target/x86_64-pc-windows-msvc/release/provenance.txt
           if-no-files-found: error

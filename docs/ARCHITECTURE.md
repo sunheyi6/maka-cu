@@ -9,7 +9,7 @@
 - `apps/OpenComputerUseFixture`
   本地 GUI fixture app，用来承载低风险、可预测的点击/输入/滚动/拖拽验证路径。
 - `apps/OpenComputerUseWindows`
-  Windows runtime 目录。现有 Go CLI/MCP 入口仍通过 PowerShell UI Automation bridge 提供旧的 9-tool 兼容面；`native/` 是共享 `maka.cu/2` 的 Rust/direct-COM executor，直接由 Maka host 按 stdio 协议托管。Rust native executor 已通过 fixture、WPF、Chromium 和 LibreOffice 的本机验证，但签名、打包、clean-machine 和更完整的真实应用矩阵仍未完成，因此暂不标记为 distribution-ready。
+  Windows runtime 目录。现有 Go CLI/MCP 入口仍通过 PowerShell UI Automation bridge 提供旧的 9-tool 兼容面；`native/` 是共享 `maka.cu/2` 的 Rust/direct-COM executor，直接由 Maka host 按 stdio 协议托管。native 产品边界是严格后台的原生桌面语义操作：当前只声明 `click` / `set_value`，拒绝 keyboard、point、generic launch 及未声明动作，不包含浏览器（浏览器由 Maka Browser Use/OpenCLI 负责）。Rust native executor 仍缺少签名、打包、clean-machine、并发前台用户和混合 DPI 的完整证据，因此暂不标记为 distribution-ready。
 - `apps/OpenComputerUseLinux`
   实验性 Linux runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 Python AT-SPI bridge，构建产物是 `open-computer-use`，并随已有 npm 包的 `dist/linux/<arch>/` bundled artifacts 分发。
 - `packages/OpenComputerUseKit`
@@ -141,6 +141,7 @@
 - 当前权限引导已经具备可运行 app、深链、拖拽辅助，以及一版更接近官方的 accessory panel 入场动画和返回 affordance；点击链路也已经补上独立 visual cursor、官方 asset fallback 和相对目标 window 的排序逻辑，并且在 overlay 可见期间会持续重申“排在目标 window 之上”，避免用户手动激活目标 app 后 cursor 被目标窗口重新盖住；但整体还没有完全复刻官方那套嵌入式 choreography / host 集成 / session approval 体验。
 - host protocol 的截图一律以文件路径返回，写在握手声明的 `imageDir` 里，生命周期与 snapshot 绑定；line-framed 通道上内联 base64 是 4/3 膨胀，而且一条 8 MB 的行会把其它待回的响应全部堵住。调试命令仍走 `ScreenCaptureKit` 捕获目标窗口，不再把普通 app 截图落盘到仓库或临时目录；编码前会按最大尺寸和目标字节数自适应缩小，避免复杂页面的大 PNG 触发 host 侧 MCP result 降级，同时 coordinate tools 继续按实际返回的 screenshot pixel 尺寸映射坐标；单次 ScreenCaptureKit capture 会设置超时，超时后省略 image block 而不是卡住整个 `get_app_state`。
 - host protocol 的会话状态是进程内内存态：每个 session 持有自己的 snapshot 集合、element token 字典和保留的 `AXUIElement` 引用；Windows native executor 同样按 120 秒 TTL、同窗 supersession 和每 session 八张 live snapshot 维护状态，并把图片账本绑定到 snapshot 或 session。`session.end` 会一次性释放 snapshot、删除本会话写出的图片，并把释放计数报回去，好让这类回归有断言可写。
+- Windows native executor 在建立任何 UIA/WGC worker 前启用 Per-Monitor-V2 DPI awareness，并分别报告 window/monitor 的实际 scale factor。每次语义 mutation 前后读取前台 HWND/PID、物理鼠标位置和 clipboard sequence；目标已经处于前台时直接拒绝，动作期间这些状态发生变化时不得报告成功。实现中不存在 `SetForegroundWindow`、`SetFocus`、全局 `SendInput` 或 generic process launch 路径。
 - 本仓库旧 MCP/CLI 产品面仍有历史坐标 API；它和 Maka 的 `maka.cu/2` host protocol 是不同边界。Windows、macOS 和后续平台接入 Maka 时必须共享 semantic-only host contract，不能从旧 MCP/CLI schema 派生第二套 model action space 或 fallback ladder。
 
 ## 主要验证路径

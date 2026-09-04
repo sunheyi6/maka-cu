@@ -27,9 +27,9 @@
 //! * every observation mints opaque, one-use element tokens;
 //! * mutation spends the token before dispatch and revalidates HWND/PID and
 //!   the element identity; and
-//! * keyboard input is only sent after the quoted top-level HWND, PID,
-//!   process-start time, window generation, and focused UIA element are
-//!   revalidated; there is no PostMessage, coordinate or screen fallback.
+//! * the production capability surface is semantic-only: there is no
+//!   foreground activation, global keyboard, pointer, clipboard, coordinate,
+//!   PostMessage, process-launch, or screen-rectangle fallback.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{create_dir_all, write};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -50,10 +49,6 @@ use std::time::{Duration, Instant};
 #[cfg(any(windows, test))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod readback;
-#[cfg(any(windows, test))]
-#[cfg_attr(not(windows), allow(dead_code))]
-mod scroll_readback;
-
 const PROTOCOL: &str = "maka.cu/2";
 const MAX_ELEMENTS: usize = 512;
 const MAX_SNAPSHOTS_PER_SESSION: usize = 8;
@@ -456,6 +451,7 @@ struct Pending {
 }
 
 fn main() {
+    platform::initialize_process();
     // stdin is read independently so the control plane can still settle a
     // cancel/shutdown while a UIA provider is blocked in the worker.
     let (input_tx, input_rx) = mpsc::channel::<Option<String>>();
@@ -795,7 +791,7 @@ fn dispatch(
         "apps.list" => generic_apps_list(),
         "observe" => generic_observe(params, registry),
         "dispatch.element" => generic_dispatch_element(params, registry, cancelled),
-        "dispatch.key" => generic_dispatch_key(params, registry, cancelled),
+        "dispatch.key" => generic_dispatch_key(params, registry),
         // The protocol keeps this endpoint for old callers, but coordinate
         // mutation is never a capability and must not resolve or spend a
         // snapshot before refusing.
@@ -807,7 +803,7 @@ fn dispatch(
             "screenRecording": cfg!(windows),
             "prompted": false
         })),
-        "apps.launch" => generic_launch(params),
+        "apps.launch" => generic_launch(),
         // Transport regression seam; never used by the model-facing runtime.
         "debug_sleep" => {
             let millis = params
@@ -868,9 +864,9 @@ fn host_hello(params: Value, registry: &mut Registry) -> Result<Value, (i32, &'s
         "pid": std::process::id(),
         "capabilities": {
             "captureStream": false,
-            "elementActions": ["click", "set_value", "select_text", "secondary_action", "scroll"],
+            "elementActions": ["click", "set_value"],
             "pointActions": [],
-            "keyActions": ["key"],
+            "keyActions": [],
             "imageFormats": ["png"]
         },
         "limits": {
@@ -1151,90 +1147,11 @@ fn generic_window_list() -> Result<Value, (i32, &'static str)> {
     Ok(json!({"ok":true,"windows":generic_windows()?}))
 }
 
-fn generic_launch(params: Value) -> Result<Value, (i32, &'static str)> {
-    let app = params
-        .get("app")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or((-32602, "missing_app"))?;
-    let path = Path::new(app);
-    if !path.is_absolute() || !path.is_file() {
-        return Ok(generic_domain_error(
-            "app_not_found",
-            "Windows launch requires an existing absolute executable path.",
-        ));
-    }
-    if path.extension().and_then(|extension| extension.to_str()) != Some("exe") {
-        return Ok(generic_domain_error(
-            "unsupported_action",
-            "Only executable files are launchable by this executor.",
-        ));
-    }
-    let before_foreground = platform::foreground_pid();
-    let child = match Command::new(path).spawn() {
-        Ok(child) => child,
-        Err(_) => {
-            return Ok(generic_domain_error(
-                "dispatch_refused",
-                "The operating system refused to launch the executable.",
-            ));
-        }
-    };
-    let pid = child.id();
-    // Dropping the child handle deliberately leaves ownership with the
-    // launched application. The executor observes it but does not terminate
-    // user-owned processes during session teardown.
-    drop(child);
-    let app_id = format!("win32:{}", app.to_ascii_lowercase());
-    let name = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or(app)
-        .to_owned();
-    let wait_budget = params.get("waitForWindowMs").and_then(Value::as_u64);
-    let started = Instant::now();
-    let (windows, reason) = if let Some(budget) = wait_budget {
-        let budget = budget.min(120_000);
-        loop {
-            let windows = launched_windows(pid)?;
-            if !windows.is_empty() || started.elapsed() >= Duration::from_millis(budget) {
-                let reason = if windows.is_empty() {
-                    "timeout"
-                } else {
-                    "window_appeared"
-                };
-                break (windows, reason);
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-    } else {
-        let windows = launched_windows(pid)?;
-        (windows, "not_requested")
-    };
-    let foreground_taken = platform::foreground_pid()
-        .is_some_and(|foreground| Some(foreground) != before_foreground && foreground == pid);
-    Ok(json!({
-        "ok":true,
-        "pid":pid,
-        "appId":app_id,
-        "name":name,
-        "foregroundTaken":foreground_taken,
-        "windows":windows,
-        "waited":{"ms":started.elapsed().as_millis(),"reason":reason}
-    }))
-}
-
-fn launched_windows(pid: u32) -> Result<Vec<Value>, (i32, &'static str)> {
-    Ok(generic_windows()?
-        .into_iter()
-        .filter(|window| window.get("pid").and_then(Value::as_u64) == Some(pid as u64))
-        .filter_map(|window| {
-            Some(json!({
-                "windowId":window.get("windowId")?.clone(),
-                "title":window.get("title").cloned().unwrap_or(Value::Null)
-            }))
-        })
-        .collect())
+fn generic_launch() -> Result<Value, (i32, &'static str)> {
+    Ok(generic_domain_error(
+        "unsupported_action",
+        "Launching applications is disabled by the background-only Windows executor.",
+    ))
 }
 
 fn generic_apps_list() -> Result<Value, (i32, &'static str)> {
@@ -1333,6 +1250,11 @@ fn store_capture(
         .map_err(|_| (-32001, "capture_failed"))?;
     let width = frame.get("width").and_then(Value::as_i64).unwrap_or(0);
     let height = frame.get("height").and_then(Value::as_i64).unwrap_or(0);
+    let scale = frame
+        .get("scaleFactor")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
     if width <= 0 || height <= 0 {
         return Err((-32001, "capture_failed"));
     }
@@ -1359,7 +1281,7 @@ fn store_capture(
             "heightPx":height,
             "byteLength":bytes.len(),
             "sha256":digest_bytes(&bytes),
-            "scale":1.0
+            "scale":scale
         }),
     })
 }
@@ -1526,33 +1448,15 @@ fn generic_observe_once(
                 .get("actions")
                 .and_then(Value::as_array)
                 .is_some_and(|values| {
-                    values
-                        .iter()
-                        .any(|value| value.as_str() == Some("click_element"))
+                    values.iter().any(|value| {
+                        matches!(
+                            value.as_str(),
+                            Some("click_element" | "select" | "toggle")
+                        )
+                    })
                 })
             {
                 actions.push(json!("press"));
-            }
-            if node
-                .get("actions")
-                .and_then(Value::as_array)
-                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("select")))
-            {
-                actions.push(json!("pick"));
-            }
-            if node
-                .get("actions")
-                .and_then(Value::as_array)
-                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("toggle")))
-            {
-                actions.push(json!("confirm"));
-            }
-            if node
-                .get("actions")
-                .and_then(Value::as_array)
-                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("scroll")))
-            {
-                actions.push(json!("scroll_down"));
             }
             let frame = node
                 .get("bounds")
@@ -1705,6 +1609,14 @@ fn generic_dispatch_element(
         .get("kind")
         .and_then(Value::as_str)
         .ok_or((-32602, "missing_action_kind"))?;
+    if !matches!(kind, "click" | "set_value") {
+        return Ok(generic_dispatch_refusal(
+            &params,
+            "unsupported_action",
+            "The background-only Windows executor supports only semantic click and set_value.",
+            "ax",
+        ));
+    }
     if kind == "click"
         && (action
             .get("button")
@@ -1720,13 +1632,8 @@ fn generic_dispatch_element(
             "ax",
         ));
     }
-    let (legacy_action, value, direction, amount) = match kind {
-        "click" => (
-            "click_element",
-            String::new(),
-            "vertical",
-            "small_increment",
-        ),
+    let (legacy_action, value) = match kind {
+        "click" => ("click_element", String::new()),
         "set_value" => (
             "set_value",
             action
@@ -1734,112 +1641,7 @@ fn generic_dispatch_element(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            "vertical",
-            "small_increment",
         ),
-        "scroll" => {
-            let pages = action.get("pages").and_then(Value::as_f64).unwrap_or(1.0);
-            if !pages.is_finite() || pages <= 0.0 {
-                return Ok(generic_dispatch_refusal(
-                    &params,
-                    "unsupported_action",
-                    "Scroll pages must be positive.",
-                    "ax",
-                ));
-            }
-            let (direction, amount) = match action.get("direction").and_then(Value::as_str) {
-                Some("up") => (
-                    "vertical",
-                    if pages >= 1.0 {
-                        "large_decrement"
-                    } else {
-                        "small_decrement"
-                    },
-                ),
-                Some("down") => (
-                    "vertical",
-                    if pages >= 1.0 {
-                        "large_increment"
-                    } else {
-                        "small_increment"
-                    },
-                ),
-                Some("left") => (
-                    "horizontal",
-                    if pages >= 1.0 {
-                        "large_decrement"
-                    } else {
-                        "small_decrement"
-                    },
-                ),
-                Some("right") => (
-                    "horizontal",
-                    if pages >= 1.0 {
-                        "large_increment"
-                    } else {
-                        "small_increment"
-                    },
-                ),
-                _ => {
-                    return Ok(generic_dispatch_refusal(
-                        &params,
-                        "unsupported_action",
-                        "The scroll direction is not supported by this executor.",
-                        "ax",
-                    ));
-                }
-            };
-            ("scroll", String::new(), direction, amount)
-        }
-        "select_text" => {
-            let text = action
-                .get("text")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or((-32602, "invalid_text_selection"))?;
-            if text.chars().count() > MAX_TEXT || text.chars().any(char::is_control) {
-                return Ok(generic_dispatch_refusal(
-                    &params,
-                    "unsupported_action",
-                    "The requested text selection is invalid or exceeds the executor limit.",
-                    "ax",
-                ));
-            }
-            (
-                "select_text",
-                text.to_owned(),
-                "vertical",
-                "small_increment",
-            )
-        }
-        "secondary_action" => {
-            let secondary = action
-                .get("action")
-                .and_then(Value::as_str)
-                .ok_or((-32602, "missing_secondary_action"))?;
-            match secondary {
-                "press" => (
-                    "click_element",
-                    String::new(),
-                    "vertical",
-                    "small_increment",
-                ),
-                "pick" => ("select", String::new(), "vertical", "small_increment"),
-                "confirm" => ("toggle", String::new(), "vertical", "small_increment"),
-                "scroll_up" => ("scroll", String::new(), "vertical", "large_decrement"),
-                "scroll_down" => ("scroll", String::new(), "vertical", "large_increment"),
-                "scroll_left" => ("scroll", String::new(), "horizontal", "large_decrement"),
-                "scroll_right" => ("scroll", String::new(), "horizontal", "large_increment"),
-                _ => {
-                    return Ok(generic_dispatch_refusal(
-                        &params,
-                        "unsupported_action",
-                        "The requested secondary action is not exposed by this element.",
-                        "ax",
-                    ));
-                }
-            }
-        }
         _ => {
             return Ok(generic_dispatch_refusal(
                 &params,
@@ -1849,40 +1651,11 @@ fn generic_dispatch_element(
             ));
         }
     };
-    let raw = if legacy_action == "select_text" {
-        let mut report = None;
-        match platform::select_text(
-            quoted.hwnd,
-            element.clone(),
-            &value,
-            VerificationContext {
-                snapshot: &quoted,
-                cancelled,
-                report: &mut report,
-            },
-        ) {
-            Ok((status, verification)) => {
-                // Only a verified mutation or an unknown post-dispatch result
-                // spends the quoted frame. A refusal before the mutation
-                // boundary must leave it available for an honest retry or
-                // inspection by the caller.
-                if matches!(status, "verified" | "unknown") {
-                    let _ = registry.spend_snapshot(snapshot_id);
-                }
-                Ok(json!({"outcome":{"status":status,"verification":verification}}))
-            }
-            Err((-32001, "text_pattern_unavailable"))
-            | Err((-32001, "text_document_range_unavailable"))
-            | Err((-32001, "text_not_found")) => Err((-32602, "unsupported_action")),
-            Err(error) => Err(error),
-        }
-    } else {
-        act(
-            json!({"snapshotId":snapshot_id,"elementToken":token,"action":legacy_action,"value":value,"direction":direction,"amount":amount}),
-            registry,
-            cancelled,
-        )
-    };
+    let raw = act(
+        json!({"snapshotId":snapshot_id,"elementToken":token,"action":legacy_action,"value":value}),
+        registry,
+        cancelled,
+    );
     let old = match raw {
         Ok(value) => value,
         Err((-32001, code)) if code.starts_with("snapshot_") => {
@@ -1945,14 +1718,12 @@ fn generic_dispatch_element(
         .unwrap_or("unknown");
     let method = match outcome.get("verification").and_then(Value::as_str) {
         Some("value_readback") => "value_readback",
-        Some("selection_readback") => "selection_readback",
-        Some("toggle_readback") => "tree_delta",
         _ => "action_result",
     };
-    let path = match legacy_action {
-        "set_value" => "ax_attribute",
-        "select" | "select_text" => "ax_select",
-        _ => "ax_action",
+    let path = if legacy_action == "set_value" {
+        "ax_attribute"
+    } else {
+        "ax_action"
     };
     if status == "verified" {
         let post = generic_observe(
@@ -1994,161 +1765,14 @@ fn generic_dispatch_element(
 fn generic_dispatch_key(
     params: Value,
     registry: &mut Registry,
-    cancelled: &AtomicBool,
 ) -> Result<Value, (i32, &'static str)> {
-    let session = require_session(&params, registry)?;
-    let snapshot_id = params
-        .get("snapshotId")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "missing_snapshot_id"))?;
-    let token = params
-        .get("focusToken")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "missing_focus_token"))?;
-    let expected = params
-        .get("expectElementDigest")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "missing_element_digest"))?;
-    let quoted = match registry.resolve_snapshot(&session, snapshot_id) {
-        Ok(snapshot) => snapshot,
-        Err((-32001, code)) => {
-            return Ok(snapshot_refusal(&params, code, "coordinate-background"));
-        }
-        Err(error) => return Err(error),
-    };
-    let Some(element) = quoted
-        .elements
-        .as_ref()
-        .and_then(|elements| elements.get(token))
-    else {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "element_unknown",
-            "The focused element is not in the snapshot.",
-            "coordinate-background",
-        ));
-    };
-    if expected != element.digest {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "element_digest_mismatch",
-            "The focused element digest does not match the quoted snapshot.",
-            "coordinate-background",
-        ));
-    }
-    let action = params
-        .get("action")
-        .and_then(Value::as_object)
-        .ok_or((-32602, "missing_action"))?;
-    if action.get("kind").and_then(Value::as_str) != Some("key") {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "unsupported_action",
-            "This executor supports only the maka.cu/2 key action.",
-            "coordinate-background",
-        ));
-    }
-    let key = action
-        .get("key")
-        .and_then(Value::as_str)
-        .ok_or((-32602, "missing_key"))?;
-    let modifiers = action
-        .get("modifiers")
-        .and_then(Value::as_array)
-        .ok_or((-32602, "missing_modifiers"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or((-32602, "invalid_modifier"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let focus_policy = params
-        .get("focusPolicy")
-        .and_then(Value::as_str)
-        .unwrap_or("require");
-    if !matches!(focus_policy, "require" | "acquire") {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "unsupported_action",
-            "The focus policy is not supported by this executor.",
-            "coordinate-background",
-        ));
-    }
-    if platform::validate_key(key, &modifiers).is_err() {
-        return Ok(generic_dispatch_refusal(
-            &params,
-            "unsupported_action",
-            "The requested key or modifier is not supported by this executor.",
-            "coordinate-background",
-        ));
-    }
-    if let Err((-32001, code)) = registry.spend_snapshot(snapshot_id) {
-        return Ok(snapshot_refusal(&params, code, "coordinate-background"));
-    }
-    let mut report = None;
-    let (status, verification) = match platform::dispatch_key(
-        quoted.hwnd,
-        element.clone(),
-        key,
-        &modifiers,
-        focus_policy,
-        VerificationContext {
-            snapshot: &quoted,
-            cancelled,
-            report: &mut report,
-        },
-    ) {
-        Ok(value) => value,
-        Err((-32001, "stale_target_revalidate_failed")) => {
-            return Ok(generic_dispatch_refusal(
-                &params,
-                "process_replaced",
-                "The target process or window changed.",
-                "coordinate-background",
-            ));
-        }
-        Err((-32001, "key_unsupported" | "modifier_unsupported")) => {
-            return Ok(generic_dispatch_refusal(
-                &params,
-                "unsupported_action",
-                "The requested key or modifier is not supported by this executor.",
-                "coordinate-background",
-            ));
-        }
-        Err(error) => {
-            return Ok(generic_dispatch_refusal(
-                &params,
-                "dispatch_refused",
-                if error.1 == "cancelled_before_dispatch" {
-                    "The keyboard action was cancelled before dispatch."
-                } else {
-                    "The keyboard action was refused before dispatch."
-                },
-                "coordinate-background",
-            ));
-        }
-    };
-    if status == "verified" {
-        return Ok(json!({
-            "ok":true,
-            "toolCallId":params.get("toolCallId").cloned().unwrap_or(Value::Null),
-            "outcome":"ok","tier":"coordinate-background","path":"win32_send_input","effect":"confirmed",
-            "verification":{"method":verification,"observedChange":true},
-            "settle":{"waitedMs":0,"quiesced":true,"reason":"quiesced"}
-        }));
-    }
-    Ok(json!({
-        "ok":false,
-        "toolCallId":params.get("toolCallId").cloned().unwrap_or(Value::Null),
-        "outcome":"unknown",
-        "tier":"coordinate-background",
-        "path":"win32_send_input",
-        "effect":"unverifiable",
-        "verification":{"method":verification,"observedChange":false},
-        "error":{"code":"outcome_unknown","message":"The keyboard action outcome is unknown.","detail":report.unwrap_or(Value::Null)}
-    }))
+    let _ = require_session(&params, registry)?;
+    Ok(generic_dispatch_refusal(
+        &params,
+        "unsupported_action",
+        "Keyboard input is disabled by the background-only Windows executor.",
+        "coordinate-background",
+    ))
 }
 
 fn generic_screen_capture(
@@ -2233,7 +1857,7 @@ fn observe(
                 digest: digest.clone(),
             },
         );
-        rendered.push(json!({"token":token,"name":element.name,"automationId":element.automation_id,"controlType":element.control_type,"runtimeId":element.runtime_id,"patterns":element.patterns,"actions":element.actions,"isEnabled":element.is_enabled,"focused":element.focused,"value":element.value,"scrollState":element.scroll_state,"bounds":element.bounds,"parentRuntimeId":element.parent_runtime_id,"depth":element.depth,"ancestorRoles":element.ancestor_roles,"siblingIndex":element.sibling_index,"digest":digest}));
+        rendered.push(json!({"token":token,"name":element.name,"automationId":element.automation_id,"controlType":element.control_type,"runtimeId":element.runtime_id,"patterns":element.patterns,"actions":element.actions,"isEnabled":element.is_enabled,"focused":element.focused,"value":element.value,"bounds":element.bounds,"parentRuntimeId":element.parent_runtime_id,"depth":element.depth,"ancestorRoles":element.ancestor_roles,"siblingIndex":element.sibling_index,"digest":digest}));
     }
     let element_count = rendered.len();
     registry.register_snapshot(
@@ -2302,10 +1926,7 @@ fn act(
         .and_then(|elements| elements.get(token))
         .ok_or((-32001, "element_token_unknown_in_snapshot"))?
         .clone();
-    if !matches!(
-        action,
-        "set_value" | "click_element" | "select" | "toggle" | "scroll"
-    ) {
+    if !matches!(action, "set_value" | "click_element") {
         return Err((-32602, "unsupported_action"));
     }
     let current = match platform::identity(snapshot.hwnd) {
@@ -2325,46 +1946,49 @@ fn act(
         .get("value")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let direction = params
-        .get("direction")
-        .and_then(Value::as_str)
-        .unwrap_or("vertical");
-    let amount = params
-        .get("amount")
-        .and_then(Value::as_str)
-        .unwrap_or("small_increment");
-    if action == "scroll" && !matches!(direction, "horizontal" | "vertical") {
-        return Err((-32602, "invalid_scroll_direction"));
-    }
-    if action == "scroll"
-        && !matches!(
-            amount,
-            "small_increment"
-                | "small_decrement"
-                | "large_increment"
-                | "large_decrement"
-                | "no_amount"
-        )
-    {
-        return Err((-32602, "invalid_scroll_amount"));
-    }
     if action == "set_value" && value.chars().count() > MAX_TEXT {
         return Err((-32602, "value_too_long"));
     }
+    let desktop_before = platform::desktop_state();
+    if desktop_before.foreground_hwnd == Some(snapshot.hwnd)
+        || desktop_before.foreground_pid == Some(snapshot.pid)
+    {
+        return Ok(json!({
+            "outcome": {
+                "tier":"uia-pattern",
+                "path":"none",
+                "status":"refused",
+                "effect":"none",
+                "snapshotSpent":true,
+                "verification":"target_is_foreground",
+                "readback":null
+            }
+        }));
+    }
+    let sentinel = DesktopSentinel::start(desktop_before);
     let mut readback = None;
-    let (mut status, mut verification) = platform::act(
+    let dispatch = platform::act(
         snapshot.hwnd,
         element,
         action,
         value,
-        direction,
-        amount,
         VerificationContext {
             snapshot: &snapshot,
             cancelled,
             report: &mut readback,
         },
-    )?;
+    );
+    let transient_interference = sentinel.finish();
+    let (mut status, mut verification) = dispatch?;
+    let desktop_after = platform::desktop_state();
+    if status != "refused" {
+        if let Some(reason) = transient_interference
+            .or_else(|| background_interference(desktop_before, desktop_after))
+        {
+            status = "unknown";
+            verification = reason;
+        }
+    }
     let post_dispatch_delay = params
         .get("debugPostDispatchDelayMs")
         .and_then(Value::as_u64)
@@ -2391,12 +2015,6 @@ fn act(
     let effect = if status == "verified" {
         if action == "set_value" {
             "value_set"
-        } else if action == "select" {
-            "selected"
-        } else if action == "toggle" {
-            "toggled"
-        } else if action == "scroll" {
-            "scrolled"
         } else {
             "invoked"
         }
@@ -2406,7 +2024,7 @@ fn act(
         "none"
     };
     Ok(
-        json!({"outcome":{"tier":"uia-pattern","path":match action { "set_value" => "value_pattern", "click_element" => "invoke_toggle_selection", "select" => "selection_item_pattern", "toggle" => "toggle_pattern", "scroll" => "scroll_pattern", _ => "none" },"status":status,"effect":effect,"snapshotSpent":true,"verification":verification,"readback":readback}}),
+        json!({"outcome":{"tier":"uia-pattern","path":match action { "set_value" => "value_pattern", "click_element" => "invoke_toggle_selection", _ => "none" },"status":status,"effect":effect,"snapshotSpent":true,"verification":verification,"readback":readback}}),
     )
 }
 
@@ -2427,7 +2045,6 @@ struct ObservedElement {
     patterns: Vec<&'static str>,
     is_enabled: bool,
     value: Option<String>,
-    scroll_state: Option<Value>,
     // Absolute screen-pixel bounds from UIA. The protocol façade converts
     // these to window-local logical points exactly once.
     bounds: [i32; 4],
@@ -2455,14 +2072,75 @@ struct Identity {
     generation: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DesktopState {
+    foreground_hwnd: Option<isize>,
+    foreground_pid: Option<u32>,
+    pointer: Option<(i32, i32)>,
+    clipboard_sequence: u32,
+}
+
+fn background_interference(before: DesktopState, after: DesktopState) -> Option<&'static str> {
+    if before.foreground_hwnd != after.foreground_hwnd
+        || before.foreground_pid != after.foreground_pid
+    {
+        return Some("foreground_changed_during_dispatch");
+    }
+    if before.pointer != after.pointer {
+        return Some("pointer_changed_during_dispatch");
+    }
+    if before.clipboard_sequence != after.clipboard_sequence {
+        return Some("clipboard_changed_during_dispatch");
+    }
+    None
+}
+
+struct DesktopSentinel {
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<Option<&'static str>>,
+}
+
+impl DesktopSentinel {
+    fn start(baseline: DesktopState) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let monitor_stop = stop.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let handle = thread::spawn(move || {
+            let _ = ready_tx.send(());
+            while !monitor_stop.load(Ordering::Acquire) {
+                if let Some(reason) = background_interference(baseline, platform::desktop_state()) {
+                    return Some(reason);
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            None
+        });
+        let _ = ready_rx.recv();
+        Self { stop, handle }
+    }
+
+    fn finish(self) -> Option<&'static str> {
+        self.stop.store(true, Ordering::Release);
+        self.handle
+            .join()
+            .unwrap_or(Some("desktop_sentinel_failed"))
+    }
+}
+
 #[cfg(not(windows))]
 mod platform {
     use super::*;
+    pub fn initialize_process() {}
+    pub fn desktop_state() -> DesktopState {
+        DesktopState {
+            foreground_hwnd: None,
+            foreground_pid: None,
+            pointer: None,
+            clipboard_sequence: 0,
+        }
+    }
     pub fn process_alive(pid: u32) -> bool {
         pid == std::process::id()
-    }
-    pub fn foreground_pid() -> Option<u32> {
-        None
     }
     pub fn displays() -> Result<Vec<Value>, (i32, &'static str)> {
         Ok(Vec::new())
@@ -2481,29 +2159,6 @@ mod platform {
         _: ElementRef,
         _: &str,
         _: &str,
-        _: &str,
-        _: &str,
-        _: VerificationContext<'_>,
-    ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
-        Err((-32001, "windows_only"))
-    }
-    pub fn select_text(
-        _: isize,
-        _: ElementRef,
-        _: &str,
-        _: VerificationContext<'_>,
-    ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
-        Err((-32001, "windows_only"))
-    }
-    pub fn validate_key(_: &str, _: &[String]) -> Result<(), (i32, &'static str)> {
-        Err((-32001, "windows_only"))
-    }
-    pub fn dispatch_key(
-        _: isize,
-        _: ElementRef,
-        _: &str,
-        _: &[String],
-        _: &str,
         _: VerificationContext<'_>,
     ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
         Err((-32001, "windows_only"))
@@ -2519,6 +2174,100 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_profile_advertises_semantic_actions_only() {
+        let mut registry = Registry::default();
+        let image_dir = std::env::temp_dir().join(format!(
+            "maka-cu-hello-{}-{:032x}",
+            std::process::id(),
+            registry.nonce
+        ));
+        let response = host_hello(
+            json!({
+                "protocol": PROTOCOL,
+                "allowGlobalPointer": false,
+                "hostPid": std::process::id(),
+                "imageDir": image_dir
+            }),
+            &mut registry,
+        )
+        .expect("background-only handshake should succeed");
+
+        assert_eq!(
+            response["capabilities"]["elementActions"],
+            json!(["click", "set_value"])
+        );
+        assert_eq!(response["capabilities"]["pointActions"], json!([]));
+        assert_eq!(response["capabilities"]["keyActions"], json!([]));
+
+        if let Some(directory) = registry.image_dir.take() {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+
+    #[test]
+    fn background_profile_refuses_launch_and_keyboard_without_spending_snapshot() {
+        let launch = generic_launch().expect("launch refusal is a domain result");
+        assert_eq!(launch["ok"], json!(false));
+        assert_eq!(launch["error"]["code"], json!("unsupported_action"));
+
+        let mut registry = Registry::default();
+        registry.sessions.insert("s".to_owned());
+        registry.snapshots.insert(
+            "s1".to_owned(),
+            snapshot_for_test("s", 1, Instant::now(), None),
+        );
+        let key = generic_dispatch_key(
+            json!({"session":"s","snapshotId":"s1","toolCallId":"key-1"}),
+            &mut registry,
+        )
+        .expect("keyboard refusal is a domain result");
+        assert_eq!(key["outcome"], json!("refused"));
+        assert_eq!(key["error"]["code"], json!("unsupported_action"));
+        assert_eq!(registry.snapshots["s1"].state, SnapshotState::Live);
+    }
+
+    #[test]
+    fn background_guard_detects_foreground_pointer_and_clipboard_changes() {
+        let baseline = DesktopState {
+            foreground_hwnd: Some(10),
+            foreground_pid: Some(20),
+            pointer: Some((30, 40)),
+            clipboard_sequence: 50,
+        };
+        assert_eq!(background_interference(baseline, baseline), None);
+        assert_eq!(
+            background_interference(
+                baseline,
+                DesktopState {
+                    foreground_hwnd: Some(11),
+                    ..baseline
+                }
+            ),
+            Some("foreground_changed_during_dispatch")
+        );
+        assert_eq!(
+            background_interference(
+                baseline,
+                DesktopState {
+                    pointer: Some((31, 40)),
+                    ..baseline
+                }
+            ),
+            Some("pointer_changed_during_dispatch")
+        );
+        assert_eq!(
+            background_interference(
+                baseline,
+                DesktopState {
+                    clipboard_sequence: 51,
+                    ..baseline
+                }
+            ),
+            Some("clipboard_changed_during_dispatch")
+        );
+    }
 
     #[test]
     fn snapshot_is_spent_before_platform_dispatch() {
@@ -2818,7 +2567,7 @@ mod platform {
     use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem};
     use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
     use windows::Graphics::SizeInt32;
-    use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM, POINT, RECT};
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
@@ -2833,6 +2582,7 @@ mod platform {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     };
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     use windows::Win32::System::Ole::{
         SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
     };
@@ -2847,27 +2597,51 @@ mod platform {
     };
     use windows::Win32::UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-        IUIAutomationScrollItemPattern, IUIAutomationScrollPattern,
-        IUIAutomationSelectionItemPattern, IUIAutomationTextPattern, IUIAutomationTogglePattern,
-        IUIAutomationTreeWalker, IUIAutomationValuePattern, ScrollAmount_LargeDecrement,
-        ScrollAmount_LargeIncrement, ScrollAmount_NoAmount, ScrollAmount_SmallDecrement,
-        ScrollAmount_SmallIncrement, TreeScope_Descendants, UIA_InvokePatternId,
-        UIA_ScrollItemPatternId, UIA_ScrollPatternId, UIA_SelectionItemPatternId,
-        UIA_TextPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
+        IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+        IUIAutomationValuePattern, TreeScope_Descendants, UIA_InvokePatternId,
+        UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-        VIRTUAL_KEY,
+    use windows::Win32::UI::HiDpi::{
+        GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
-        IsWindowVisible,
+        EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindow, IsWindowVisible,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, SetForegroundWindow};
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GA_ROOT};
     static COM_INIT: Once = Once::new();
     const IID_IDIRECT3D_DXGI_INTERFACE_ACCESS: GUID =
         GUID::from_u128(0xa9b3d012_3df2_4ee3_b8d1_8695f457d3c1);
+
+    pub fn initialize_process() {
+        // This must run before any worker thread touches UIA, WGC, or HWND
+        // geometry. A manifest may have established the same context already;
+        // in that case Windows refuses the duplicate call and no fallback to a
+        // DPI-unaware mode is attempted.
+        let _ =
+            unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    }
+
+    pub fn desktop_state() -> DesktopState {
+        let foreground = unsafe { GetForegroundWindow() };
+        let foreground_hwnd = (!foreground.0.is_null()).then_some(foreground.0 as isize);
+        let mut pid = 0u32;
+        if foreground_hwnd.is_some() {
+            unsafe {
+                GetWindowThreadProcessId(foreground, Some(&mut pid));
+            }
+        }
+        let mut point = POINT::default();
+        let pointer = unsafe { GetCursorPos(&mut point) }
+            .is_ok()
+            .then_some((point.x, point.y));
+        DesktopState {
+            foreground_hwnd,
+            foreground_pid: (pid > 0).then_some(pid),
+            pointer,
+            clipboard_sequence: unsafe { GetClipboardSequenceNumber() },
+        }
+    }
 
     /// The worker owns the COM apartment.  Keeping initialization here makes
     /// the stdio thread a pure control plane and avoids UIA calls crossing
@@ -2935,11 +2709,14 @@ mod platform {
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
         let id = format!("monitor:{:x}", monitor.0 as usize);
+        let mut dpi_x = 96u32;
+        let mut dpi_y = 96u32;
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         values.push(json!({
             "displayId": id,
             "logicalBounds":{"x":rect.left,"y":rect.top,"width":width,"height":height},
             "sourceBoundsPx":{"x":rect.left,"y":rect.top,"width":width,"height":height},
-            "scaleFactor":1.0
+            "scaleFactor":dpi_x as f64 / 96.0
         }));
         BOOL(1)
     }
@@ -2959,18 +2736,6 @@ mod platform {
             let _ = CloseHandle(handle);
         }
         alive
-    }
-
-    pub fn foreground_pid() -> Option<u32> {
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.0.is_null() {
-            return None;
-        }
-        let mut pid = 0u32;
-        unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
-        (pid > 0).then_some(pid)
     }
 
     fn process_app_id(pid: u32) -> Option<String> {
@@ -3284,37 +3049,6 @@ mod platform {
             if (has_selection || has_toggle) && !actions.contains(&"click_element") {
                 actions.push("click_element");
             }
-            if unsafe {
-                el.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
-                    .is_ok()
-            } {
-                patterns.push("Scroll");
-            }
-            if unsafe {
-                el.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
-                    .is_ok()
-            } {
-                patterns.push("ScrollItem");
-            }
-            if patterns.contains(&"Scroll") {
-                actions.push("scroll");
-            }
-            if unsafe {
-                el.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-                    .is_ok()
-            } {
-                actions.push("select_text");
-                patterns.push("Text");
-            }
-            let scroll_state = unsafe {
-                el.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
-                    .ok()
-                    .and_then(|p| {
-                        Some(json!({"source":"ScrollPattern.Current",
-                        "horizontalPercent":p.CurrentHorizontalScrollPercent().ok()?,
-                        "verticalPercent":p.CurrentVerticalScrollPercent().ok()?}))
-                    })
-            };
             if !actions.is_empty() || !name.is_empty() {
                 let (parent_runtime_id, depth, ancestor_roles, sibling_index) =
                     hierarchy_metadata(&uia, &root, &el);
@@ -3327,7 +3061,6 @@ mod platform {
                     patterns,
                     is_enabled,
                     value,
-                    scroll_state,
                     bounds,
                     focused,
                     parent_runtime_id,
@@ -3349,151 +3082,11 @@ mod platform {
         })
     }
 
-    fn same_element_identity(
-        element: &IUIAutomationElement,
-        quoted: &ElementRef,
-        hwnd: isize,
-        snapshot: &Snapshot,
-    ) -> bool {
-        identity(hwnd)
-            .map(|current| {
-                current.pid == snapshot.pid
-                    && current.start_time == snapshot.start_time
-                    && current.generation == snapshot.generation
-            })
-            .unwrap_or(false)
-            && runtime_id(element) == quoted.runtime_id
-    }
-
-    pub fn select_text(
-        hwnd: isize,
-        element: ElementRef,
-        value: &str,
-        verification: VerificationContext<'_>,
-    ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
-        let hwnd = HWND(hwnd as *mut _);
-        let uia = automation()?;
-        let root = unsafe {
-            uia.ElementFromHandle(hwnd)
-                .map_err(|_| (-32001, "uia_element_unavailable"))?
-        };
-        let condition = unsafe {
-            uia.CreateTrueCondition()
-                .map_err(|_| (-32001, "uia_condition_failed"))?
-        };
-        let all = unsafe {
-            root.FindAll(TreeScope_Descendants, &condition)
-                .map_err(|_| (-32001, "uia_observe_failed"))?
-        };
-        let count = unsafe { all.Length().unwrap_or(0).min(MAX_ELEMENTS as i32) };
-        let mut target = None;
-        for index in 0..count {
-            let Ok(candidate) = (unsafe { all.GetElement(index) }) else {
-                continue;
-            };
-            if runtime_id(&candidate) != element.runtime_id
-                || unsafe {
-                    candidate
-                        .CurrentAutomationId()
-                        .map(text)
-                        .unwrap_or_default()
-                } != element.automation_id
-                || unsafe { candidate.CurrentName().map(text).unwrap_or_default() } != element.name
-                || unsafe {
-                    candidate
-                        .CurrentControlType()
-                        .map(|value| value.0)
-                        .unwrap_or_default()
-                } != element.control_type
-            {
-                continue;
-            }
-            target = Some(candidate);
-            break;
-        }
-        let target = target.ok_or((-32001, "element_changed"))?;
-        if unsafe {
-            !target
-                .CurrentIsEnabled()
-                .map(|value| value.as_bool())
-                .unwrap_or(false)
-        } {
-            return Err((-32001, "element_disabled"));
-        }
-        let pattern = unsafe {
-            target
-                .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-                .map_err(|_| (-32001, "text_pattern_unavailable"))?
-        };
-        let document = unsafe {
-            pattern
-                .DocumentRange()
-                .map_err(|_| (-32001, "text_document_range_unavailable"))?
-        };
-        let needle: BSTR = value.into();
-        let range = unsafe {
-            document
-                .FindText(&needle, false, false)
-                .map_err(|_| (-32001, "text_not_found"))?
-        };
-        if !same_element_identity(
-            &target,
-            &element,
-            verification.snapshot.hwnd,
-            verification.snapshot,
-        ) {
-            return Ok(("refused", "stale_target_revalidate_failed"));
-        }
-        if verification.cancelled.load(Ordering::Acquire) {
-            return Ok(("refused", "cancelled_before_dispatch"));
-        }
-        if unsafe { range.Select() }.is_err() {
-            return Ok(("unknown", "text_selection_failed_after_dispatch"));
-        }
-        if identity(hwnd.0 as isize).map(|current| {
-            current.pid == verification.snapshot.pid
-                && current.start_time == verification.snapshot.start_time
-                && current.generation == verification.snapshot.generation
-        }) != Ok(true)
-        {
-            return Ok(("unknown", "post_dispatch_target_changed"));
-        }
-        let selection = unsafe {
-            pattern
-                .GetSelection()
-                .map_err(|_| (-32001, "selection_readback_unavailable"))?
-        };
-        let selection_count = unsafe { selection.Length().unwrap_or(0) };
-        if selection_count <= 0 {
-            return Ok(("unknown", "selection_readback_empty"));
-        }
-        let mut selected = String::new();
-        for index in 0..selection_count {
-            let range = unsafe {
-                selection
-                    .GetElement(index)
-                    .map_err(|_| (-32001, "selection_readback_unavailable"))?
-            };
-            let text = unsafe { range.GetText(-1) }
-                .map_err(|_| (-32001, "selection_readback_unavailable"))?;
-            selected.push_str(
-                &String::try_from(text).map_err(|_| (-32001, "selection_readback_unavailable"))?,
-            );
-        }
-        if selected == value {
-            Ok(("verified", "selection_readback_match"))
-        } else {
-            Ok(("unknown", "selection_readback_mismatch"))
-        }
-    }
-
     pub fn act(
         hwnd: isize,
         element: ElementRef,
         action: &str,
         value: &str,
-        direction: &str,
-        amount: &str,
         verification: VerificationContext<'_>,
     ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
         let hwnd = HWND(hwnd as *mut _);
@@ -3511,9 +3104,6 @@ mod platform {
             });
         if current_digest.as_deref() != Some(element.digest.as_str()) {
             return Err((-32001, "element_changed"));
-        }
-        if action == "select_text" {
-            return select_text(hwnd.0 as isize, element, value, verification);
         }
         let uia = automation()?;
         let root = unsafe {
@@ -3624,20 +3214,18 @@ mod platform {
                 *verification.report = Some(json!(report));
                 return Ok(outcome);
             }
-            if action == "select" {
-                let pattern = unsafe {
-                    el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                        UIA_SelectionItemPatternId,
-                    )
-                    .map_err(|_| (-32001, "selection_item_pattern_unavailable"))?
-                };
+            if let Ok(pattern) = unsafe {
+                el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                    UIA_SelectionItemPatternId,
+                )
+            } {
                 unsafe {
                     pattern.Select().map_err(|_| (-32001, "select_failed"))?;
                 }
                 let selected = unsafe {
                     pattern
                         .CurrentIsSelected()
-                        .map(|x| x.as_bool())
+                        .map(|state| state.as_bool())
                         .unwrap_or(false)
                 };
                 return if selected {
@@ -3646,11 +3234,9 @@ mod platform {
                     Ok(("unknown", "selection_readback_mismatch"))
                 };
             }
-            if action == "toggle" {
-                let pattern = unsafe {
-                    el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-                        .map_err(|_| (-32001, "toggle_pattern_unavailable"))?
-                };
+            if let Ok(pattern) =
+                unsafe { el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }
+            {
                 let before = unsafe {
                     pattern
                         .CurrentToggleState()
@@ -3670,127 +3256,6 @@ mod platform {
                     Ok(("unknown", "toggle_state_unchanged_after_action"))
                 };
             }
-            if action == "scroll" {
-                let pattern = match unsafe {
-                    el.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
-                } {
-                    Ok(p) => p,
-                    Err(_) => return Ok(("refused", "scroll_pattern_unavailable")),
-                };
-                let percent = |p: &IUIAutomationScrollPattern| unsafe {
-                    if direction == "horizontal" {
-                        p.CurrentHorizontalScrollPercent()
-                    } else {
-                        p.CurrentVerticalScrollPercent()
-                    }
-                };
-                let scrollable = |p: &IUIAutomationScrollPattern| unsafe {
-                    if direction == "horizontal" {
-                        p.CurrentHorizontallyScrollable()
-                    } else {
-                        p.CurrentVerticallyScrollable()
-                    }
-                };
-                let (before, can_scroll) = match (percent(&pattern), scrollable(&pattern)) {
-                    (Ok(before), Ok(can_scroll)) => (before, can_scroll.as_bool()),
-                    _ => return Ok(("refused", "scroll_state_unavailable")),
-                };
-                if let Some(reason) = scroll_readback::preflight(before, can_scroll, amount) {
-                    return Ok(("refused", reason));
-                }
-                let same_identity = || {
-                    let snapshot = verification.snapshot;
-                    identity(snapshot.hwnd)
-                        .map(|current| {
-                            current.pid == snapshot.pid
-                                && current.start_time == snapshot.start_time
-                                && current.generation == snapshot.generation
-                        })
-                        .unwrap_or(false)
-                        && !element.runtime_id.is_empty()
-                        && runtime_id(&el) == element.runtime_id
-                };
-                if !same_identity() {
-                    return Ok(("refused", "stale_target_revalidate_failed"));
-                }
-                if verification.cancelled.load(Ordering::Acquire) {
-                    return Ok(("refused", "cancelled_before_dispatch"));
-                }
-                let scroll = match amount {
-                    "small_increment" => ScrollAmount_SmallIncrement,
-                    "small_decrement" => ScrollAmount_SmallDecrement,
-                    "large_increment" => ScrollAmount_LargeIncrement,
-                    "large_decrement" => ScrollAmount_LargeDecrement,
-                    _ => return Ok(("refused", "scroll_no_amount")),
-                };
-                if unsafe {
-                    pattern.Scroll(
-                        if direction == "horizontal" {
-                            scroll
-                        } else {
-                            ScrollAmount_NoAmount
-                        },
-                        if direction == "vertical" {
-                            scroll
-                        } else {
-                            ScrollAmount_NoAmount
-                        },
-                    )
-                }
-                .is_err()
-                {
-                    return Ok(("unknown", "scroll_failed_after_dispatch"));
-                }
-                let report = scroll_readback::run(
-                    before,
-                    direction,
-                    amount,
-                    || {
-                        if !same_identity() {
-                            return Err("readback_identity_changed");
-                        }
-                        let fresh = unsafe {
-                            el.GetCurrentPatternAs::<IUIAutomationScrollPattern>(
-                                UIA_ScrollPatternId,
-                            )
-                        }
-                        .map_err(|_| "scroll_readback_unavailable")?;
-                        if !scrollable(&fresh)
-                            .map_err(|_| "scroll_readback_unavailable")?
-                            .as_bool()
-                        {
-                            return Err("scroll_readback_axis_not_scrollable");
-                        }
-                        let after = percent(&fresh).map_err(|_| "scroll_readback_unavailable")?;
-                        if !same_identity() {
-                            return Err("readback_identity_changed");
-                        }
-                        Ok(after)
-                    },
-                    || verification.cancelled.load(Ordering::Acquire),
-                );
-                let outcome = (report.status, report.verification);
-                *verification.report = Some(json!(report));
-                return Ok(outcome);
-            }
-            if let Ok(pattern) = unsafe {
-                el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                    UIA_SelectionItemPatternId,
-                )
-            } {
-                unsafe {
-                    pattern.Select().map_err(|_| (-32001, "select_failed"))?;
-                }
-                return Ok(("verified", "selection_action_result"));
-            }
-            if let Ok(pattern) =
-                unsafe { el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }
-            {
-                unsafe {
-                    pattern.Toggle().map_err(|_| (-32001, "toggle_failed"))?;
-                }
-                return Ok(("verified", "toggle_action_result"));
-            }
             let pattern = unsafe {
                 el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                     .map_err(|_| (-32001, "element_not_actionable"))?
@@ -3798,266 +3263,9 @@ mod platform {
             unsafe {
                 pattern.Invoke().map_err(|_| (-32001, "invoke_failed"))?;
             }
-            return Ok(("verified", "invoke_action_result"));
+            return Ok(("unknown", "invoke_has_no_effect_readback"));
         }
         Err((-32001, "element_changed"))
-    }
-
-    fn named_key_virtual_key(key: &str) -> Option<u16> {
-        Some(match key {
-            "Return" => 0x0d,
-            "Tab" => 0x09,
-            "Space" => 0x20,
-            "Escape" => 0x1b,
-            "Backspace" => 0x08,
-            "ForwardDelete" => 0x2e,
-            "Up" => 0x26,
-            "Down" => 0x28,
-            "Left" => 0x25,
-            "Right" => 0x27,
-            "Home" => 0x24,
-            "End" => 0x23,
-            "PageUp" => 0x21,
-            "PageDown" => 0x22,
-            "F1" => 0x70,
-            "F2" => 0x71,
-            "F3" => 0x72,
-            "F4" => 0x73,
-            "F5" => 0x74,
-            "F6" => 0x75,
-            "F7" => 0x76,
-            "F8" => 0x77,
-            "F9" => 0x78,
-            "F10" => 0x79,
-            "F11" => 0x7a,
-            "F12" => 0x7b,
-            _ => return None,
-        })
-    }
-
-    fn modifier_virtual_key(modifier: &str) -> Option<u16> {
-        Some(match modifier {
-            "command" => 0x5b, // VK_LWIN
-            "shift" => 0xa0,   // VK_LSHIFT
-            "option" => 0xa4,  // VK_LMENU
-            "control" => 0xa2, // VK_LCONTROL
-            // Windows has no stable virtual-key equivalent for a hardware Fn
-            // layer. Refusing it is safer than silently dropping the modifier.
-            _ => return None,
-        })
-    }
-
-    fn printable_key(key: &str) -> bool {
-        let mut chars = key.chars();
-        matches!(chars.next(), Some(value) if value.is_ascii() && value.is_ascii_graphic())
-            && chars.next().is_none()
-    }
-
-    pub fn validate_key(key: &str, modifiers: &[String]) -> Result<(), (i32, &'static str)> {
-        if named_key_virtual_key(key).is_none() && !printable_key(key) {
-            return Err((-32001, "key_unsupported"));
-        }
-        if modifiers
-            .iter()
-            .any(|modifier| modifier_virtual_key(modifier).is_none())
-        {
-            return Err((-32001, "modifier_unsupported"));
-        }
-        Ok(())
-    }
-
-    fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(0),
-                    wScan: code_unit,
-                    dwFlags: if key_up {
-                        KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-                    } else {
-                        KEYEVENTF_UNICODE
-                    },
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        }
-    }
-
-    fn vk_input(key: u16, key_up: bool) -> INPUT {
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(key),
-                    wScan: 0,
-                    dwFlags: if key_up {
-                        KEYEVENTF_KEYUP
-                    } else {
-                        Default::default()
-                    },
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        }
-    }
-
-    fn key_inputs(key: &str, modifiers: &[String]) -> Result<Vec<INPUT>, (i32, &'static str)> {
-        validate_key(key, modifiers)?;
-        let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
-        for modifier in modifiers {
-            inputs.push(vk_input(
-                modifier_virtual_key(modifier).ok_or((-32001, "modifier_unsupported"))?,
-                false,
-            ));
-        }
-        if let Some(virtual_key) = named_key_virtual_key(key) {
-            inputs.push(vk_input(virtual_key, false));
-            inputs.push(vk_input(virtual_key, true));
-        } else {
-            let code_unit = key
-                .encode_utf16()
-                .next()
-                .ok_or((-32001, "key_unsupported"))?;
-            inputs.push(unicode_input(code_unit, false));
-            inputs.push(unicode_input(code_unit, true));
-        }
-        for modifier in modifiers.iter().rev() {
-            inputs.push(vk_input(
-                modifier_virtual_key(modifier).ok_or((-32001, "modifier_unsupported"))?,
-                true,
-            ));
-        }
-        Ok(inputs)
-    }
-
-    /// Dispatch a protocol key only after rebuilding its quoted UIA focus
-    /// binding. `require` never changes focus; `acquire` may focus the named
-    /// element, but both policies require the exact target HWND to be in the
-    /// foreground immediately before SendInput.
-    pub fn dispatch_key(
-        hwnd: isize,
-        element: ElementRef,
-        key: &str,
-        modifiers: &[String],
-        focus_policy: &str,
-        verification: VerificationContext<'_>,
-    ) -> Result<(&'static str, &'static str), (i32, &'static str)> {
-        validate_key(key, modifiers)?;
-        let hwnd = HWND(hwnd as *mut _);
-        if unsafe { !IsWindow(Some(hwnd)).as_bool() }
-            || unsafe { GetAncestor(hwnd, GA_ROOT) } != hwnd
-        {
-            return Ok(("refused", "target_not_top_level_window"));
-        }
-        let current = identity(hwnd.0 as isize)?;
-        if current.pid != verification.snapshot.pid
-            || current.start_time != verification.snapshot.start_time
-            || current.generation != verification.snapshot.generation
-        {
-            return Ok(("refused", "stale_target_revalidate_failed"));
-        }
-        let uia = automation()?;
-        let root = unsafe {
-            uia.ElementFromHandle(hwnd)
-                .map_err(|_| (-32001, "uia_element_unavailable"))?
-        };
-        let condition = unsafe {
-            uia.CreateTrueCondition()
-                .map_err(|_| (-32001, "uia_condition_failed"))?
-        };
-        let all = unsafe {
-            root.FindAll(TreeScope_Descendants, &condition)
-                .map_err(|_| (-32001, "uia_observe_failed"))?
-        };
-        let count = unsafe { all.Length().unwrap_or(0).min(MAX_ELEMENTS as i32) };
-        let mut target = None;
-        for index in 0..count {
-            let Ok(candidate) = (unsafe { all.GetElement(index) }) else {
-                continue;
-            };
-            if runtime_id(&candidate) != element.runtime_id
-                || unsafe {
-                    candidate
-                        .CurrentAutomationId()
-                        .map(text)
-                        .unwrap_or_default()
-                } != element.automation_id
-                || unsafe { candidate.CurrentName().map(text).unwrap_or_default() } != element.name
-                || unsafe {
-                    candidate
-                        .CurrentControlType()
-                        .map(|value| value.0)
-                        .unwrap_or_default()
-                } != element.control_type
-                || !unsafe {
-                    candidate
-                        .CurrentIsEnabled()
-                        .map(|value| value.as_bool())
-                        .unwrap_or(false)
-                }
-            {
-                continue;
-            }
-            target = Some(candidate);
-            break;
-        }
-        let target = target.ok_or((-32001, "element_changed"))?;
-        if focus_policy == "acquire" {
-            if unsafe { target.SetFocus() }.is_err() {
-                let native = unsafe { target.CurrentNativeWindowHandle().ok() };
-                if let Some(native) = native {
-                    let _ = unsafe {
-                        windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(native))
-                    };
-                }
-            }
-            if !unsafe { SetForegroundWindow(hwnd).as_bool() }
-                || unsafe { GetForegroundWindow() } != hwnd
-            {
-                return Ok(("refused", "foreground_mismatch"));
-            }
-        } else if unsafe { GetForegroundWindow() } != hwnd {
-            return Ok(("refused", "foreground_mismatch"));
-        }
-        let focused = unsafe {
-            uia.GetFocusedElement()
-                .map_err(|_| (-32001, "focus_unavailable"))?
-        };
-        if runtime_id(&focused) != element.runtime_id {
-            return Ok(("refused", "focused_element_mismatch"));
-        }
-        if verification.cancelled.load(Ordering::Acquire) {
-            return Ok(("refused", "cancelled_before_dispatch"));
-        }
-        if unsafe { GetForegroundWindow() } != hwnd {
-            return Ok(("refused", "foreground_mismatch"));
-        }
-        let current = identity(hwnd.0 as isize)?;
-        if current.pid != verification.snapshot.pid
-            || current.start_time != verification.snapshot.start_time
-            || current.generation != verification.snapshot.generation
-        {
-            return Ok(("refused", "stale_target_revalidate_failed"));
-        }
-        let inputs = key_inputs(key, modifiers)?;
-        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-        if sent != inputs.len() as u32 {
-            return Ok(("unknown", "send_input_partial_or_failed"));
-        }
-        match identity(hwnd.0 as isize) {
-            Ok(current)
-                if current.pid == verification.snapshot.pid
-                    && current.start_time == verification.snapshot.start_time
-                    && current.generation == verification.snapshot.generation => {}
-            _ => return Ok(("unknown", "post_dispatch_target_changed")),
-        }
-        // A successful SendInput call proves delivery to the foreground input
-        // queue, not the application-level effect. Without an app-specific
-        // oracle, especially for Enter, keep the outcome unknown.
-        Ok(("unknown", "key_readback_unavailable"))
     }
 
     pub fn capture(params: Value) -> Result<Value, (i32, &'static str)> {
@@ -4080,9 +3288,10 @@ mod platform {
             );
         }
         let started = Instant::now();
+        let scale_factor = unsafe { GetDpiForWindow(hwnd) } as f64 / 96.0;
         match capture_wgc(hwnd) {
             Ok((width, height, png)) => Ok(
-                json!({"status":"available","path":"wgc_createforwindow","frame":{"width":width,"height":height,"bytes":png.len(),"format":"png","base64":base64::engine::general_purpose::STANDARD.encode(png),"elapsedMs":started.elapsed().as_millis()}}),
+                json!({"status":"available","path":"wgc_createforwindow","frame":{"width":width,"height":height,"scaleFactor":if scale_factor > 0.0 { scale_factor } else { 1.0 },"bytes":png.len(),"format":"png","base64":base64::engine::general_purpose::STANDARD.encode(png),"elapsedMs":started.elapsed().as_millis()}}),
             ),
             Err(reason) => Ok(
                 json!({"status":"unavailable","path":"none","reason":format!("capture_unavailable:{reason}")}),
@@ -4110,12 +3319,17 @@ mod platform {
             .and_then(|value| usize::from_str_radix(value, 16).ok())
             .ok_or((-32001, "display_inventory_unavailable"))?;
         let started = Instant::now();
+        let scale_factor = selected
+            .get("scaleFactor")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(1.0);
         match capture_wgc_monitor(HMONITOR(monitor as *mut _)) {
             Ok((width, height, png)) => Ok(json!({
                 "status":"available",
                 "path":"wgc_createmonitor",
                 "displayId":id,
-                "frame":{"width":width,"height":height,"bytes":png.len(),"format":"png","base64":base64::engine::general_purpose::STANDARD.encode(png),"elapsedMs":started.elapsed().as_millis()}
+                "frame":{"width":width,"height":height,"scaleFactor":scale_factor,"bytes":png.len(),"format":"png","base64":base64::engine::general_purpose::STANDARD.encode(png),"elapsedMs":started.elapsed().as_millis()}
             })),
             Err(reason) => Ok(json!({
                 "status":"unavailable",

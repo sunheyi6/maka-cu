@@ -32,17 +32,19 @@ interfaces directly. It supports:
 * `host.hello`, session ownership, and explicit top-level window enumeration;
 * bounded UIA observation with HWND/PID/generation identity;
 * one-use opaque snapshot/element tokens;
-* `ValuePattern.SetValue` and `InvokePattern.Invoke` semantic actions;
-* focus-bound `dispatch.key` for the closed `maka.cu/2` key vocabulary and
-  modifiers. It revalidates the quoted HWND/PID/process-start time/window
-  generation and UIA focus before `SendInput`; delivery without an
-  application-level readback remains `unknown`;
+* `ValuePattern.SetValue` and supported `Invoke`/`Toggle`/`SelectionItem`
+  semantic click actions;
+* unconditional typed refusals for `dispatch.key`, `dispatch.point`, and
+  `apps.launch`; these endpoints do not resolve or spend a snapshot and never
+  activate a window or emit global input;
 * target-window and whole-display `screen.capture` backed by
   `IGraphicsCaptureItemInterop::CreateForWindow(HWND)` and D3D11 staging
   readback (bounded PNG/base64; no GDI, screen-rectangle, or covering-pixel
   fallback); and
-* EOF/shutdown boundaries with no global-pointer, coordinate, PostMessage, or
-  screen fallback path.
+* Per-Monitor-V2 DPI awareness with measured per-window/per-monitor scale
+  factors; and
+* EOF/shutdown boundaries with no foreground activation, global keyboard,
+  global pointer, coordinate, clipboard, PostMessage, or screen fallback path.
 
 The observation response includes both the compact `elements` list and the
 driver-compatible `tree.nodes` view. Each live element carries the UIA
@@ -74,7 +76,7 @@ Use Cargo from `PATH`:
 cargo fmt -- --check
 cargo test --locked --all-targets --manifest-path apps/OpenComputerUseWindows/native/Cargo.toml
 cargo clippy --locked --all-targets --manifest-path apps/OpenComputerUseWindows/native/Cargo.toml -- -D warnings
-cargo build --locked --release --manifest-path apps/OpenComputerUseWindows/native/Cargo.toml
+cargo build --locked --release --target x86_64-pc-windows-msvc --manifest-path apps/OpenComputerUseWindows/native/Cargo.toml
 ```
 
 The protocol tests cover snapshot TTL, one-use dispatch, supersede/evict
@@ -88,11 +90,15 @@ three are tied to the same artifact.
 ## Safety and lifecycle boundary
 
 The helper never selects a window by title or foreground state for an action;
-the host must provide the HWND. Keyboard `focusPolicy=acquire` may bring that
-explicitly supplied HWND to the foreground only after the quoted identity is
-revalidated; `focusPolicy=require` never takes focus. An observe creates a
-registry entry, and `dispatch.element` spends that entry before revalidating the
-target and dispatching the COM pattern. A repeated token therefore fails closed
+the host must provide an already-running HWND. It advertises only semantic
+`click` and `set_value`. Keyboard, point, generic launch, selection, scrolling,
+and secondary action requests fail closed without a foreground/global fallback.
+The selected target must not already own the foreground when mutation begins.
+The executor records the foreground HWND/PID, pointer position, and clipboard
+sequence around the semantic operation; any change makes the result non-success
+even when the target may have changed. An observe creates a registry entry, and
+`dispatch.element` spends that entry before revalidating the target and
+dispatching the COM pattern. A repeated token therefore fails closed
 as `snapshot_spent`; a superseded, expired, or evicted token reports its
 corresponding lifecycle code. A token from a restarted or ended executor remains
 `snapshot_unknown`, while a recreated/changed target fails as `window_gone`,
@@ -105,3 +111,9 @@ dispatch reports cancellation intent while allowing the original operation to
 settle. A blocked COM provider still requires the host supervisor to kill the
 helper after the 2-second grace period; EOF and shutdown are bounded and do not
 wait for that worker.
+
+Browser workflows are intentionally absent. Maka routes them to Browser
+Use/OpenCLI, which can use browser-native page/DOM/accessibility state, tabs,
+navigation, and commands with stronger targeting and verification. Repeating
+browser control in this desktop helper would duplicate permissions and E2E
+coverage and encourage the foreground/coordinate fallbacks prohibited above.
