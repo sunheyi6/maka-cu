@@ -9,6 +9,8 @@
 
 ## 当前水位
 
+Windows native 的“严格后台”限制已调整为“不主动干扰焦点与输入”：允许已在前台的目标接受语义操作，仍禁止激活、全局键盘鼠标回退；桌面状态变化和不确定的动作效果不得报告为已验证成功。本地 SunCode 前台可见对话已跑通，但不替代下表列出的发布、并发和跨应用验证要求，质量等级不提升。
+
 | 区域 | 评分 | 原因 | 下一步 |
 | --- | --- | --- | --- |
 | 产品面 | B | macOS `maka.cu/2` 已具备 snapshot/token/digest、跨 revision stable ID 与 post-action AX diff、唯一 stale refetch、WebContent trusted click、数值 slider 和语义 scroll；旧 MCP/CLI 产品面仍保留 9 tools。 | 完成签名/notarization 与 Maka release 集成，并继续收敛复杂 AX 场景。 |

@@ -93,10 +93,12 @@ The helper never selects a window by title or foreground state for an action;
 the host must provide an already-running HWND. It advertises only semantic
 `click` and `set_value`. Keyboard, point, generic launch, selection, scrolling,
 and secondary action requests fail closed without a foreground/global fallback.
-The selected target must not already own the foreground when mutation begins.
-The executor records the foreground HWND/PID, pointer position, and clipboard
-sequence around the semantic operation; any change makes the result non-success
-even when the target may have changed. An observe creates a registry entry, and
+The selected target may already own the foreground when mutation begins: a
+visible front window remains a valid semantic target. The executor never
+activates a window, moves the pointer, or synthesizes global input. It records
+the foreground HWND/PID, pointer position, and clipboard sequence around the
+semantic operation; any change makes the result non-success even when the
+target may have changed. An observe creates a registry entry, and
 `dispatch.element` spends that entry before revalidating the target and
 dispatching the COM pattern. A repeated token therefore fails closed
 as `snapshot_spent`; a superseded, expired, or evicted token reports its

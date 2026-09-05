@@ -941,6 +941,51 @@ fn generic_dispatch_refusal(params: &Value, code: &str, message: &str, tier: &st
     })
 }
 
+fn generic_dispatch_element_failure(
+    params: &Value,
+    outcome: &str,
+    path: &str,
+    effect: &str,
+    verification_method: &str,
+    code: &str,
+    message: &str,
+    reason: Option<&str>,
+    snapshot_spent: bool,
+) -> Value {
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "snapshotSpent".to_owned(),
+        json!(if snapshot_spent { 1 } else { 0 }),
+    );
+    if let Some(reason) = reason {
+        detail.insert("reason".to_owned(), json!(reason));
+    }
+    json!({
+        "ok": false,
+        "toolCallId": params.get("toolCallId").cloned().unwrap_or(Value::Null),
+        "outcome": outcome,
+        "tier": "ax",
+        "path": path,
+        "effect": effect,
+        "verification": {"method": verification_method, "observedChange": false},
+        "error": {"code": code, "message": message, "detail": detail}
+    })
+}
+
+fn generic_dispatch_element_refusal(params: &Value, code: &str, message: &str) -> Value {
+    generic_dispatch_element_failure(
+        params,
+        "refused",
+        "none",
+        "unverifiable",
+        "none",
+        code,
+        message,
+        None,
+        false,
+    )
+}
+
 fn snapshot_refusal(params: &Value, code: &'static str, tier: &str) -> Value {
     let message = match code {
         "snapshot_spent" => "The snapshot has already been spent.",
@@ -1586,19 +1631,17 @@ fn generic_dispatch_element(
         .as_ref()
         .and_then(|elements| elements.get(token))
     else {
-        return Ok(generic_dispatch_refusal(
+        return Ok(generic_dispatch_element_refusal(
             &params,
             "element_unknown",
             "The element is not in the snapshot.",
-            "ax",
         ));
     };
     if expected != element.digest {
-        return Ok(generic_dispatch_refusal(
+        return Ok(generic_dispatch_element_refusal(
             &params,
             "element_digest_mismatch",
             "The element digest does not match the quoted snapshot.",
-            "ax",
         ));
     }
     let action = params
@@ -1610,11 +1653,10 @@ fn generic_dispatch_element(
         .and_then(Value::as_str)
         .ok_or((-32602, "missing_action_kind"))?;
     if !matches!(kind, "click" | "set_value") {
-        return Ok(generic_dispatch_refusal(
+        return Ok(generic_dispatch_element_refusal(
             &params,
             "unsupported_action",
             "The background-only Windows executor supports only semantic click and set_value.",
-            "ax",
         ));
     }
     if kind == "click"
@@ -1625,11 +1667,10 @@ fn generic_dispatch_element(
             != "left"
             || action.get("count").and_then(Value::as_u64).unwrap_or(1) != 1)
     {
-        return Ok(generic_dispatch_refusal(
+        return Ok(generic_dispatch_element_refusal(
             &params,
             "unsupported_action",
             "This executor supports only one semantic left click.",
-            "ax",
         ));
     }
     let (legacy_action, value) = match kind {
@@ -1643,13 +1684,17 @@ fn generic_dispatch_element(
                 .to_owned(),
         ),
         _ => {
-            return Ok(generic_dispatch_refusal(
+            return Ok(generic_dispatch_element_refusal(
                 &params,
                 "unsupported_action",
                 "The requested semantic action is not supported by this executor.",
-                "ax",
             ));
         }
+    };
+    let path = if legacy_action == "set_value" {
+        "ax_attribute"
+    } else {
+        "ax_action"
     };
     let raw = act(
         json!({"snapshotId":snapshot_id,"elementToken":token,"action":legacy_action,"value":value}),
@@ -1662,50 +1707,88 @@ fn generic_dispatch_element(
             return Ok(snapshot_refusal(&params, code, "ax"));
         }
         Err((-32001, "element_token_unknown_in_snapshot")) => {
-            return Ok(generic_dispatch_refusal(
+            return Ok(generic_dispatch_element_failure(
                 &params,
+                "refused",
+                "none",
+                "unverifiable",
+                "none",
                 "element_unknown",
                 "The element is not in the snapshot.",
-                "ax",
+                Some("element_token_unknown_in_snapshot"),
+                true,
             ));
         }
         Err((-32001, "stale_target_revalidate_failed")) => {
-            return Ok(generic_dispatch_refusal(
+            return Ok(generic_dispatch_element_failure(
                 &params,
+                "refused",
+                "none",
+                "unverifiable",
+                "none",
                 "process_replaced",
                 "The target process or window changed.",
-                "ax",
+                Some("stale_target_revalidate_failed"),
+                true,
             ));
         }
         Err((-32602, "unsupported_action")) => {
-            return Ok(generic_dispatch_refusal(
+            return Ok(generic_dispatch_element_failure(
                 &params,
+                "refused",
+                "none",
+                "unverifiable",
+                "none",
                 "element_not_actionable",
                 "The element does not expose this action.",
-                "ax",
+                Some("unsupported_action"),
+                true,
             ));
         }
         Err((
             -32001,
-            "element_not_actionable"
+            reason @ ("element_not_actionable"
             | "element_disabled"
             | "password_field_refused"
-            | "value_pattern_readonly",
+            | "value_pattern_readonly"),
         )) => {
-            return Ok(generic_dispatch_refusal(
+            return Ok(generic_dispatch_element_failure(
                 &params,
+                "refused",
+                "none",
+                "unverifiable",
+                "none",
                 "element_not_actionable",
                 "The element cannot safely perform this action.",
-                "ax",
+                Some(reason),
+                true,
             ));
         }
-        Err(_) => {
-            return Ok(generic_dispatch_refusal(
+        Err((-32001, "invoke_failed")) => {
+            return Ok(generic_dispatch_element_failure(
                 &params,
+                "unknown",
+                path,
+                "unverifiable",
+                "action_result",
+                "outcome_unknown",
+                "The action outcome is unknown.",
+                Some("invoke_failed"),
+                true,
+            ));
+        }
+        Err((_, reason)) => {
+            return Ok(generic_dispatch_element_failure(
+                &params,
+                "refused",
+                "none",
+                "unverifiable",
+                "none",
                 "dispatch_refused",
                 "The target refused the action.",
-                "ax",
-            ))
+                Some(reason),
+                true,
+            ));
         }
     };
     let outcome = old
@@ -1719,11 +1802,6 @@ fn generic_dispatch_element(
     let method = match outcome.get("verification").and_then(Value::as_str) {
         Some("value_readback") => "value_readback",
         _ => "action_result",
-    };
-    let path = if legacy_action == "set_value" {
-        "ax_attribute"
-    } else {
-        "ax_action"
     };
     if status == "verified" {
         let post = generic_observe(
@@ -1745,20 +1823,37 @@ fn generic_dispatch_element(
             "snapshot":post
         }));
     }
-    let code = if status == "unknown" {
-        "outcome_unknown"
-    } else {
-        "dispatch_refused"
-    };
-    Ok(generic_dispatch_refusal(
-        &params,
-        code,
-        if status == "unknown" {
-            "The action outcome is unknown."
+    let reason = outcome
+        .get("verification")
+        .and_then(Value::as_str)
+        .unwrap_or(if status == "unknown" {
+            "outcome_unknown"
         } else {
-            "The target refused the action."
-        },
-        "ax",
+            "dispatch_refused"
+        });
+    if status == "unknown" {
+        return Ok(generic_dispatch_element_failure(
+            &params,
+            "unknown",
+            path,
+            "unverifiable",
+            method,
+            "outcome_unknown",
+            "The action outcome is unknown.",
+            Some(reason),
+            true,
+        ));
+    }
+    Ok(generic_dispatch_element_failure(
+        &params,
+        "refused",
+        path,
+        "unverifiable",
+        "none",
+        "dispatch_refused",
+        "The target refused the action.",
+        Some(reason),
+        true,
     ))
 }
 
@@ -1950,21 +2045,6 @@ fn act(
         return Err((-32602, "value_too_long"));
     }
     let desktop_before = platform::desktop_state();
-    if desktop_before.foreground_hwnd == Some(snapshot.hwnd)
-        || desktop_before.foreground_pid == Some(snapshot.pid)
-    {
-        return Ok(json!({
-            "outcome": {
-                "tier":"uia-pattern",
-                "path":"none",
-                "status":"refused",
-                "effect":"none",
-                "snapshotSpent":true,
-                "verification":"target_is_foreground",
-                "readback":null
-            }
-        }));
-    }
     let sentinel = DesktopSentinel::start(desktop_before);
     let mut readback = None;
     let dispatch = platform::act(
@@ -2229,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn background_guard_detects_foreground_pointer_and_clipboard_changes() {
+    fn background_guard_allows_unchanged_target_foreground_and_detects_changes() {
         let baseline = DesktopState {
             foreground_hwnd: Some(10),
             foreground_pid: Some(20),
@@ -2267,6 +2347,69 @@ mod tests {
             ),
             Some("clipboard_changed_during_dispatch")
         );
+    }
+
+    #[test]
+    fn element_unknown_keeps_ax_path_and_marks_spent_snapshot() {
+        let response = generic_dispatch_element_failure(
+            &json!({"toolCallId":"call-unknown"}),
+            "unknown",
+            "ax_action",
+            "unverifiable",
+            "action_result",
+            "outcome_unknown",
+            "The action outcome is unknown.",
+            Some("invoke_has_no_effect_readback"),
+            true,
+        );
+
+        assert_eq!(response["ok"], json!(false));
+        assert_eq!(response["outcome"], json!("unknown"));
+        assert_eq!(response["path"], json!("ax_action"));
+        assert_eq!(response["effect"], json!("unverifiable"));
+        assert_eq!(response["verification"]["method"], json!("action_result"));
+        assert_eq!(response["error"]["detail"]["snapshotSpent"], json!(1));
+        assert_eq!(
+            response["error"]["detail"]["reason"],
+            json!("invoke_has_no_effect_readback")
+        );
+    }
+
+    #[test]
+    fn refused_act_keeps_reason_and_marks_spent_snapshot() {
+        let response = generic_dispatch_element_failure(
+            &json!({"toolCallId":"call-refused"}),
+            "refused",
+            "ax_attribute",
+            "unverifiable",
+            "none",
+            "dispatch_refused",
+            "The target refused the action.",
+            Some("value_pattern_readonly"),
+            true,
+        );
+
+        assert_eq!(response["outcome"], json!("refused"));
+        assert_eq!(response["path"], json!("ax_attribute"));
+        assert_eq!(response["verification"]["method"], json!("none"));
+        assert_eq!(response["error"]["detail"]["snapshotSpent"], json!(1));
+        assert_eq!(
+            response["error"]["detail"]["reason"],
+            json!("value_pattern_readonly")
+        );
+    }
+
+    #[test]
+    fn pre_dispatch_element_refusal_marks_snapshot_unspent() {
+        let response = generic_dispatch_element_refusal(
+            &json!({"toolCallId":"call-preflight"}),
+            "element_digest_mismatch",
+            "The element digest does not match the quoted snapshot.",
+        );
+
+        assert_eq!(response["outcome"], json!("refused"));
+        assert_eq!(response["path"], json!("none"));
+        assert_eq!(response["error"]["detail"]["snapshotSpent"], json!(0));
     }
 
     #[test]

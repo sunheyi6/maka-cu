@@ -16,7 +16,7 @@ Browser automation is excluded because Browser Use/OpenCLI can use browser-nativ
 ## Safety invariants
 
 - No `SetForegroundWindow`, `SetFocus`, global `SendInput`, physical-pointer movement, clipboard substitution, `PostMessage`, process-launch, or automatic foreground fallback exists in the native production path.
-- The target must already be running and must not be the foreground HWND/process when mutation starts.
+- The target must already be running; it may already be the foreground HWND/process when mutation starts because semantic UIA patterns do not require activation. The sentinel still rejects any foreground, pointer, or clipboard change during the operation.
 - A semantic operation is successful only when its UIA effect is verified and the foreground HWND/PID, pointer position, and clipboard sequence remain unchanged.
 - Unknown mutations are never retried automatically.
 - Unsupported application/toolkit behavior fails closed.
